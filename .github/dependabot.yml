@@ -18,8 +18,10 @@ updates:
           - "agents"
       dev-tooling:
         patterns:
-          - "oxfmt"
-          - "oxlint"
+          - "eslint"
+          - "@typescript-eslint/*"
+          - "typescript-eslint"
+          - "prettier"
           - "typescript"
           - "@types/*"
 
