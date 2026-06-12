@@ -21,13 +21,13 @@ export class SlackAgent extends Agent<Env> {
     this.slack = createSlackAdapter({
       botToken: this.env.SLACK_BOT_TOKEN,
       signingSecret: this.env.SLACK_SIGNING_SECRET,
-      mode: "webhook"
+      mode: "webhook",
     });
 
     this.chat = new Chat({
       userName: "ai-bot",
       adapters: { slack: this.slack },
-      state: createChatSdkState()
+      state: createChatSdkState(),
     });
 
     // To add an MCP server programmatically:
@@ -54,7 +54,7 @@ If the user asks to schedule a task, use the scheduleTask tool.`,
             getWeather: tool({
               description: "Get the current weather for a city",
               inputSchema: z.object({
-                city: z.string().describe("City name")
+                city: z.string().describe("City name"),
               }),
               execute: async ({ city }) => {
                 // Replace with a real weather API in production
@@ -65,9 +65,9 @@ If the user asks to schedule a task, use the scheduleTask tool.`,
                   temperature: temp,
                   condition:
                     conditions[Math.floor(Math.random() * conditions.length)],
-                  unit: "celsius"
+                  unit: "celsius",
                 };
-              }
+              },
             }),
 
             calculate: tool({
@@ -77,7 +77,7 @@ If the user asks to schedule a task, use the scheduleTask tool.`,
                 b: z.number().describe("Second number"),
                 operator: z
                   .enum(["+", "-", "*", "/", "%"])
-                  .describe("Arithmetic operator")
+                  .describe("Arithmetic operator"),
               }),
               execute: async ({ a, b, operator }) => {
                 const ops: Record<string, (x: number, y: number) => number> = {
@@ -85,16 +85,16 @@ If the user asks to schedule a task, use the scheduleTask tool.`,
                   "-": (x, y) => x - y,
                   "*": (x, y) => x * y,
                   "/": (x, y) => x / y,
-                  "%": (x, y) => x % y
+                  "%": (x, y) => x % y,
                 };
                 if (operator === "/" && b === 0) {
                   return { error: "Division by zero" };
                 }
                 return {
                   expression: `${a} ${operator} ${b}`,
-                  result: ops[operator](a, b)
+                  result: ops[operator](a, b),
                 };
-              }
+              },
             }),
 
             scheduleTask: tool({
@@ -120,14 +120,14 @@ If the user asks to schedule a task, use the scheduleTask tool.`,
                     "executeTask",
                     { description, threadId },
                     {
-                      idempotent: true
-                    }
+                      idempotent: true,
+                    },
                   );
                   return `Task scheduled: "${description}" (${when.type}: ${input})`;
                 } catch (error) {
                   return `Error scheduling task: ${error}`;
                 }
-              }
+              },
             }),
 
             getScheduledTasks: tool({
@@ -136,13 +136,13 @@ If the user asks to schedule a task, use the scheduleTask tool.`,
               execute: async () => {
                 const tasks = this.getSchedules();
                 return tasks.length > 0 ? tasks : "No scheduled tasks found.";
-              }
+              },
             }),
 
             cancelScheduledTask: tool({
               description: "Cancel a scheduled task by its ID",
               inputSchema: z.object({
-                taskId: z.string().describe("The ID of the task to cancel")
+                taskId: z.string().describe("The ID of the task to cancel"),
               }),
               execute: async ({ taskId }) => {
                 try {
@@ -151,10 +151,10 @@ If the user asks to schedule a task, use the scheduleTask tool.`,
                 } catch (error) {
                   return `Error cancelling task: ${error}`;
                 }
-              }
-            })
+              },
+            }),
           },
-          stopWhen: stepCountIs(5)
+          stopWhen: stepCountIs(5),
         });
         await thread.post(text);
       } catch (err) {
@@ -177,7 +177,7 @@ If the user asks to schedule a task, use the scheduleTask tool.`,
 
   async executeTask(
     payload: { description: string; threadId: string },
-    _task: Schedule<{ description: string; threadId: string }>
+    _task: Schedule<{ description: string; threadId: string }>,
   ) {
     const { description, threadId } = payload;
     console.log(`Executing scheduled task: ${description}`);
@@ -214,5 +214,5 @@ export default {
       (await routeAgentRequest(request, env)) ||
       new Response("Not found", { status: 404 })
     );
-  }
+  },
 } satisfies ExportedHandler<Env>;
