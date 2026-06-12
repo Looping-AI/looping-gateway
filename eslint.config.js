@@ -12,12 +12,12 @@ export default tseslint.config(
         {
           argsIgnorePattern: "^_",
           varsIgnorePattern: "^_",
-          caughtErrorsIgnorePattern: "^_",
-        },
-      ],
-    },
+          caughtErrorsIgnorePattern: "^_"
+        }
+      ]
+    }
   },
   {
-    ignores: ["env.d.ts", "node_modules/"],
-  },
+    ignores: ["env.d.ts", "node_modules/"]
+  }
 );
