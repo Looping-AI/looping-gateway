@@ -6,6 +6,13 @@ import { Chat, type Message, type Thread } from "chat";
 import { createSlackAdapter } from "@chat-adapter/slack";
 import { generateText, stepCountIs, tool } from "ai";
 import { z } from "zod";
+import {
+  getWeather,
+  calculate,
+  scheduleTask,
+  getScheduledTasks,
+  cancelScheduledTask
+} from "./tools";
 
 // Re-export so the Agents SDK can resolve it as a sub-agent facet via
 // ctx.exports["ChatSdkStateAgent"]. The Slack Chat SDK state adapter
@@ -56,18 +63,7 @@ If the user asks to schedule a task, use the scheduleTask tool.`,
               inputSchema: z.object({
                 city: z.string().describe("City name")
               }),
-              execute: async ({ city }) => {
-                // Replace with a real weather API in production
-                const conditions = ["sunny", "cloudy", "rainy", "snowy"];
-                const temp = Math.floor(Math.random() * 30) + 5;
-                return {
-                  city,
-                  temperature: temp,
-                  condition:
-                    conditions[Math.floor(Math.random() * conditions.length)],
-                  unit: "celsius"
-                };
-              }
+              execute: async (input) => getWeather(input)
             }),
 
             calculate: tool({
@@ -79,64 +75,20 @@ If the user asks to schedule a task, use the scheduleTask tool.`,
                   .enum(["+", "-", "*", "/", "%"])
                   .describe("Arithmetic operator")
               }),
-              execute: async ({ a, b, operator }) => {
-                const ops: Record<string, (x: number, y: number) => number> = {
-                  "+": (x, y) => x + y,
-                  "-": (x, y) => x - y,
-                  "*": (x, y) => x * y,
-                  "/": (x, y) => x / y,
-                  "%": (x, y) => x % y
-                };
-                if (operator === "/" && b === 0) {
-                  return { error: "Division by zero" };
-                }
-                return {
-                  expression: `${a} ${operator} ${b}`,
-                  result: ops[operator](a, b)
-                };
-              }
+              execute: async (input) => calculate(input)
             }),
 
             scheduleTask: tool({
               description:
                 "Schedule a task to be executed at a later time. Use this when the user asks to be reminded or wants something done later.",
               inputSchema: scheduleSchema,
-              execute: async ({ when, description }) => {
-                if (when.type === "no-schedule") {
-                  return "Not a valid schedule input";
-                }
-                const input =
-                  when.type === "scheduled"
-                    ? when.date
-                    : when.type === "delayed"
-                      ? when.delayInSeconds
-                      : when.type === "cron"
-                        ? when.cron
-                        : null;
-                if (!input) return "Invalid schedule type";
-                try {
-                  this.schedule(
-                    input,
-                    "executeTask",
-                    { description, threadId },
-                    {
-                      idempotent: true
-                    }
-                  );
-                  return `Task scheduled: "${description}" (${when.type}: ${input})`;
-                } catch (error) {
-                  return `Error scheduling task: ${error}`;
-                }
-              }
+              execute: async (input) => scheduleTask(input, threadId, this)
             }),
 
             getScheduledTasks: tool({
               description: "List all tasks that have been scheduled",
               inputSchema: z.object({}),
-              execute: async () => {
-                const tasks = this.getSchedules();
-                return tasks.length > 0 ? tasks : "No scheduled tasks found.";
-              }
+              execute: async () => getScheduledTasks(this)
             }),
 
             cancelScheduledTask: tool({
@@ -144,14 +96,7 @@ If the user asks to schedule a task, use the scheduleTask tool.`,
               inputSchema: z.object({
                 taskId: z.string().describe("The ID of the task to cancel")
               }),
-              execute: async ({ taskId }) => {
-                try {
-                  this.cancelSchedule(taskId);
-                  return `Task ${taskId} cancelled.`;
-                } catch (error) {
-                  return `Error cancelling task: ${error}`;
-                }
-              }
+              execute: async (input) => cancelScheduledTask(input, this)
             })
           },
           stopWhen: stepCountIs(5)
@@ -201,7 +146,7 @@ If the user asks to schedule a task, use the scheduleTask tool.`,
 }
 
 export default {
-  async fetch(request: Request, env: Env) {
+  async fetch(request: Request, env: Env, _ctx: ExecutionContext) {
     const url = new URL(request.url);
 
     if (url.pathname === "/slack/events") {

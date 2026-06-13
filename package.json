@@ -16,7 +16,9 @@
     "types": "wrangler types env.d.ts --include-runtime false",
     "format": "prettier --write .",
     "lint": "eslint .",
-    "check": "prettier --check . && eslint . && tsc"
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "check": "prettier --check . && eslint . && tsc && tsc -p test/tsconfig.json"
   },
   "dependencies": {
     "@chat-adapter/slack": "^4.30.0",
@@ -27,12 +29,14 @@
     "zod": "^4.4.3"
   },
   "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "^0.16.15",
     "@cloudflare/workers-types": "^4.20260612.1",
     "@types/node": "^25.9.3",
     "eslint": "^10.5.0",
     "prettier": "^3.5.3",
     "typescript": "^6.0.3",
     "typescript-eslint": "^8.35.0",
+    "vitest": "^4.1.8",
     "wrangler": "^4.100.0"
   }
 }

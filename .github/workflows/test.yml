@@ -1,4 +1,4 @@
-name: Sanity Check
+name: Test
 
 on:
   push:
@@ -9,8 +9,8 @@ on:
       - main
 
 jobs:
-  check:
-    timeout-minutes: 5
+  test:
+    timeout-minutes: 10
     strategy:
       matrix:
         os: [
@@ -28,3 +28,4 @@ jobs:
 
       - run: npm install
       - run: npm run check
+      - run: npm run test
