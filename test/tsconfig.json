@@ -7,5 +7,6 @@
       "@cloudflare/vitest-pool-workers/types"
     ]
   },
-  "include": ["./**/*.ts", "../env.d.ts", "../src/**/*.ts"]
+  "include": ["./**/*.ts", "../env.d.ts", "../src/**/*.ts"],
+  "exclude": []
 }
