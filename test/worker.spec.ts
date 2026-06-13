@@ -58,7 +58,7 @@ describe("Worker routing", () => {
     );
     await waitOnExecutionContext(ctx);
     expect(response.status).toBe(200);
-    const json = await response.json<{ challenge: string }>();
+    const json: { challenge: string } = await response.json();
     expect(json.challenge).toBe("test-challenge-token-xyz");
   });
 });
