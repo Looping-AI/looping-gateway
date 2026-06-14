@@ -18,21 +18,23 @@
     "lint": "eslint .",
     "test": "vitest run",
     "test:watch": "vitest",
-    "check": "prettier --check . && eslint . && tsc && tsc -p test/tsconfig.json"
+    "check": "prettier --check . && eslint . && tsc && tsc -p test/tsconfig.json",
+    "prepare": "husky"
   },
   "dependencies": {
     "@chat-adapter/slack": "^4.30.0",
     "agents": "^0.16.0",
-    "ai": "^6.0.204",
+    "ai": "^6.0.205",
     "chat": "^4.30.0",
     "workers-ai-provider": "^3.1.14",
     "zod": "^4.4.3"
   },
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "^0.16.15",
-    "@cloudflare/workers-types": "^4.20260612.1",
+    "@cloudflare/workers-types": "^4.20260613.1",
     "@types/node": "^25.9.3",
     "eslint": "^10.5.0",
+    "husky": "^9.1.7",
     "prettier": "^3.5.3",
     "typescript": "^6.0.3",
     "typescript-eslint": "^8.35.0",
