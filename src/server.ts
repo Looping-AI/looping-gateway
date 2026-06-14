@@ -151,8 +151,8 @@ export default {
 
     if (url.pathname === "/slack/events") {
       const id = env.SlackAgent.idFromName("default");
-      const stub = env.SlackAgent.get(id);
-      return stub.fetch(request);
+      const agentDurableObject = env.SlackAgent.get(id);
+      return agentDurableObject.fetch(request);
     }
 
     return (
