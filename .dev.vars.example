@@ -1,0 +1,4 @@
+# Copy to `.dev.vars` and fill in for local `wrangler dev`.
+# In production these are set with `npx wrangler secret put <NAME>`.
+SLACK_BOT_TOKEN=xoxb-your-bot-token
+SLACK_SIGNING_SECRET=your-signing-secret

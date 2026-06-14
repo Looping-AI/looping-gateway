@@ -14,6 +14,7 @@ import {
   cancelScheduledTask
 } from "./tools";
 import { handleSlackEvent } from "./slack-webhook-handler";
+import { reconcile } from "@/services/reconcile";
 
 // Cloudflare resolves Workflow `class_name`s (wrangler.jsonc) from the entry
 // module's exports, just like Durable Objects.
@@ -166,5 +167,17 @@ export default {
       (await routeAgentRequest(request, env)) ||
       new Response("Not found", { status: 404 })
     );
+  },
+
+  // Cron reconciliation (wrangler triggers.crons): the convergence backstop
+  // that repairs registry drift against Slack reality. Errors are logged, not
+  // rethrown — a failed run just retries on the next tick.
+  async scheduled(_controller: ScheduledController, env: Env) {
+    try {
+      const result = await reconcile(env);
+      console.log("Reconciliation complete", result);
+    } catch (err) {
+      console.error("Reconciliation failed", err);
+    }
   }
 } satisfies ExportedHandler<Env>;

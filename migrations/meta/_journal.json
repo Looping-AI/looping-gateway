@@ -1,0 +1,20 @@
+{
+  "version": "7",
+  "dialect": "sqlite",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "6",
+      "when": 1781441956674,
+      "tag": "0000_thick_leopardon",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "6",
+      "when": 1781457499821,
+      "tag": "0001_seed_builtins",
+      "breakpoints": true
+    }
+  ]
+}

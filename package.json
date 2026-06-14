@@ -14,6 +14,9 @@
   "scripts": {
     "dev": "wrangler dev",
     "types": "wrangler types env.d.ts --include-runtime false",
+    "db:generate": "drizzle-kit generate",
+    "db:migrate:local": "wrangler d1 migrations apply looping-registry --local",
+    "db:migrate": "wrangler d1 migrations apply looping-registry --remote",
     "format": "prettier --write .",
     "lint": "eslint .",
     "test": "vitest run",
@@ -26,6 +29,7 @@
     "agents": "^0.16.0",
     "ai": "^6.0.205",
     "chat": "^4.30.0",
+    "drizzle-orm": "^0.45.2",
     "workers-ai-provider": "^3.1.14",
     "zod": "^4.4.3"
   },
@@ -33,6 +37,7 @@
     "@cloudflare/vitest-pool-workers": "^0.16.15",
     "@cloudflare/workers-types": "^4.20260613.1",
     "@types/node": "^25.9.3",
+    "drizzle-kit": "^0.31.10",
     "eslint": "^10.5.0",
     "husky": "^9.1.7",
     "prettier": "^3.5.3",

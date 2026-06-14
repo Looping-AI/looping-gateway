@@ -51,6 +51,14 @@ npx wrangler secret put SLACK_BOT_TOKEN
 npx wrangler secret put SLACK_SIGNING_SECRET
 ```
 
+For local development with `wrangler dev`, copy the example env file and fill in your Slack values:
+
+```bash
+cp .dev.vars.example .dev.vars
+```
+
+`wrangler dev` loads variables from `.dev.vars` locally. Keep this file uncommitted.
+
 ### 6. Deploy
 
 ```bash
@@ -76,6 +84,12 @@ Your gateway is live. Mention the bot in a channel (`@your-bot`) or send it a DM
 ## Run locally / Development
 
 `npx wrangler dev` starts the local server on port 8787, but Slack cannot send events to `localhost`. You need a public tunnel.
+
+Before starting, make sure your local env file exists and secrets of your Dev Slack App are added:
+
+```bash
+cp .dev.vars.example .dev.vars
+```
 
 ### Option A — Built-in tunnel (quickest)
 

@@ -26,6 +26,18 @@
       "tag": "v1"
     }
   ],
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "looping-registry",
+      "database_id": "d477d975-6356-4233-9f50-89dc21df5e3a",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "triggers": {
+    // Reconciliation backstop: sync Slack reality → registry every 24h.
+    "crons": ["0 0 * * *"]
+  },
   "workflows": [
     {
       "name": "message-workflow",

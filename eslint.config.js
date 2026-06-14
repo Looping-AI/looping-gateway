@@ -18,6 +18,23 @@ export default tseslint.config(
     }
   },
   {
-    ignores: ["env.d.ts", "node_modules/"]
+    // Type-aware pass — enables @deprecated detection without switching the
+    // whole config to recommendedTypeChecked and its stricter rule set.
+    files: ["src/**/*.ts", "test/**/*.ts"],
+    plugins: { "@typescript-eslint": tseslint.plugin },
+    languageOptions: {
+      parser: tseslint.parser,
+      parserOptions: {
+        projectService: true,
+        tsconfigRootDir: import.meta.dirname
+      }
+    },
+    rules: {
+      "@typescript-eslint/no-deprecated": "error"
+    }
+  },
+  {
+    // Generated / build artifacts — never lint these.
+    ignores: ["env.d.ts", "node_modules/", ".wrangler/", "migrations/"]
   }
 );

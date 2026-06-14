@@ -1,7 +1,10 @@
 {
   "extends": "agents/tsconfig",
   "compilerOptions": {
-    "types": ["node", "@cloudflare/workers-types"]
+    "types": ["node", "@cloudflare/workers-types"],
+    "paths": {
+      "@/*": ["./src/*"]
+    }
   },
   "exclude": ["test"]
 }

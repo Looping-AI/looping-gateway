@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { env } from "cloudflare:test";
+import { env } from "cloudflare:workers";
 import { handleSlackEvent } from "../src/slack-webhook-handler";
 
 // Sign a body exactly as Slack does: HMAC-SHA256 over `v0:{ts}:{body}`.
