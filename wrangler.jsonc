@@ -15,15 +15,19 @@
   "durable_objects": {
     "bindings": [
       {
-        "class_name": "SlackAgent",
-        "name": "SlackAgent"
+        "class_name": "AdminAgent",
+        "name": "AdminAgent"
+      },
+      {
+        "class_name": "OnboardingAgent",
+        "name": "OnboardingAgent"
       }
     ]
   },
   "migrations": [
     {
-      "new_sqlite_classes": ["SlackAgent"],
-      "tag": "v1"
+      "tag": "v1",
+      "new_sqlite_classes": ["AdminAgent", "OnboardingAgent"]
     }
   ],
   "d1_databases": [

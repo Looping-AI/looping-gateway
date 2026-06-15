@@ -4,7 +4,8 @@ import {
   iterateSlackUsers,
   fetchChannelMemberIds,
   findChannelIdByName,
-  getBotUserId
+  getBotUserId,
+  postReply
 } from "@/wrappers/slack";
 import type { SlackUserInfo } from "@/wrappers/slack";
 
@@ -127,5 +128,36 @@ describe("getBotUserId", () => {
     await expect(
       getBotUserId({ SLACK_BOT_TOKEN: "xoxb-error-token" })
     ).rejects.toThrow(/missing_scope/);
+  });
+});
+
+describe("postReply", () => {
+  it("posts a threaded reply with channel + thread_ts + text", async () => {
+    let captured: URLSearchParams | undefined;
+    stubSlack((method, body) => {
+      if (method === "chat.postMessage") captured = body;
+      return { ok: true, ts: "1.2" };
+    });
+    await postReply(slackEnv, "C1", "1700.1", "hello world");
+    expect(captured?.get("channel")).toBe("C1");
+    expect(captured?.get("thread_ts")).toBe("1700.1");
+    expect(captured?.get("text")).toBe("hello world");
+  });
+
+  it("omits thread_ts when null (top-level post)", async () => {
+    let captured: URLSearchParams | undefined;
+    stubSlack((method, body) => {
+      if (method === "chat.postMessage") captured = body;
+      return { ok: true };
+    });
+    await postReply(slackEnv, "D1", null, "hi");
+    expect(captured?.has("thread_ts")).toBe(false);
+  });
+
+  it("throws on a non-ok response", async () => {
+    stubSlack(() => ({ ok: false, error: "channel_not_found" }));
+    await expect(postReply(slackEnv, "C1", null, "x")).rejects.toThrow(
+      /channel_not_found/
+    );
   });
 });

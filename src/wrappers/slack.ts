@@ -30,6 +30,9 @@ interface ConversationsListResponse extends SlackApiResponse {
 interface AuthTestResponse extends SlackApiResponse {
   user_id?: string;
 }
+interface ChatPostMessageResponse extends SlackApiResponse {
+  ts?: string;
+}
 
 /** A Slack user normalized to the fields the registry cares about. */
 export interface SlackUserInfo {
@@ -134,4 +137,27 @@ export async function getBotUserId(env: SlackEnv): Promise<string | null> {
   const id = res.user_id ?? null;
   botUserIdCache.set(env.SLACK_BOT_TOKEN, id);
   return id;
+}
+
+/**
+ * Post a bot reply via `chat.postMessage`. Pass `threadTs` to reply inside a
+ * thread; pass null to post at the top level (e.g. in a DM). The gateway owns
+ * the bot token, so all agent replies flow through here.
+ */
+export async function postReply(
+  env: SlackEnv,
+  channelId: string,
+  threadTs: string | null,
+  text: string
+): Promise<void> {
+  const res = await callSlackApi<ChatPostMessageResponse>(
+    "chat.postMessage",
+    {
+      channel: channelId,
+      text,
+      ...(threadTs ? { thread_ts: threadTs } : {})
+    },
+    { token: env.SLACK_BOT_TOKEN }
+  );
+  assertSlackOk("chat.postMessage", res);
 }

@@ -80,7 +80,10 @@ a faithful port would re-import accidental complexity.
 
 - **Cloudflare Workflows** — durable, retriable async; trigger an instance from
   the Worker and return immediately.
-- **A2A protocol** — uniform agent dispatch (SDK ships an `a2a/` example).
+- **A2A protocol** — uniform agent dispatch via the **official `@a2a-js/sdk`**
+  (the `agents` SDK ships no A2A surface). Local agents are reached in-process
+  over their DO `stub.fetch` (the client's `fetchImpl` is bound to the stub);
+  remote/custom agents use the same client over real HTTP. See Phase 3 below.
 - **Agents SDK Sessions + Agent Memory** — per-agent conversation history + managed
   long-term memory (Facts/Events/Instructions/Tasks, Recall/Remember; vectors in
   Vectorize; ingest-at-compaction).
@@ -244,11 +247,18 @@ audit/round-limit trail — revisit later.)
    (`workspaces`, `slack_users`, `workspace_admins`, `agents`, `agent_channels`);
    membership/team-join handlers + a scheduled reconciliation; `UserAuthContext`
    builder + `authorize()`; org/workspace bootstrap.
-3. **Message Workflow + Agent Router + A2A** — resolve target (admin-channel / DM /
-   `::name` / allowlist), build auth context, dispatch over A2A, post reply.
-4. **Admin agent (in-repo, A2A server)** — AI-SDK loop + tools: agent-registry
-   CRUD (`agents_list/get/register/update/unregister`) + workspace mgmt
-   (`workspace_create/delete/get/set_admin_channel`) on D1, gated by auth context.
+3. **Message Workflow + Agent Router + A2A** — ✅ done. Router (`src/router/`)
+   resolves the target (`::name` / admin-channel / DM / allowlist), the Workflow
+   builds the auth context, dispatches over A2A (`@a2a-js/sdk`) to the agent DO,
+   and posts the reply (`chat.postMessage`). Agents are **plain Durable Objects**
+   that serve A2A via a small `fetch` bridge (`src/a2a/serve.ts`) over the SDK's
+   `DefaultRequestHandler`; Phase-3 behavior is an `EchoExecutor` placeholder.
+   They can later `extend Agent` (same class name + SQLite) with no migration.
+4. **Admin agent (in-repo, A2A server)** — replace `AdminAgent`'s `EchoExecutor`
+   with an AI-SDK loop + tools: agent-registry CRUD
+   (`agents_list/get/register/update/unregister`) + workspace mgmt
+   (`workspace_create/delete/get/set_admin_channel`) on D1, gated by the auth
+   context carried on `message.metadata` (built in the Message Workflow).
 5. **Onboarding (DM) agent (in-repo, A2A server)** — concierge: explains the
    system, routes users, surfaces health/recovery info.
 6. **Channel history + `channel_search` tool** — raw buffer, Compaction Workflow →
@@ -281,6 +291,7 @@ audit/round-limit trail — revisit later.)
 ## Notes for later sessions
 
 - Confirm exact Agents SDK Sessions/Agent Memory bindings + Vectorize wiring.
-- A2A contract details: streaming milestones, task lifecycle, auth between gateway
-  and remote agents, and how `UserAuthContext` is carried/trusted across A2A.
+- A2A contract: `UserAuthContext` is now carried on `message.metadata` (trusted
+  for local same-worker dispatch). Still open: streaming milestones / task
+  lifecycle, and authenticating `metadata` for **remote** agents (Phase 7).
 - Decide secrets model (Secrets Store vs WebCrypto AES-GCM) when requirements firm up.

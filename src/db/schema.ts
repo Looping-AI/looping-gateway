@@ -89,16 +89,19 @@ export const agents = sqliteTable("agents", {
   updatedAt: timestamp("updated_at")
 });
 
-/** Channel → agent allowlist (one agent per channel). Routing reads it Phase 3. */
+/** Channel → agent allowlist. Multiple agents can share a channel; ::name disambiguates. */
 export const agentChannels = sqliteTable(
   "agent_channels",
   {
-    channelId: text("channel_id").primaryKey(),
+    channelId: text("channel_id").notNull(),
     agentName: text("agent_name")
       .notNull()
       .references(() => agents.name),
     workspaceId: integer("workspace_id").references(() => workspaces.id),
     createdAt: timestamp("created_at")
   },
-  (t) => [index("idx_agent_channels_agent").on(t.agentName)]
+  (t) => [
+    primaryKey({ columns: [t.channelId, t.agentName] }),
+    index("idx_agent_channels_agent").on(t.agentName)
+  ]
 );
