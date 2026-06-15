@@ -1,19 +1,9 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect } from "vitest";
 import { env } from "cloudflare:workers";
 import {
   createExecutionContext,
   waitOnExecutionContext
 } from "cloudflare:test";
-
-vi.mock("@chat-adapter/slack", () => ({
-  createSlackAdapter: () => ({
-    name: "slack",
-    initialize: async () => {},
-    handleWebhook: async () => new Response("ok", { status: 200 }),
-    postMessage: async () => {}
-  })
-}));
-
 import worker from "../src/server";
 
 describe("Worker routing", () => {

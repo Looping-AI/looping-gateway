@@ -1,7 +1,12 @@
 import { describe, it, expect } from "vitest";
 import { env } from "cloudflare:workers";
 import { getDb } from "@/db/client";
-import { getAgent, listAgents, getAgentForChannel } from "@/db/models/agents";
+import {
+  getAgent,
+  listAgents,
+  getAgentsForChannel,
+  getAgentInChannel
+} from "@/db/models/agents";
 
 const db = getDb(env);
 
@@ -33,7 +38,9 @@ describe("agents", () => {
     await env.DB.prepare(
       "INSERT INTO agent_channels (channel_id, agent_name) VALUES ('C_MAP', 'custom-x')"
     ).run();
-    expect((await getAgentForChannel(db, "C_MAP"))?.name).toBe("custom-x");
-    expect(await getAgentForChannel(db, "C_UNMAPPED")).toBeNull();
+    const all = await getAgentsForChannel(db, "C_MAP");
+    expect(all.map((e) => e.agent.name)).toContain("custom-x");
+    expect(await getAgentInChannel(db, "C_MAP", "custom-x")).not.toBeNull();
+    expect(await getAgentInChannel(db, "C_UNMAPPED", "custom-x")).toBeNull();
   });
 });
