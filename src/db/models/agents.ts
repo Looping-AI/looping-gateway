@@ -23,7 +23,7 @@ export async function listAgents(db: Db): Promise<AgentRow[]> {
   return db.select().from(schema.agents);
 }
 
-/** All agents configured for a channel (for the no-::name default path). */
+/** Enabled agents configured for a channel, used for the no-::name default routing path. */
 export async function getAgentsForChannel(
   db: Db,
   channelId: string
@@ -38,11 +38,16 @@ export async function getAgentsForChannel(
       schema.agents,
       eq(schema.agentChannels.agentName, schema.agents.name)
     )
-    .where(eq(schema.agentChannels.channelId, channelId));
+    .where(
+      and(
+        eq(schema.agentChannels.channelId, channelId),
+        eq(schema.agents.enabled, true)
+      )
+    );
   return rows;
 }
 
-/** Check if a specific agent is configured for a channel (for the ::name validation path). */
+/** Check if a specific agent is configured and enabled for a channel (for the ::name validation path). */
 export async function getAgentInChannel(
   db: Db,
   channelId: string,
@@ -61,7 +66,8 @@ export async function getAgentInChannel(
     .where(
       and(
         eq(schema.agentChannels.channelId, channelId),
-        eq(schema.agentChannels.agentName, agentName)
+        eq(schema.agentChannels.agentName, agentName),
+        eq(schema.agents.enabled, true)
       )
     )
     .limit(1);

@@ -26,8 +26,13 @@
   },
   "migrations": [
     {
-      "tag": "v1",
-      "new_sqlite_classes": ["AdminAgent", "OnboardingAgent"]
+      "new_sqlite_classes": ["SlackAgent"],
+      "tag": "v1"
+    },
+    {
+      "tag": "v2",
+      "new_sqlite_classes": ["AdminAgent", "OnboardingAgent"],
+      "deleted_classes": ["SlackAgent"]
     }
   ],
   "d1_databases": [
