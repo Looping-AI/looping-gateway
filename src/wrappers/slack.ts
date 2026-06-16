@@ -150,14 +150,24 @@ export async function postReply(
   threadTs: string | null,
   text: string
 ): Promise<void> {
-  const res = await callSlackApi<ChatPostMessageResponse>(
-    "chat.postMessage",
-    {
-      channel: channelId,
-      text,
-      ...(threadTs ? { thread_ts: threadTs } : {})
-    },
-    { token: env.SLACK_BOT_TOKEN }
-  );
-  assertSlackOk("chat.postMessage", res);
+  try {
+    const res = await callSlackApi<ChatPostMessageResponse>(
+      "chat.postMessage",
+      {
+        channel: channelId,
+        text,
+        ...(threadTs ? { thread_ts: threadTs } : {})
+      },
+      { token: env.SLACK_BOT_TOKEN }
+    );
+    assertSlackOk("chat.postMessage", res);
+    console.log("[slack] reply posted ok", { channelId, ts: res.ts });
+  } catch (err) {
+    console.error("[slack] postReply failed", {
+      channelId,
+      threadTs,
+      err: String(err)
+    });
+    throw err;
+  }
 }

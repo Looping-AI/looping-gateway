@@ -98,12 +98,17 @@ describe("MessageWorkflow (introspectWorkflow)", () => {
       const [instance] = introspector.get();
       await instance.waitForStatus("complete");
 
+      // The admin agent now runs the real AI loop (Workers AI). That binding is
+      // unavailable offline, so the executor's graceful fallback posts instead —
+      // either way this asserts the plumbing: Workflow → A2A → AdminAgent DO
+      // (Session over SQLite) → threaded reply. The AI text itself is covered by
+      // the executor unit test and the manual e2e.
       expect(calls).toHaveLength(1);
       expect(calls[0]).toMatchObject({
         channel: "C_ORGADMIN",
-        thread_ts: "1700.1",
-        text: "You said: hello"
+        thread_ts: "1700.1"
       });
+      expect(calls[0].text.length).toBeGreaterThan(0);
     } finally {
       await introspector.dispose();
     }

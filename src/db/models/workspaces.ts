@@ -41,6 +41,37 @@ export async function upsertWorkspace(
     });
 }
 
+export interface CreateWorkspaceInput {
+  name: string;
+  adminChannelId?: string | null;
+  slackTeamId?: string | null;
+}
+
+/**
+ * Create a new workspace with an allocated id. `id` is not autoincrement (so the
+ * org sentinel `0` stays reserved), so we allocate `max(id) + 1`, which is ≥ 1
+ * because the org row (id 0) always exists. Org-instance (`admin:0`) only.
+ */
+export async function createWorkspace(
+  db: Db,
+  input: CreateWorkspaceInput
+): Promise<WorkspaceRow> {
+  const [{ maxId }] = await db
+    .select({ maxId: sql<number | null>`max(${schema.workspaces.id})` })
+    .from(schema.workspaces);
+  const nextId = (maxId ?? ORG_WORKSPACE_ID) + 1;
+  const rows = await db
+    .insert(schema.workspaces)
+    .values({
+      id: nextId,
+      name: input.name,
+      adminChannelId: input.adminChannelId ?? null,
+      slackTeamId: input.slackTeamId ?? null
+    })
+    .returning();
+  return rows[0];
+}
+
 export async function getWorkspace(
   db: Db,
   id: number
