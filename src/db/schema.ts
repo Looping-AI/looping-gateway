@@ -15,8 +15,9 @@ const timestamp = (name: string) =>
 
 /**
  * Workspaces — logical sub-orgs, each mapped to a Slack admin channel.
- * `id` is OUR id (not a Slack team id) and is NOT autoincrement so that `0`
- * (the org sentinel, see ORG_WORKSPACE_ID) can be reserved explicitly.
+ * `id` is OUR id (not a Slack team id). It's a plain INTEGER PRIMARY KEY, i.e.
+ * the SQLite rowid: omit it on insert and SQLite assigns max(id)+1. `0`
+ * (ORG_WORKSPACE_ID) is seeded explicitly, so new rows auto-allocate from 1.
  * Membership of a workspace's `adminChannelId` ⇒ admin of that workspace.
  */
 export const workspaces = sqliteTable("workspaces", {
@@ -78,16 +79,20 @@ export const workspaceAdmins = sqliteTable(
  * Agent registry. Built-in `admin`/`onboarding` rows are seeded by
  * migrations/0001_seed_builtins.sql at deploy time. CRUD is Phase 4.
  */
-export const agents = sqliteTable("agents", {
-  name: text("name").primaryKey(),
-  kind: text("kind", { enum: ["admin", "onboarding", "custom"] }).notNull(),
-  displayName: text("display_name"),
-  a2aEndpoint: text("a2a_endpoint"),
-  enabled: integer("enabled", { mode: "boolean" }).notNull().default(true),
-  workspaceId: integer("workspace_id").references(() => workspaces.id),
-  createdAt: timestamp("created_at"),
-  updatedAt: timestamp("updated_at")
-});
+export const agents = sqliteTable(
+  "agents",
+  {
+    name: text("name").primaryKey(),
+    kind: text("kind", { enum: ["admin", "onboarding", "custom"] }).notNull(),
+    displayName: text("display_name"),
+    a2aEndpoint: text("a2a_endpoint"),
+    enabled: integer("enabled", { mode: "boolean" }).notNull().default(true),
+    workspaceId: integer("workspace_id").references(() => workspaces.id),
+    createdAt: timestamp("created_at"),
+    updatedAt: timestamp("updated_at")
+  },
+  (t) => [index("idx_agents_workspace_id").on(t.workspaceId)]
+);
 
 /** Channel → agent allowlist. Multiple agents can share a channel; ::name disambiguates. */
 export const agentChannels = sqliteTable(

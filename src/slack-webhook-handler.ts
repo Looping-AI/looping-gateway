@@ -169,8 +169,14 @@ async function triggerWorkflow(
   try {
     await workflow.create({ id, params });
   } catch (err) {
-    if (isInstanceExistsError(err)) return OK();
-    console.error("Failed to create workflow instance", id, err);
+    if (isInstanceExistsError(err)) {
+      console.log("[gateway] duplicate event — skipping", { eventId: id });
+      return OK();
+    }
+    console.error("[gateway] failed to create workflow instance", {
+      eventId: id,
+      err: String(err)
+    });
     return new Response("error", { status: 500 });
   }
   return OK();
@@ -212,12 +218,14 @@ export async function handleSlackEvent(
 
   switch (classification.kind) {
     case "challenge":
+      console.log("[gateway] url_verification challenge");
       return Response.json({ challenge: classification.challenge });
     case "message":
       return triggerWorkflow(env.MESSAGE_WORKFLOW, classification.params);
     case "lifecycle":
       return triggerWorkflow(env.LIFECYCLE_WORKFLOW, classification.params);
     case "ignore":
+      console.log("[gateway] event ignored", { reason: classification.reason });
       return OK();
   }
 }

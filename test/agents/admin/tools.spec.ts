@@ -1,0 +1,176 @@
+import { describe, it, expect } from "vitest";
+import { env } from "cloudflare:workers";
+import { getDb } from "@/db/client";
+import type { UserAuthContext } from "@/auth";
+import {
+  agentsRead,
+  agentsWrite,
+  workspaceRead,
+  workspaceWrite,
+  buildAdminTools,
+  type AdminToolDeps
+} from "@/agents/admin/tools";
+import { ORG_WORKSPACE_ID, createWorkspace } from "@/db/models/workspaces";
+
+const db = getDb(env);
+
+/** Create a real workspace (agents FK-reference it) and return its id. */
+async function freshWsId(name: string): Promise<number> {
+  return (await createWorkspace(db, { name })).id;
+}
+
+function ctx(overrides: Partial<UserAuthContext> = {}): UserAuthContext {
+  return {
+    slackUserId: "U1",
+    displayName: "Tester",
+    isPrimaryOwner: false,
+    isOrgAdmin: false,
+    adminWorkspaces: [],
+    ...overrides
+  };
+}
+
+const orgAdmin = ctx({ isOrgAdmin: true });
+
+function deps(wsId: number, c: UserAuthContext | null): AdminToolDeps {
+  return { db, ctx: c, wsId };
+}
+
+describe("admin tools — agents_write / agents_read", () => {
+  it("registers a custom agent scoped to the workspace and reads it back", async () => {
+    const wsId = await freshWsId("tools-ws-a");
+    const d = deps(wsId, ctx({ adminWorkspaces: [wsId] }));
+    const reg = await agentsWrite(d, {
+      operation: "register",
+      name: "tool-agent-a",
+      displayName: "Tool Agent A"
+    });
+    expect(reg).toMatchObject({ ok: true });
+
+    const read = (await agentsRead(d, { name: "tool-agent-a" })) as {
+      agents: Array<{ name: string; kind: string; workspaceId: number }>;
+    };
+    expect(read.agents).toHaveLength(1);
+    expect(read.agents[0]).toMatchObject({
+      name: "tool-agent-a",
+      kind: "custom",
+      workspaceId: wsId
+    });
+  });
+
+  it("denies a caller who is not an admin of the workspace", async () => {
+    const d = deps(101, ctx({ adminWorkspaces: [999] }));
+    expect(await agentsRead(d, {})).toHaveProperty("error");
+    expect(
+      await agentsWrite(d, { operation: "register", name: "nope" })
+    ).toHaveProperty("error");
+  });
+
+  it("denies when there is no authenticated caller", async () => {
+    const d = deps(102, null);
+    expect(await agentsRead(d, {})).toHaveProperty("error");
+  });
+
+  it("refuses reserved/built-in names and duplicates", async () => {
+    const d = deps(ORG_WORKSPACE_ID, orgAdmin);
+    expect(
+      await agentsWrite(d, { operation: "register", name: "admin" })
+    ).toHaveProperty("error");
+    // built-in admin row cannot be modified
+    expect(
+      await agentsWrite(d, { operation: "unregister", name: "admin" })
+    ).toHaveProperty("error");
+
+    const wsId = await freshWsId("tools-ws-dup");
+    const d2 = deps(wsId, ctx({ adminWorkspaces: [wsId] }));
+    await agentsWrite(d2, { operation: "register", name: "dup-agent" });
+    expect(
+      await agentsWrite(d2, { operation: "register", name: "dup-agent" })
+    ).toHaveProperty("error");
+  });
+
+  it("update attaches and detaches channels", async () => {
+    const wsId = await freshWsId("tools-ws-chan");
+    const d = deps(wsId, ctx({ adminWorkspaces: [wsId] }));
+    await agentsWrite(d, { operation: "register", name: "chan-agent" });
+    await agentsWrite(d, {
+      operation: "update",
+      name: "chan-agent",
+      displayName: "Channeled",
+      attachChannels: ["C_A", "C_B"]
+    });
+    const afterAttach = (await agentsRead(d, { name: "chan-agent" })) as {
+      agents: Array<{ displayName: string; channels: string[] }>;
+    };
+    expect(afterAttach.agents[0].displayName).toBe("Channeled");
+    expect(afterAttach.agents[0].channels.sort()).toEqual(["C_A", "C_B"]);
+
+    await agentsWrite(d, {
+      operation: "update",
+      name: "chan-agent",
+      detachChannels: ["C_A"]
+    });
+    const afterDetach = (await agentsRead(d, { name: "chan-agent" })) as {
+      agents: Array<{ channels: string[] }>;
+    };
+    expect(afterDetach.agents[0].channels).toEqual(["C_B"]);
+  });
+
+  it("cannot write to an agent in another workspace", async () => {
+    const wsA = await freshWsId("tools-ws-owner");
+    const wsB = await freshWsId("tools-ws-other");
+    const owner = deps(wsA, ctx({ adminWorkspaces: [wsA] }));
+    await agentsWrite(owner, { operation: "register", name: "wsA-agent" });
+    const other = deps(wsB, ctx({ adminWorkspaces: [wsB] }));
+    expect(
+      await agentsWrite(other, { operation: "unregister", name: "wsA-agent" })
+    ).toHaveProperty("error");
+  });
+});
+
+describe("admin tools — workspace_write instance scoping", () => {
+  it("org instance (wsId 0) with org admin can create a workspace", async () => {
+    const d = deps(ORG_WORKSPACE_ID, orgAdmin);
+    const res = (await workspaceWrite(d, {
+      operation: "create",
+      name: "tools-created-ws"
+    })) as { ok?: boolean; workspace?: { id: number } };
+    expect(res.ok).toBe(true);
+    expect(res.workspace?.id).toBeGreaterThan(ORG_WORKSPACE_ID);
+  });
+
+  it("workspace instance (wsId != 0) is denied even for an org admin", async () => {
+    const d = deps(107, orgAdmin);
+    expect(
+      await workspaceWrite(d, { operation: "create", name: "should-fail" })
+    ).toHaveProperty("error");
+  });
+
+  it("org instance denies a non-org caller", async () => {
+    const d = deps(ORG_WORKSPACE_ID, ctx({ adminWorkspaces: [5] }));
+    expect(
+      await workspaceWrite(d, { operation: "create", name: "should-fail" })
+    ).toHaveProperty("error");
+  });
+});
+
+describe("admin tools — buildAdminTools availability", () => {
+  it("exposes workspace_write only on the org instance", () => {
+    const orgTools = buildAdminTools(deps(ORG_WORKSPACE_ID, orgAdmin));
+    expect(Object.keys(orgTools)).toContain("workspace_write");
+
+    const wsTools = buildAdminTools(deps(3, ctx({ adminWorkspaces: [3] })));
+    expect(Object.keys(wsTools)).not.toContain("workspace_write");
+    expect(Object.keys(wsTools)).toEqual(
+      expect.arrayContaining(["agents_read", "agents_write", "workspace_read"])
+    );
+  });
+});
+
+describe("admin tools — workspace_read scoping", () => {
+  it("a workspace admin reads only its own workspace", async () => {
+    const d = deps(2, ctx({ adminWorkspaces: [2] }));
+    const denied = await workspaceRead(d, { id: 999 });
+    expect(denied).toHaveProperty("error");
+  });
+});

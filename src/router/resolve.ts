@@ -64,7 +64,11 @@ export async function resolveTarget(
     // ::name ref given — look up the agent, then validate channel permission.
     const agent = await getAgent(db, ref);
     if (!agent?.enabled) {
-      return { kind: "none", reason: `unknown or disabled agent ::${ref}` };
+      const result = {
+        kind: "none" as const,
+        reason: `unknown or disabled agent ::${ref}`
+      };
+      return result;
     }
 
     if (agent.kind === "admin") {

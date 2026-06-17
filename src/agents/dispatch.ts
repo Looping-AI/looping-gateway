@@ -36,6 +36,27 @@ const LOCAL_BINDINGS: Partial<Record<AgentRow["kind"], keyof Env>> = {
 };
 
 /**
+ * Durable Object instance name for a local agent. The admin agent runs **one
+ * instance per workspace** (`admin:0` = org, `admin:1`, …) so each has its own
+ * SQLite — isolated Sessions + memory. Other kinds use a single instance keyed
+ * by name (onboarding may move to per-user in Phase 5).
+ */
+export function instanceNameFor(
+  agent: DispatchAgentRef,
+  metadata: DispatchMetadata
+): string {
+  if (agent.kind === "admin") {
+    if (metadata.workspaceId == null) {
+      throw new Error(
+        "[dispatch] workspaceId is required in metadata for admin agents"
+      );
+    }
+    return `admin:${metadata.workspaceId}`;
+  }
+  return agent.name;
+}
+
+/**
  * Dispatch a user message to an agent over A2A and return its reply text.
  * Local built-in agents are reached in-process via their DO `stub.fetch`; remote
  * custom agents (with an `a2aEndpoint`) go over real HTTP (Phase 7).
@@ -55,10 +76,11 @@ export async function dispatchToAgent(
   };
 
   if (agent.a2aEndpoint) {
-    return sendA2AMessage(
+    const reply = await sendA2AMessage(
       { kind: "remote", endpoint: agent.a2aEndpoint },
       message
     );
+    return reply;
   }
 
   const bindingName = LOCAL_BINDINGS[agent.kind];
@@ -68,8 +90,10 @@ export async function dispatchToAgent(
     );
   }
 
+  const instanceName = instanceNameFor(agent, payload.metadata);
+
   const ns = env[bindingName] as DurableObjectNamespace;
-  const stub = ns.get(ns.idFromName(agent.name));
+  const stub = ns.get(ns.idFromName(instanceName));
   const fetchImpl = ((input: RequestInfo | URL, init?: RequestInit) =>
     stub.fetch(input as RequestInfo, init)) as typeof fetch;
   const card = buildAgentCard({
@@ -77,5 +101,9 @@ export async function dispatchToAgent(
     description: `Local ${agent.kind} agent`
   });
 
-  return sendA2AMessage({ kind: "local", card, fetchImpl }, message);
+  const reply = await sendA2AMessage(
+    { kind: "local", card, fetchImpl },
+    message
+  );
+  return reply;
 }

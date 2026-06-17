@@ -1,4 +1,4 @@
-import { DurableObject } from "cloudflare:workers";
+import { Agent } from "agents";
 import type { AgentCard } from "@a2a-js/sdk";
 import {
   DefaultRequestHandler,
@@ -13,11 +13,13 @@ import { serveA2A } from "@/a2a/serve";
  * (card discovery + JSON-RPC) through the SDK's `DefaultRequestHandler`.
  *
  * Subclasses supply a `card()` and an `executor()`. Phase 3 executors just echo;
- * Phase 4/5 swap in the AI-SDK loop. This is a plain `DurableObject` (not the
- * Agents SDK `Agent`) for a small, fully-testable surface — it can later extend
- * `Agent` under the same class name + SQLite storage with no migration.
+ * Phase 4 swaps in the AI-SDK loop. We extend the Agents SDK `Agent` (itself a
+ * Durable Object) so executors can use `this.sql` for the Sessions API
+ * (per-agent conversation history + writable memory). The A2A bridge is kept by
+ * overriding `fetch` — these DOs are reached directly via `stub.fetch`, not
+ * `routeAgentRequest`, so bypassing the SDK's default router is intentional.
  */
-export abstract class A2AAgent extends DurableObject<Env> {
+export abstract class A2AAgent extends Agent<Env> {
   private handler?: DefaultRequestHandler;
 
   protected abstract card(): AgentCard;

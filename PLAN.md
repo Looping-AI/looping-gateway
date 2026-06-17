@@ -39,25 +39,25 @@ a faithful port would re-import accidental complexity.
 
 ## Source → Cloudflare mapping (the core of the migration)
 
-| Original (ICP / Motoko)                                                          | Cloudflare target                                                    | Migrate / Simplify / Drop       |
-| -------------------------------------------------------------------------------- | -------------------------------------------------------------------- | ------------------------------- |
-| `control-plane-core` canister                                                    | Gateway Worker + Workflows + Registry (D1) + per-agent DOs           | Re-implement                    |
-| `internal-engine` canister (dynamic spawn)                                       | inline AI-SDK tool loop inside each agent DO                         | **Simplify**                    |
-| event store + router + per-event timer dispatch                                  | event handler classify → **Cloudflare Workflows**                    | **Re-shape**                    |
-| `events/handlers/*` (message, member-joined/left, team-join, msg-deleted/edited) | Lifecycle Workflow (non-agent) + Message Workflow (agent)            | Re-implement                    |
-| `agent-runner` + admin loop + OpenRouter wrapper                                 | per-agent AI-SDK loop (Workers AI) reached via **A2A**               | Re-implement                    |
-| sessions / turns / traces (bespoke)                                              | **Agents SDK Sessions + Agent Memory** (managed)                     | **Drop our impl; use platform** |
-| channel-history-model (bespoke timeline)                                         | raw recent buffer + **Vectorize** embeddings via Compaction Workflow | Re-implement (leaner)           |
-| Stable memory / canister `var`s                                                  | D1 (global registry) + per-agent DO SQLite                           | Re-implement                    |
-| `slack-adapter.mo` HMAC + normalize (39 KB)                                      | `@chat-adapter/slack`                                                | **Drop** (SDK does it)          |
-| `slack-wrapper.mo` (users.list, conversations.\*)                                | thin Slack Web API client for reads the chat SDK doesn't cover       | Partial migrate                 |
-| Timers (`Timer.setTimer`, `recurringTimer`)                                      | Workflows + Agents SDK `this.schedule()` / cron                      | Re-implement (smaller)          |
-| Threshold-Schnorr secret encryption + key cache                                  | Cloudflare Secrets Store, or WebCrypto AES-GCM                       | **Deferred**                    |
-| `http-certification.mo`, `httpCertStore`                                         | n/a (ICP query-certification concept)                                | **Drop**                        |
-| workflow envelope / nonce / scope grants / catalog hash                          | n/a (single-process tool authz; no cross-canister trust boundary)    | **Drop**                        |
-| Approval gate (Block Kit + `ApprovalTimer`)                                      | Agents SDK Workflows human-in-the-loop (later)                       | **Deferred**                    |
-| Agent registry + `::` routing                                                    | D1 tables + Agent Router inside the Message Workflow                 | Migrate                         |
-| Workspace + admin-channel model                                                  | D1 + Slack channel membership                                        | Migrate                         |
+| Original (ICP / Motoko)                                                          | Cloudflare target                                                     | Migrate / Simplify / Drop       |
+| -------------------------------------------------------------------------------- | --------------------------------------------------------------------- | ------------------------------- |
+| `control-plane-core` canister                                                    | Gateway Worker + Workflows + Registry (D1) + per-agent DOs            | Re-implement                    |
+| `internal-engine` canister (dynamic spawn)                                       | inline AI-SDK tool loop inside each agent DO                          | **Simplify**                    |
+| event store + router + per-event timer dispatch                                  | event handler classify → **Cloudflare Workflows**                     | **Re-shape**                    |
+| `events/handlers/*` (message, member-joined/left, team-join, msg-deleted/edited) | Lifecycle Workflow (non-agent) + Message Workflow (agent)             | Re-implement                    |
+| `agent-runner` + admin loop + OpenRouter wrapper                                 | per-agent AI-SDK loop (Workers AI) reached via **A2A**                | Re-implement                    |
+| sessions / turns / traces (bespoke)                                              | **Agents SDK Sessions API + context blocks** (writable SQLite memory) | **Drop our impl; use platform** |
+| channel-history-model (bespoke timeline)                                         | raw recent buffer + **Vectorize** embeddings via Compaction Workflow  | Re-implement (leaner)           |
+| Stable memory / canister `var`s                                                  | D1 (global registry) + per-agent DO SQLite                            | Re-implement                    |
+| `slack-adapter.mo` HMAC + normalize (39 KB)                                      | `@chat-adapter/slack`                                                 | **Drop** (SDK does it)          |
+| `slack-wrapper.mo` (users.list, conversations.\*)                                | thin Slack Web API client for reads the chat SDK doesn't cover        | Partial migrate                 |
+| Timers (`Timer.setTimer`, `recurringTimer`)                                      | Workflows + Agents SDK `this.schedule()` / cron                       | Re-implement (smaller)          |
+| Threshold-Schnorr secret encryption + key cache                                  | Cloudflare Secrets Store, or WebCrypto AES-GCM                        | **Deferred**                    |
+| `http-certification.mo`, `httpCertStore`                                         | n/a (ICP query-certification concept)                                 | **Drop**                        |
+| workflow envelope / nonce / scope grants / catalog hash                          | n/a (single-process tool authz; no cross-canister trust boundary)     | **Drop**                        |
+| Approval gate (Block Kit + `ApprovalTimer`)                                      | Agents SDK Workflows human-in-the-loop (later)                        | **Deferred**                    |
+| Agent registry + `::` routing                                                    | D1 tables + Agent Router inside the Message Workflow                  | Migrate                         |
+| Workspace + admin-channel model                                                  | D1 + Slack channel membership                                         | Migrate                         |
 
 ## Resolved decisions
 
@@ -72,9 +72,13 @@ a faithful port would re-import accidental complexity.
    then a **Cloudflare Workflow** does the work durably.
 5. **Agents reached over A2A.** Local (Admin/Onboarding) and remote (Custom)
    agents are dispatched the same way.
-6. **Session/memory is platform-managed.** Use Agents SDK **Sessions + Agent
-   Memory** (per-agent, cross-session). We do **not** build session/turn/trace
-   tables. Mental model: a **virtual co-worker**, not a help-desk chat thread.
+6. **Session/memory is platform-managed.** Use the Agents SDK **Sessions API +
+   context blocks** (`agents/experimental/memory/session`): managed conversation
+   history + compaction, a read-only `"soul"` identity block, and a **writable
+   SQLite `"memory"` scratchpad** the model self-edits via `set_context`. We do
+   **not** build session/turn/trace tables. There is **no** managed
+   Facts/Recall/Vectorize layer — long-term semantic recall was dropped; the
+   writable memory block is the model. Mental model: a **virtual co-worker**.
 
 ### Platform primitives we lean on (don't rebuild)
 
@@ -84,9 +88,10 @@ a faithful port would re-import accidental complexity.
   (the `agents` SDK ships no A2A surface). Local agents are reached in-process
   over their DO `stub.fetch` (the client's `fetchImpl` is bound to the stub);
   remote/custom agents use the same client over real HTTP. See Phase 3 below.
-- **Agents SDK Sessions + Agent Memory** — per-agent conversation history + managed
-  long-term memory (Facts/Events/Instructions/Tasks, Recall/Remember; vectors in
-  Vectorize; ingest-at-compaction).
+- **Agents SDK Sessions API + context blocks** — per-agent conversation history +
+  compaction, plus context blocks injected into the system prompt (read-only
+  `"soul"`, writable SQLite `"memory"`). Managed: storage, prompt assembly,
+  compaction, token accounting. (No managed Facts/Recall/Vectorize layer.)
 - **Vectorize + Workers AI embeddings** — channel-history compaction index.
 - **D1** — global relational registry (workspaces / users / agents).
 
@@ -200,7 +205,7 @@ flowchart LR
 | Registry (workspaces / users / agents)     | D1                                          |
 | Admin + Onboarding agents                  | this repo (per-agent DOs, A2A servers)      |
 | Custom agents                              | **remote**, outside this repo (A2A)         |
-| Sessions + Agent Memory                    | Cloudflare-managed (Agents SDK + Vectorize) |
+| Sessions + context-block memory            | per-agent DO SQLite (Agents SDK Sessions)   |
 | Channel-history index                      | this repo's Compaction Workflow → Vectorize |
 
 ### Authorization (kept from original — permissions inherit here)
@@ -254,11 +259,18 @@ audit/round-limit trail — revisit later.)
    that serve A2A via a small `fetch` bridge (`src/a2a/serve.ts`) over the SDK's
    `DefaultRequestHandler`; Phase-3 behavior is an `EchoExecutor` placeholder.
    They can later `extend Agent` (same class name + SQLite) with no migration.
-4. **Admin agent (in-repo, A2A server)** — replace `AdminAgent`'s `EchoExecutor`
-   with an AI-SDK loop + tools: agent-registry CRUD
-   (`agents_list/get/register/update/unregister`) + workspace mgmt
-   (`workspace_create/delete/get/set_admin_channel`) on D1, gated by the auth
-   context carried on `message.metadata` (built in the Message Workflow).
+4. **Admin agent (in-repo, A2A server)** — ✅ done. Replaced `AdminAgent`'s
+   `EchoExecutor` with a Workers-AI tool loop (`src/agents/admin/`). **One DO
+   instance per workspace** (`admin:{wsId}` — `admin:0` = org), each with its own
+   SQLite, so Sessions (conversation history + compaction) and a writable
+   `"memory"` context block evolve in isolation. Tools are consolidated to
+   read/write per domain (no proliferation): `agents_read` / `agents_write`
+   (register / update — incl. channel attach/detach — / unregister) and
+   `workspace_read` / `workspace_write` (create / set_admin_channel; **no
+   delete**). Capability is **instance-scoped**: `workspace_write` is only built
+   on `admin:0`; per-call `authorize()` (auth context on `message.metadata`) is
+   defense-in-depth. Provider isolated in `src/agents/model.ts`. (Vectorize semantic
+   recall dropped — the writable SQLite memory block is the memory model.)
 5. **Onboarding (DM) agent (in-repo, A2A server)** — concierge: explains the
    system, routes users, surfaces health/recovery info.
 6. **Channel history + `channel_search` tool** — raw buffer, Compaction Workflow →
@@ -290,7 +302,9 @@ audit/round-limit trail — revisit later.)
 
 ## Notes for later sessions
 
-- Confirm exact Agents SDK Sessions/Agent Memory bindings + Vectorize wiring.
+- ~~Confirm exact Agents SDK Sessions/Agent Memory bindings + Vectorize wiring.~~
+  Resolved (Phase 4): Sessions API (`agents/experimental/memory/session`, **experimental**)
+  - context blocks; agents `extend Agent` for `this.sql`. No Vectorize for admin memory.
 - A2A contract: `UserAuthContext` is now carried on `message.metadata` (trusted
   for local same-worker dispatch). Still open: streaming milestones / task
   lifecycle, and authenticating `metadata` for **remote** agents (Phase 7).

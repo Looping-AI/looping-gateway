@@ -41,6 +41,27 @@ export async function upsertWorkspace(
     });
 }
 
+export interface CreateWorkspaceInput {
+  name: string;
+  adminChannelId?: string | null;
+  slackTeamId?: string | null;
+}
+
+export async function createWorkspace(
+  db: Db,
+  input: CreateWorkspaceInput
+): Promise<WorkspaceRow> {
+  const rows = await db
+    .insert(schema.workspaces)
+    .values({
+      name: input.name,
+      adminChannelId: input.adminChannelId ?? null,
+      slackTeamId: input.slackTeamId ?? null
+    })
+    .returning();
+  return rows[0];
+}
+
 export async function getWorkspace(
   db: Db,
   id: number
