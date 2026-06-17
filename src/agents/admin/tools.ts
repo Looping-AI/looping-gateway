@@ -7,6 +7,7 @@ import {
   getAgent,
   getAgentChannels,
   listAgentsForWorkspace,
+  listChannelsForAgents,
   registerAgent,
   updateAgent,
   unregisterAgent,
@@ -51,8 +52,7 @@ function deny(reason: string): ToolResult {
   return { error: `Not authorized: ${reason}` };
 }
 
-/** Shape an agent row for the model (small, with its channel attachments). */
-async function present(db: Db, a: AgentRow): Promise<ToolResult> {
+function shape(a: AgentRow, channels: string[]): ToolResult {
   return {
     name: a.name,
     kind: a.kind,
@@ -60,8 +60,13 @@ async function present(db: Db, a: AgentRow): Promise<ToolResult> {
     enabled: a.enabled,
     a2aEndpoint: a.a2aEndpoint,
     workspaceId: a.workspaceId,
-    channels: await getAgentChannels(db, a.name)
+    channels
   };
+}
+
+/** Shape an agent row for the model (small, with its channel attachments). */
+async function present(db: Db, a: AgentRow): Promise<ToolResult> {
+  return shape(a, await getAgentChannels(db, a.name));
 }
 
 /** Resolve a write target: must exist, belong to this workspace, and be a custom agent. */
@@ -104,7 +109,17 @@ export async function agentsRead(
     };
   }
   const rows = await listAgentsForWorkspace(deps.db, deps.wsId);
-  return { agents: await Promise.all(rows.map((a) => present(deps.db, a))) };
+  const channelRows = await listChannelsForAgents(
+    deps.db,
+    rows.map((r) => r.name)
+  );
+  const byAgent = new Map<string, string[]>();
+  for (const { agentName, channelId } of channelRows) {
+    const entry = byAgent.get(agentName);
+    if (entry) entry.push(channelId);
+    else byAgent.set(agentName, [channelId]);
+  }
+  return { agents: rows.map((a) => shape(a, byAgent.get(a.name) ?? [])) };
 }
 
 export type AgentsWriteArgs =

@@ -1,4 +1,4 @@
-import { and, eq, sql } from "drizzle-orm";
+import { and, eq, inArray, sql } from "drizzle-orm";
 import type { Db } from "../client";
 import * as schema from "../schema";
 
@@ -111,6 +111,21 @@ export async function getAgentChannels(
     .from(schema.agentChannels)
     .where(eq(schema.agentChannels.agentName, agentName));
   return rows.map((r) => r.channelId);
+}
+
+/** Channel ids for a set of agents in one query (avoids N+1 in list paths). */
+export async function listChannelsForAgents(
+  db: Db,
+  agentNames: string[]
+): Promise<{ agentName: string; channelId: string }[]> {
+  if (agentNames.length === 0) return [];
+  return db
+    .select({
+      agentName: schema.agentChannels.agentName,
+      channelId: schema.agentChannels.channelId
+    })
+    .from(schema.agentChannels)
+    .where(inArray(schema.agentChannels.agentName, agentNames));
 }
 
 /** Insert a new agent row. Caller is responsible for uniqueness checks. */

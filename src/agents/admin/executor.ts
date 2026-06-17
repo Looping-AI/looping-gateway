@@ -153,7 +153,7 @@ export class AdminAgentExecutor implements AgentExecutor {
         stopWhen: stepCountIs(MAX_STEPS)
       };
 
-      let result;
+      let result: Awaited<ReturnType<typeof generateText>>;
       try {
         result = await generateText({
           model: this.getModel(),
