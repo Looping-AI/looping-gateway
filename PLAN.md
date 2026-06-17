@@ -269,7 +269,7 @@ audit/round-limit trail — revisit later.)
    `workspace_read` / `workspace_write` (create / set_admin_channel; **no
    delete**). Capability is **instance-scoped**: `workspace_write` is only built
    on `admin:0`; per-call `authorize()` (auth context on `message.metadata`) is
-   defense-in-depth. Provider isolated in `src/ai/model.ts`. (Vectorize semantic
+   defense-in-depth. Provider isolated in `src/agents/model.ts`. (Vectorize semantic
    recall dropped — the writable SQLite memory block is the memory model.)
 5. **Onboarding (DM) agent (in-repo, A2A server)** — concierge: explains the
    system, routes users, surfaces health/recovery info.

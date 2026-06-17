@@ -124,15 +124,16 @@ export class AdminAgentExecutor implements AgentExecutor {
     const text = textOf(userMessage);
     const metadata = (userMessage.metadata ?? {}) as Partial<DispatchMetadata>;
     const ctx = metadata.user ?? null;
-    if (metadata.workspaceId == null) {
-      throw new Error(
-        "[admin-executor] workspaceId is required in metadata for admin agents"
-      );
-    }
-    const wsId = metadata.workspaceId;
     let modelId = CHAT_MODEL_ID;
 
     try {
+      if (metadata.workspaceId == null) {
+        throw new Error(
+          "[admin-executor] workspaceId is required in metadata for admin agents"
+        );
+      }
+      const wsId = metadata.workspaceId;
+
       const session = this.getSession(wsId);
       await session.appendMessage(userSessionMessage(text));
 
@@ -180,7 +181,7 @@ export class AdminAgentExecutor implements AgentExecutor {
       this.publish(eventBus, requestContext.contextId, replyText);
     } catch (err) {
       console.error("[admin-executor] execute failed", {
-        wsId,
+        wsId: metadata.workspaceId,
         contextId: requestContext.contextId,
         model: modelId,
         err: String(err),

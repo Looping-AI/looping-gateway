@@ -15,8 +15,9 @@ const timestamp = (name: string) =>
 
 /**
  * Workspaces — logical sub-orgs, each mapped to a Slack admin channel.
- * `id` is OUR id (not a Slack team id) and is NOT autoincrement so that `0`
- * (the org sentinel, see ORG_WORKSPACE_ID) can be reserved explicitly.
+ * `id` is OUR id (not a Slack team id). It's a plain INTEGER PRIMARY KEY, i.e.
+ * the SQLite rowid: omit it on insert and SQLite assigns max(id)+1. `0`
+ * (ORG_WORKSPACE_ID) is seeded explicitly, so new rows auto-allocate from 1.
  * Membership of a workspace's `adminChannelId` ⇒ admin of that workspace.
  */
 export const workspaces = sqliteTable("workspaces", {
