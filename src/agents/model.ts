@@ -19,3 +19,33 @@ export function fallbackChatModel(env: Env): LanguageModel {
   });
   return workersai(CHAT_FALLBACK_MODEL_ID);
 }
+
+export interface ModelOverrides {
+  model?: LanguageModel; // test override for the primary
+  fallbackModel?: LanguageModel; // test override for the fallback
+}
+
+/** The primary/fallback models (lazily memoized) plus their ids for logging. */
+export interface ModelPair {
+  primary: () => LanguageModel;
+  fallback: () => LanguageModel;
+  primaryId: () => string;
+  fallbackId: () => string;
+}
+
+/** Lazily build + memoize the primary/fallback model pair (being used in tests). */
+export function createModelPair(
+  env: Env,
+  overrides: ModelOverrides = {}
+): ModelPair {
+  let primary: LanguageModel | undefined;
+  let fallback: LanguageModel | undefined;
+  return {
+    primary: () => (primary ??= overrides.model ?? chatModel(env)),
+    fallback: () =>
+      (fallback ??=
+        overrides.fallbackModel ?? overrides.model ?? fallbackChatModel(env)),
+    primaryId: () => CHAT_MODEL_ID,
+    fallbackId: () => CHAT_FALLBACK_MODEL_ID
+  };
+}

@@ -85,7 +85,9 @@ export const agents = sqliteTable(
     name: text("name").primaryKey(),
     kind: text("kind", { enum: ["admin", "onboarding", "custom"] }).notNull(),
     displayName: text("display_name"),
-    a2aEndpoint: text("a2a_endpoint"),
+    // Always set: custom agents carry a real HTTP endpoint; built-ins use an
+    // `http://{name}.local` sentinel. Routing is by `kind`, not this value.
+    a2aEndpoint: text("a2a_endpoint").notNull(),
     enabled: integer("enabled", { mode: "boolean" }).notNull().default(true),
     workspaceId: integer("workspace_id").references(() => workspaces.id),
     createdAt: timestamp("created_at"),

@@ -3,8 +3,12 @@ import type { WorkflowEvent, WorkflowStep } from "cloudflare:workers";
 import type { MessageWorkflowParams } from "@/slack/types";
 import { getDb } from "@/db/client";
 import { buildUserAuthContext } from "@/auth";
-import { resolveTarget, isDmChannel } from "@/router/resolve";
-import { dispatchToAgent, type DispatchAgentRef } from "@/agents/dispatch";
+import { resolveTarget } from "@/router/resolve";
+import {
+  dispatchToAgent,
+  type DispatchAgentRef,
+  type DispatchMetadata
+} from "@/agents/dispatch";
 import { postReply } from "@/wrappers/slack";
 
 export const NO_AGENT_HINT =
@@ -16,18 +20,19 @@ export type MessagePlan =
   | {
       kind: "agent";
       agent: DispatchAgentRef;
+      /** Workspace scope of the agent; null = org-wide (onboarding). */
       workspaceId: number | null;
       text: string;
-      user: Awaited<ReturnType<typeof buildUserAuthContext>> | null;
+      user: Awaited<ReturnType<typeof buildUserAuthContext>>;
     };
 
 // ---------------------------------------------------------------------------
 // Pure steps — called directly by MessageWorkflow.run() and exported for tests.
 // ---------------------------------------------------------------------------
 
-/** Reply in-thread for channel mentions; top-level for DMs. */
+/** Reply in-thread, anchored to the original message ts. */
 export function replyThreadTs(p: MessageWorkflowParams): string | null {
-  return isDmChannel(p.channelId) ? null : p.threadTs || p.ts;
+  return p.threadTs || p.ts;
 }
 
 /** Resolve the target agent + build the caller's auth context. */
@@ -43,7 +48,10 @@ export async function resolveMessage(
   if (target.kind === "none")
     return { kind: "none", userMessage: target.userMessage };
 
-  const user = p.userId ? await buildUserAuthContext(db, p.userId) : null;
+  // `userId` is guaranteed by the classifier (message events without a sender
+  // are ignored), so every caller has an auth context — unknown users get a
+  // zero-permission one rather than null.
+  const user = await buildUserAuthContext(db, p.userId);
   return {
     kind: "agent",
     agent: {
@@ -63,16 +71,24 @@ export async function dispatchMessage(
   p: MessageWorkflowParams,
   plan: Extract<MessagePlan, { kind: "agent" }>
 ): Promise<string> {
+  let metadata: DispatchMetadata; // per-kind extras only
+  if (plan.agent.kind === "admin") {
+    if (plan.workspaceId == null) {
+      throw new Error("BUG: admin agent resolved without a workspaceId");
+    }
+    metadata = { agentKind: "admin", adminWorkspaceId: plan.workspaceId };
+  } else if (plan.agent.kind === "onboarding") {
+    metadata = { agentKind: "onboarding" };
+  } else {
+    metadata = { agentKind: "custom" };
+  }
+
   return dispatchToAgent(env, plan.agent, {
     text: plan.text,
-    contextId: `${p.channelId}:${p.threadTs || p.ts}`,
-    metadata: {
-      user: plan.user,
-      channelId: p.channelId,
-      workspaceId: plan.workspaceId,
-      slackTeamId: p.teamId ?? null,
-      eventId: p.eventId
-    }
+    channelId: p.channelId,
+    threadTs: p.threadTs || p.ts,
+    user: plan.user,
+    metadata
   });
 }
 

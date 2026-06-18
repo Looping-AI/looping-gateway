@@ -44,6 +44,9 @@ export function classifyEvent(payload: SlackWebhookPayload): Classification {
       return { kind: "challenge", challenge: payload.challenge };
 
     case "app_mention":
+      if (!payload.userId) {
+        return { kind: "ignore", reason: "app_mention without a user id" };
+      }
       return {
         kind: "message",
         params: {
@@ -76,6 +79,9 @@ export function classifyEvent(payload: SlackWebhookPayload): Classification {
       }
       if (payload.botId || payload.subtype === "bot_message") {
         return { kind: "ignore", reason: "bot message" };
+      }
+      if (!payload.userId) {
+        return { kind: "ignore", reason: "direct message without a user id" };
       }
       return {
         kind: "message",

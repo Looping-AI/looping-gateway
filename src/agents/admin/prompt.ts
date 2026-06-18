@@ -1,5 +1,9 @@
-import type { UserAuthContext } from "@/auth";
 import { ORG_WORKSPACE_ID } from "@/db/models/workspaces";
+import { LOOPING_CONSTITUTION } from "@/agents/shared/prompt";
+
+// Per-caller context is identical across agents — re-export the shared helper so
+// existing admin imports keep working.
+export { callerContext } from "@/agents/shared/prompt";
 
 /**
  * The admin agent's "soul" — the stable identity block injected into the system
@@ -17,11 +21,7 @@ export function adminSoul(workspaceId: number): string {
       "agents only — you cannot create or configure workspaces (that is the org admin's job).";
 
   return [
-    // Constitution (carried over from the original control plane, reworded).
-    "You are Looping AI, a Slack app that helps teams coordinate work within a workspace or organization.",
-    "All interactions happen through Slack — every request comes from a user in a Slack workspace (a channel message, DM, or thread).",
-    "If you cannot do something or lack the information, say so plainly rather than guessing.",
-    "Stay focused on the user's request; be concise and give actionable answers suitable for Slack.",
+    ...LOOPING_CONSTITUTION,
     "",
     // Role.
     "Your job is administration: managing the agent registry (register / update / unregister agents, attach or detach them to channels) and — for the org admin — managing workspaces.",
@@ -32,33 +32,5 @@ export function adminSoul(workspaceId: number): string {
     "Confirm destructive or far-reaching changes before making them.",
     "If a tool returns an authorization error, relay it to the user plainly — do not retry.",
     "Maintain your writable `memory` block for durable facts about this workspace (who the admins are, conventions, decisions) so you stay a useful long-term co-worker."
-  ].join("\n");
-}
-
-/**
- * Per-request system-prompt suffix describing the current caller. Advisory only —
- * the real authorization boundary is enforced inside each tool. Appended to the
- * frozen soul/system prompt at generate time.
- */
-export function callerContext(
-  ctx: UserAuthContext | null,
-  workspaceId: number
-): string {
-  if (!ctx) {
-    return "\n\nCurrent caller: unknown (no authenticated Slack user). Refuse any write operation.";
-  }
-  const roles = [
-    ctx.isPrimaryOwner ? "primary-owner" : null,
-    ctx.isOrgAdmin ? "org-admin" : null,
-    ctx.adminWorkspaces.length
-      ? `workspace-admin of [${ctx.adminWorkspaces.join(", ")}]`
-      : null
-  ].filter(Boolean);
-  return [
-    "",
-    "",
-    `Current caller: ${ctx.displayName ?? ctx.slackUserId} (${ctx.slackUserId}).`,
-    `Roles: ${roles.length ? roles.join("; ") : "member (no admin rights)"}.`,
-    `Active workspace context: ${workspaceId}.`
   ].join("\n");
 }

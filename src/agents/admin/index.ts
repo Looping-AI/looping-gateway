@@ -1,8 +1,8 @@
 import type { AgentCard } from "@a2a-js/sdk";
 import type { AgentExecutor } from "@a2a-js/sdk/server";
 import { buildAgentCard } from "@/a2a/card";
-import { A2AAgent } from "./base";
-import { AdminAgentExecutor } from "./admin/executor";
+import { A2AAgent } from "../base";
+import { AdminAgentExecutor } from "./executor";
 
 /**
  * Admin agent (registry + workspace management). One Durable Object instance per

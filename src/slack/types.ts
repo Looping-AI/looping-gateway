@@ -8,7 +8,8 @@ export interface MessageWorkflowParams {
   channelId: string;
   threadTs: string;
   ts: string;
-  userId?: string;
+  /** Always set — the classifier ignores message events without a sender. */
+  userId: string;
   teamId?: string;
   text: string;
   raw: Record<string, unknown>;

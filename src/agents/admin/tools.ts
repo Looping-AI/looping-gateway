@@ -127,7 +127,7 @@ export type AgentsWriteArgs =
       operation: "register";
       name: string;
       displayName?: string;
-      a2aEndpoint?: string;
+      a2aEndpoint: string;
     }
   | {
       operation: "update";
@@ -160,7 +160,7 @@ export async function agentsWrite(
         name: args.name,
         kind: "custom",
         displayName: args.displayName ?? null,
-        a2aEndpoint: args.a2aEndpoint ?? null,
+        a2aEndpoint: args.a2aEndpoint,
         workspaceId: deps.wsId
       });
       return { ok: true, agent: await present(deps.db, row) };
@@ -279,14 +279,18 @@ export function buildAdminTools(deps: AdminToolDeps): ToolSet {
           displayName: z.string().optional(),
           a2aEndpoint: z
             .string()
-            .optional()
-            .describe("Remote A2A endpoint URL for a custom agent")
+            .describe("Remote A2A endpoint URL for the custom agent (required)")
         }),
         z.object({
           operation: z.literal("update"),
           name: z.string(),
           displayName: z.string().optional(),
-          enabled: z.boolean().optional(),
+          enabled: z
+            .boolean()
+            .optional()
+            .describe(
+              "Set false to disable — disabled agents receive no messages and won't be routed to"
+            ),
           a2aEndpoint: z.string().optional(),
           attachChannels: z
             .array(z.string())
