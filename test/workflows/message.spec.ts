@@ -114,7 +114,7 @@ describe("MessageWorkflow (introspectWorkflow)", () => {
     }
   });
 
-  it("DM: resolve → dispatch → reply steps complete, top-level reply (no thread_ts)", async () => {
+  it("DM: resolve → dispatch → reply steps complete, threaded reply (thread_ts = ts)", async () => {
     const calls = captureSlack();
     const introspector = await introspectWorkflow(env.MESSAGE_WORKFLOW);
     try {
@@ -134,7 +134,7 @@ describe("MessageWorkflow (introspectWorkflow)", () => {
       expect(calls).toHaveLength(1);
       expect(calls[0]).toMatchObject({ channel: "D1" });
       expect(calls[0].text.length).toBeGreaterThan(0);
-      expect(calls[0].thread_ts).toBeUndefined();
+      expect(calls[0].thread_ts).toBe("1700.1");
     } finally {
       await introspector.dispose();
     }

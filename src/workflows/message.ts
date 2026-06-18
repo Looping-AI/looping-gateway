@@ -3,7 +3,7 @@ import type { WorkflowEvent, WorkflowStep } from "cloudflare:workers";
 import type { MessageWorkflowParams } from "@/slack/types";
 import { getDb } from "@/db/client";
 import { buildUserAuthContext } from "@/auth";
-import { resolveTarget, isDmChannel } from "@/router/resolve";
+import { resolveTarget } from "@/router/resolve";
 import {
   dispatchToAgent,
   type DispatchAgentRef,
@@ -30,9 +30,9 @@ export type MessagePlan =
 // Pure steps — called directly by MessageWorkflow.run() and exported for tests.
 // ---------------------------------------------------------------------------
 
-/** Reply in-thread for channel mentions; top-level for DMs. */
+/** Reply in-thread, anchored to the original message ts. */
 export function replyThreadTs(p: MessageWorkflowParams): string | null {
-  return isDmChannel(p.channelId) ? null : p.threadTs || p.ts;
+  return p.threadTs || p.ts;
 }
 
 /** Resolve the target agent + build the caller's auth context. */

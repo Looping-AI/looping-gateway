@@ -1,6 +1,7 @@
 import { callSlackApi, assertSlackOk } from "@chat-adapter/slack/api";
 import type { SlackApiResponse } from "@chat-adapter/slack/api";
 import { pickDisplayName } from "@/util/display-name";
+import { markdownToMrkdwn } from "@/util/mrkdwn";
 
 // Thin, cursor-paginated wrappers over the Slack reads the chat SDK doesn't
 // cover. `callSlackApi` only throws on HTTP errors, so we assertSlackOk to
@@ -155,7 +156,7 @@ export async function postReply(
       "chat.postMessage",
       {
         channel: channelId,
-        text,
+        text: markdownToMrkdwn(text),
         ...(threadTs ? { thread_ts: threadTs } : {})
       },
       { token: env.SLACK_BOT_TOKEN }
