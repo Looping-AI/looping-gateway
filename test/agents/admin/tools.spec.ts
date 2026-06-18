@@ -43,7 +43,8 @@ describe("admin tools — agents_write / agents_read", () => {
     const reg = await agentsWrite(d, {
       operation: "register",
       name: "tool-agent-a",
-      displayName: "Tool Agent A"
+      displayName: "Tool Agent A",
+      a2aEndpoint: "https://example.com/tool-agent-a"
     });
     expect(reg).toMatchObject({ ok: true });
 
@@ -62,7 +63,11 @@ describe("admin tools — agents_write / agents_read", () => {
     const d = deps(101, ctx({ adminWorkspaces: [999] }));
     expect(await agentsRead(d, {})).toHaveProperty("error");
     expect(
-      await agentsWrite(d, { operation: "register", name: "nope" })
+      await agentsWrite(d, {
+        operation: "register",
+        name: "nope",
+        a2aEndpoint: "https://example.com/nope"
+      })
     ).toHaveProperty("error");
   });
 
@@ -74,7 +79,11 @@ describe("admin tools — agents_write / agents_read", () => {
   it("refuses reserved/built-in names and duplicates", async () => {
     const d = deps(ORG_WORKSPACE_ID, orgAdmin);
     expect(
-      await agentsWrite(d, { operation: "register", name: "admin" })
+      await agentsWrite(d, {
+        operation: "register",
+        name: "admin",
+        a2aEndpoint: "https://example.com/admin"
+      })
     ).toHaveProperty("error");
     // built-in admin row cannot be modified
     expect(
@@ -83,16 +92,28 @@ describe("admin tools — agents_write / agents_read", () => {
 
     const wsId = await freshWsId("tools-ws-dup");
     const d2 = deps(wsId, ctx({ adminWorkspaces: [wsId] }));
-    await agentsWrite(d2, { operation: "register", name: "dup-agent" });
+    await agentsWrite(d2, {
+      operation: "register",
+      name: "dup-agent",
+      a2aEndpoint: "https://example.com/dup-agent"
+    });
     expect(
-      await agentsWrite(d2, { operation: "register", name: "dup-agent" })
+      await agentsWrite(d2, {
+        operation: "register",
+        name: "dup-agent",
+        a2aEndpoint: "https://example.com/dup-agent"
+      })
     ).toHaveProperty("error");
   });
 
   it("update attaches and detaches channels", async () => {
     const wsId = await freshWsId("tools-ws-chan");
     const d = deps(wsId, ctx({ adminWorkspaces: [wsId] }));
-    await agentsWrite(d, { operation: "register", name: "chan-agent" });
+    await agentsWrite(d, {
+      operation: "register",
+      name: "chan-agent",
+      a2aEndpoint: "https://example.com/chan-agent"
+    });
     await agentsWrite(d, {
       operation: "update",
       name: "chan-agent",
@@ -120,7 +141,11 @@ describe("admin tools — agents_write / agents_read", () => {
     const wsA = await freshWsId("tools-ws-owner");
     const wsB = await freshWsId("tools-ws-other");
     const owner = deps(wsA, ctx({ adminWorkspaces: [wsA] }));
-    await agentsWrite(owner, { operation: "register", name: "wsA-agent" });
+    await agentsWrite(owner, {
+      operation: "register",
+      name: "wsA-agent",
+      a2aEndpoint: "https://example.com/wsA-agent"
+    });
     const other = deps(wsB, ctx({ adminWorkspaces: [wsB] }));
     expect(
       await agentsWrite(other, { operation: "unregister", name: "wsA-agent" })

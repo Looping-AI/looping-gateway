@@ -9,14 +9,15 @@ export interface RegisterAgentInput {
   name: string;
   kind: AgentKind;
   displayName?: string | null;
-  a2aEndpoint?: string | null;
+  /** Required: custom agents are remote and addressed by this HTTP endpoint. */
+  a2aEndpoint: string;
   workspaceId: number | null;
 }
 
 /** Patch for `updateAgent` — only provided fields are written. */
 export interface UpdateAgentPatch {
   displayName?: string | null;
-  a2aEndpoint?: string | null;
+  a2aEndpoint?: string;
   enabled?: boolean;
 }
 
@@ -139,7 +140,7 @@ export async function registerAgent(
       name: input.name,
       kind: input.kind,
       displayName: input.displayName ?? null,
-      a2aEndpoint: input.a2aEndpoint ?? null,
+      a2aEndpoint: input.a2aEndpoint,
       workspaceId: input.workspaceId
     })
     .returning();

@@ -2,20 +2,17 @@ import { describe, it, expect } from "vitest";
 import { env } from "cloudflare:workers";
 import { MockLanguageModelV3 } from "ai/test";
 import type { SessionMessage } from "agents/experimental/memory/session";
-import {
-  AdminAgentExecutor,
-  type SessionHost,
-  type SessionLike
-} from "@/agents/admin/executor";
+import { OnboardingAgentExecutor } from "@/agents/onboarding/executor";
+import type { SessionHost, SessionLike } from "@/agents/shared/session";
 import type { UserAuthContext } from "@/auth";
 
 const sqlHost: SessionHost = { sql: () => [] };
 
 const caller: UserAuthContext = {
-  slackUserId: "U1",
-  displayName: "Tester",
+  slackUserId: "U_onb",
+  displayName: "Newbie",
   isPrimaryOwner: false,
-  isOrgAdmin: true,
+  isOrgAdmin: false,
   adminWorkspaces: []
 };
 
@@ -45,16 +42,15 @@ function makeRequest() {
     }
   };
   const requestContext = {
-    contextId: "C_ADMIN:thread-1",
+    contextId: "D_ONB:thread-1",
     userMessage: {
       kind: "message",
       messageId: "m1",
       role: "user",
-      parts: [{ kind: "text", text: "list agents" }],
+      parts: [{ kind: "text", text: "how does Looping work?" }],
       metadata: {
         user: caller,
-        agentKind: "admin",
-        adminWorkspaceId: 0
+        agentKind: "onboarding"
       }
     }
   };
@@ -81,13 +77,14 @@ function okResult(text: string) {
   };
 }
 
-describe("AdminAgentExecutor", () => {
+describe("OnboardingAgentExecutor", () => {
   it("runs the loop and publishes the model's reply", async () => {
     const session = new FakeSession();
     const model = new MockLanguageModelV3({
-      doGenerate: async () => okResult("Here are your agents.") as never
+      doGenerate: async () =>
+        okResult("Looping routes work through Slack.") as never
     });
-    const exec = new AdminAgentExecutor(sqlHost, env, {
+    const exec = new OnboardingAgentExecutor(sqlHost, env, {
       model,
       createSession: () => session
     });
@@ -97,14 +94,14 @@ describe("AdminAgentExecutor", () => {
 
     expect(t.isFinished()).toBe(true);
     expect(t.published).toHaveLength(1);
-    expect(t.published[0].parts[0].text).toBe("Here are your agents.");
+    expect(t.published[0].parts[0].text).toBe(
+      "Looping routes work through Slack."
+    );
     // user turn + assistant turn persisted
     expect(session.messages.map((m) => m.role)).toEqual(["user", "assistant"]);
   });
 
   it("publishes a friendly error and still finishes when the loop throws", async () => {
-    // A session whose history read fails exercises the executor's catch path
-    // without invoking the model (and its telemetry internals).
     class ThrowingSession extends FakeSession {
       async refreshSystemPrompt(): Promise<string> {
         throw new Error("memory boom");
@@ -113,7 +110,7 @@ describe("AdminAgentExecutor", () => {
     const model = new MockLanguageModelV3({
       doGenerate: async () => okResult("unused") as never
     });
-    const exec = new AdminAgentExecutor(sqlHost, env, {
+    const exec = new OnboardingAgentExecutor(sqlHost, env, {
       model,
       createSession: () => new ThrowingSession()
     });

@@ -20,13 +20,13 @@ beforeAll(async () => {
 
   // Custom agents in agent_channels.
   await env.DB.prepare(
-    "INSERT OR IGNORE INTO agents (name, kind, enabled, workspace_id) VALUES ('weather','custom',1,0)"
+    "INSERT OR IGNORE INTO agents (name, kind, enabled, workspace_id, a2a_endpoint) VALUES ('weather','custom',1,0,'https://example.com/weather')"
   ).run();
   await env.DB.prepare(
-    "INSERT OR IGNORE INTO agents (name, kind, enabled, workspace_id) VALUES ('sales','custom',1,0)"
+    "INSERT OR IGNORE INTO agents (name, kind, enabled, workspace_id, a2a_endpoint) VALUES ('sales','custom',1,0,'https://example.com/sales')"
   ).run();
   await env.DB.prepare(
-    "INSERT OR IGNORE INTO agents (name, kind, enabled) VALUES ('off','custom',0)"
+    "INSERT OR IGNORE INTO agents (name, kind, enabled, a2a_endpoint) VALUES ('off','custom',0,'https://example.com/off')"
   ).run();
 
   // C_WEATHER → weather only.

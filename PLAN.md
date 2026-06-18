@@ -271,11 +271,28 @@ audit/round-limit trail — revisit later.)
    on `admin:0`; per-call `authorize()` (auth context on `message.metadata`) is
    defense-in-depth. Provider isolated in `src/agents/model.ts`. (Vectorize semantic
    recall dropped — the writable SQLite memory block is the memory model.)
-5. **Onboarding (DM) agent (in-repo, A2A server)** — concierge: explains the
-   system, routes users, surfaces health/recovery info.
+5. **Onboarding (DM) agent (in-repo, A2A server)** — ✅ done. Replaced
+   `OnboardingAgent`'s `EchoExecutor` with a Workers-AI concierge loop
+   (`src/agents/onboarding/`). **One DO instance per user**
+   (`onboarding:{slackUserId}` — keyed off `DispatchMetadata.slackUserId`), each
+   with isolated Sessions + a writable `"memory"` block about that user. The
+   agent is **read-only** and serves everyone: a single consolidated
+   `directory_read` tool (operations `agents` / `workspaces` / `health`,
+   self-scoped to the caller's `UserAuthContext`) that explains the system,
+   **routes by words** (no A2A handoff — keeps Slack re-entry), and surfaces
+   health computed live from the registry (reconcile results aren't persisted).
+   The generic turn loop, Session factory, message glue, and `callerContext` were
+   extracted to `src/agents/shared/` and the Phase-4 admin agent refactored to
+   reuse them.
 6. **Channel history + `channel_search` tool** — raw buffer, Compaction Workflow →
    Vectorize, search tool (Slack + semantic).
 7. **Remote/custom A2A agents** — register external A2A endpoints; route to them.
+8. **Slack team-id hardening** — the worker serves exactly one Slack team, so
+   `team_id` is a global invariant, not per-message data (it was removed from
+   dispatch metadata). Add a reconcile job that asserts the configured `team_id`
+   matches incoming events, runs on worker deploy and whenever the bot-token
+   secret rotates, and locks the worker down (refuses requests) on mismatch —
+   otherwise channel-id and role assumptions silently break under a team swap.
 
 ## Verification
 

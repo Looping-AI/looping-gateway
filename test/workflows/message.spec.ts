@@ -125,11 +125,15 @@ describe("MessageWorkflow (introspectWorkflow)", () => {
       const [instance] = introspector.get();
       await instance.waitForStatus("complete");
 
+      // The onboarding concierge now runs the real AI loop (Workers AI), keyed to
+      // a per-user DO instance. That binding is unavailable offline, so the
+      // executor's graceful fallback posts instead — either way this asserts the
+      // plumbing: Workflow → A2A → OnboardingAgent DO (Session over SQLite) →
+      // top-level reply (no thread_ts). The AI text is covered by the executor
+      // unit test and the manual e2e.
       expect(calls).toHaveLength(1);
-      expect(calls[0]).toMatchObject({
-        channel: "D1",
-        text: "You said: hey there"
-      });
+      expect(calls[0]).toMatchObject({ channel: "D1" });
+      expect(calls[0].text.length).toBeGreaterThan(0);
       expect(calls[0].thread_ts).toBeUndefined();
     } finally {
       await introspector.dispose();

@@ -15,6 +15,27 @@
       "when": 1781457499821,
       "tag": "0001_seed_builtins",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1781543899821,
+      "tag": "0002_agent_channels_composite_pk",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "6",
+      "when": 1781630299821,
+      "tag": "0003_idx_agents_workspace_id",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "6",
+      "when": 1781716699821,
+      "tag": "0004_agents_endpoint_notnull",
+      "breakpoints": true
     }
   ]
 }

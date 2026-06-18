@@ -5,7 +5,7 @@ import type { SessionMessage } from "agents/experimental/memory/session";
  * Glue between A2A text and the Agents SDK Sessions store. We persist only the
  * user turn and the assistant's final text — intra-turn tool steps stay inside
  * the single `generateText` call, so history is plain text messages and the
- * conversion to AI-SDK `ModelMessage`s is trivial.
+ * conversion to AI-SDK `ModelMessage`s is trivial. Shared by every in-repo agent.
  */
 
 function textPart(text: string): SessionMessage {

@@ -8,28 +8,54 @@ import { sendA2AMessage } from "@/a2a/client";
 export interface DispatchAgentRef {
   name: string;
   kind: AgentRow["kind"];
-  a2aEndpoint: string | null;
+  a2aEndpoint: string;
 }
 
-/** Routing + auth context carried to the agent on `message.metadata`. */
-export interface DispatchMetadata {
-  user: UserAuthContext | null;
-  channelId: string;
-  workspaceId: number | null;
-  slackTeamId: string | null;
-  eventId: string;
-}
+/**
+ * The per-kind routing extras carried alongside the caller. The universal
+ * `user` lives on {@link DispatchPayload}; this union holds only the fields that
+ * differ by agent kind. `agentKind` is the discriminant the executor narrows on
+ * (it reads deserialized JSON and has no access to {@link DispatchAgentRef}).
+ */
+export type DispatchMetadata =
+  | { agentKind: "admin"; adminWorkspaceId: number }
+  | { agentKind: "onboarding" }
+  | { agentKind: "custom" };
+
+/** What rides on the A2A `message.metadata` and what the executor reads back. */
+export type AgentTurnMetadata = { user: UserAuthContext } & DispatchMetadata;
 
 export interface DispatchPayload {
   /** Cleaned user text (bot mention + `::ref` stripped). */
   text: string;
-  /** Stable per-thread id, e.g. `"{channelId}:{threadTs}"`. */
-  contextId: string;
+  /** Slack channel id — combined with `threadTs` into the A2A `contextId`. */
+  channelId: string;
+  /** Thread timestamp (or message `ts` for top-level) — the thread key. */
+  threadTs: string;
+  /** The caller — ALWAYS present (the classifier boundary guarantees it). */
+  user: UserAuthContext;
+  /** Only the per-kind extras; merged with `user` onto the wire metadata. */
   metadata: DispatchMetadata;
 }
 
+/** Stable per-thread A2A context id, e.g. `"{channelId}:{threadTs}"`. */
+export const buildContextId = (channelId: string, threadTs: string): string =>
+  `${channelId}:${threadTs}`;
+
+/** Inverse of {@link buildContextId}; splits on the first `:` only. */
+export function parseContextId(id: string): {
+  channelId: string;
+  threadTs: string;
+} {
+  const sep = id.indexOf(":");
+  return sep === -1
+    ? { channelId: id, threadTs: "" }
+    : { channelId: id.slice(0, sep), threadTs: id.slice(sep + 1) };
+}
+
 // Built-in local agents map their `kind` to a Durable Object namespace binding.
-// Custom agents are remote and addressed by `a2aEndpoint` instead.
+// Routing is decided by `kind` (not the endpoint): a kind in this map is local,
+// everything else (custom) is reached over HTTP at its `a2aEndpoint`.
 const LOCAL_BINDINGS: Partial<Record<AgentRow["kind"], keyof Env>> = {
   admin: "AdminAgent",
   onboarding: "OnboardingAgent"
@@ -37,60 +63,58 @@ const LOCAL_BINDINGS: Partial<Record<AgentRow["kind"], keyof Env>> = {
 
 /**
  * Durable Object instance name for a local agent. The admin agent runs **one
- * instance per workspace** (`admin:0` = org, `admin:1`, …) so each has its own
- * SQLite — isolated Sessions + memory. Other kinds use a single instance keyed
- * by name (onboarding may move to per-user in Phase 5).
+ * instance per workspace** (`admin:0` = org, `admin:1`, …) and the onboarding
+ * concierge runs **one instance per user** (`onboarding:{slackUserId}`), so each
+ * has its own SQLite — isolated Sessions + memory. Other kinds use a single
+ * instance keyed by name.
  */
-export function instanceNameFor(
-  agent: DispatchAgentRef,
-  metadata: DispatchMetadata
-): string {
-  if (agent.kind === "admin") {
-    if (metadata.workspaceId == null) {
+export function instanceNameFor(metadata: AgentTurnMetadata): string {
+  switch (metadata.agentKind) {
+    case "admin":
+      return `admin:${metadata.adminWorkspaceId}`;
+    case "onboarding":
+      return `onboarding:${metadata.user.slackUserId}`;
+    default:
       throw new Error(
-        "[dispatch] workspaceId is required in metadata for admin agents"
+        `unreachable: unhandled agentKind '${metadata.agentKind}'`
       );
-    }
-    return `admin:${metadata.workspaceId}`;
   }
-  return agent.name;
 }
 
 /**
  * Dispatch a user message to an agent over A2A and return its reply text.
- * Local built-in agents are reached in-process via their DO `stub.fetch`; remote
- * custom agents (with an `a2aEndpoint`) go over real HTTP (Phase 7).
+ * Routing is by `agent.kind`: built-in local agents are reached in-process via
+ * their DO `stub.fetch`; custom agents go over real HTTP at their `a2aEndpoint`.
  */
 export async function dispatchToAgent(
   env: Env,
   agent: DispatchAgentRef,
   payload: DispatchPayload
 ): Promise<string> {
+  // Merge the universal caller with the per-kind extras for the wire.
+  const metadata: AgentTurnMetadata = {
+    user: payload.user,
+    ...payload.metadata
+  };
   const message: Message = {
     kind: "message",
     messageId: crypto.randomUUID(),
     role: "user",
     parts: [{ kind: "text", text: payload.text }],
-    contextId: payload.contextId,
-    metadata: { ...payload.metadata }
+    contextId: buildContextId(payload.channelId, payload.threadTs),
+    metadata: { ...metadata }
   };
-
-  if (agent.a2aEndpoint) {
-    const reply = await sendA2AMessage(
-      { kind: "remote", endpoint: agent.a2aEndpoint },
-      message
-    );
-    return reply;
-  }
 
   const bindingName = LOCAL_BINDINGS[agent.kind];
   if (!bindingName) {
-    throw new Error(
-      `No local A2A binding for agent "${agent.name}" (kind="${agent.kind}") and no a2aEndpoint set`
+    // Custom agent → real HTTP. `a2aEndpoint` is guaranteed non-null.
+    return sendA2AMessage(
+      { kind: "remote", endpoint: agent.a2aEndpoint },
+      message
     );
   }
 
-  const instanceName = instanceNameFor(agent, payload.metadata);
+  const instanceName = instanceNameFor(metadata);
 
   const ns = env[bindingName] as DurableObjectNamespace;
   const stub = ns.get(ns.idFromName(instanceName));
