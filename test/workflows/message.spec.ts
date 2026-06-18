@@ -129,7 +129,7 @@ describe("MessageWorkflow (introspectWorkflow)", () => {
       // a per-user DO instance. That binding is unavailable offline, so the
       // executor's graceful fallback posts instead — either way this asserts the
       // plumbing: Workflow → A2A → OnboardingAgent DO (Session over SQLite) →
-      // top-level reply (no thread_ts). The AI text is covered by the executor
+      // threaded reply (thread_ts = ts). The AI text is covered by the executor
       // unit test and the manual e2e.
       expect(calls).toHaveLength(1);
       expect(calls[0]).toMatchObject({ channel: "D1" });
