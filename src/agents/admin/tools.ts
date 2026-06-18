@@ -285,7 +285,12 @@ export function buildAdminTools(deps: AdminToolDeps): ToolSet {
           operation: z.literal("update"),
           name: z.string(),
           displayName: z.string().optional(),
-          enabled: z.boolean().optional(),
+          enabled: z
+            .boolean()
+            .optional()
+            .describe(
+              "Set false to disable — disabled agents receive no messages and won't be routed to"
+            ),
           a2aEndpoint: z.string().optional(),
           attachChannels: z
             .array(z.string())

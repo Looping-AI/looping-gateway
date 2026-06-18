@@ -40,7 +40,7 @@ type WsList = {
 };
 
 describe("onboarding tools — directory_read agents", () => {
-  it("shows built-ins plus the caller's own workspace agents, hiding others'", async () => {
+  it("shows every enabled agent to any caller, regardless of workspace", async () => {
     const mine = await freshWsId("onb-mine");
     const other = await freshWsId("onb-other");
     await registerAgent(db, {
@@ -56,17 +56,16 @@ describe("onboarding tools — directory_read agents", () => {
       workspaceId: other
     });
 
-    const res = (await directoryAgents(
-      deps(ctx({ adminWorkspaces: [mine] }))
-    )) as AgentList;
+    // A plain member (admins nothing) still sees the whole directory.
+    const res = (await directoryAgents(deps(ctx()))) as AgentList;
     const names = res.agents.map((a) => a.name);
 
     // Built-in concierge/admin are always reachable.
     expect(names).toContain("admin");
     expect(names).toContain("onboarding");
-    // Own-workspace custom agent visible; another workspace's hidden.
+    // Custom agents from any workspace are routing info, not secrets.
     expect(names).toContain("onb-mine-agent");
-    expect(names).not.toContain("onb-other-agent");
+    expect(names).toContain("onb-other-agent");
   });
 
   it("hides disabled agents", async () => {

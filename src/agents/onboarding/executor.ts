@@ -76,6 +76,10 @@ export class OnboardingAgentExecutor implements AgentExecutor {
       unexpectedReply:
         "Sorry, I hit an unexpected error. Please try again in a moment.",
       prepare: async (_text, metadata) => {
+        // Validate the deserialized wire metadata at this boundary.
+        if (metadata.agentKind !== "onboarding") {
+          throw new Error("[onboarding-executor] expected onboarding metadata");
+        }
         const ctx = metadata.user ?? null;
         return {
           session: this.getSession(),

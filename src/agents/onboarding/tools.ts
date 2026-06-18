@@ -5,7 +5,7 @@ import type { Db } from "@/db/client";
 import {
   type AgentRow,
   listAgents,
-  getAgentChannels
+  listChannelsForAgents
 } from "@/db/models/agents";
 import {
   type WorkspaceRow,
@@ -39,11 +39,6 @@ function seesAllWorkspaces(ctx: UserAuthContext): boolean {
   return ctx.isOrgAdmin || ctx.isPrimaryOwner;
 }
 
-/** Workspace ids the caller may see (all for org admin, else their admin set). */
-function visibleWorkspaceIds(ctx: UserAuthContext, all: number[]): number[] {
-  return seesAllWorkspaces(ctx) ? all : ctx.adminWorkspaces;
-}
-
 function shapeAgent(a: AgentRow, channels: string[]): ToolResult {
   return {
     name: a.name,
@@ -67,33 +62,29 @@ function shapeWorkspace(ws: WorkspaceRow): ToolResult {
 // Pure handlers (exported for tests).
 // ---------------------------------------------------------------------------
 
-/** Enabled agents the caller can reach: built-ins + agents in their workspaces. */
+/**
+ * Every enabled agent — built-ins + custom — surfaced to any caller. Agent names
+ * and the channels they live in are routing info, not secrets: a `::ref` only
+ * works in a channel an admin already allowed, so showing the directory is what
+ * lets the concierge route members to the right place.
+ */
 export async function directoryAgents(
   deps: OnboardingToolDeps
 ): Promise<ToolResult> {
-  const all = await listAgents(deps.db);
-  const visibleWs = deps.ctx
-    ? new Set(
-        visibleWorkspaceIds(
-          deps.ctx,
-          all.map((a) => a.workspaceId ?? -1)
-        )
-      )
-    : new Set<number>();
-
-  const reachable = all.filter(
-    (a) =>
-      a.enabled &&
-      (a.kind !== "custom" ||
-        a.workspaceId == null ||
-        visibleWs.has(a.workspaceId))
+  const enabled = (await listAgents(deps.db)).filter((a) => a.enabled);
+  const channelsByAgent = await listChannelsForAgents(
+    deps.db,
+    enabled.map((a) => a.name)
   );
-
-  const agents: ToolResult[] = [];
-  for (const a of reachable) {
-    agents.push(shapeAgent(a, await getAgentChannels(deps.db, a.name)));
+  const byAgent = new Map<string, string[]>();
+  for (const { agentName, channelId } of channelsByAgent) {
+    const entry = byAgent.get(agentName);
+    if (entry) entry.push(channelId);
+    else byAgent.set(agentName, [channelId]);
   }
-  return { agents };
+  return {
+    agents: enabled.map((a) => shapeAgent(a, byAgent.get(a.name) ?? []))
+  };
 }
 
 /** Workspaces the caller administers (all of them for the org admin / owner). */
@@ -153,10 +144,9 @@ export async function directoryHealth(
 // AI-SDK tool wiring — thin wrapper over the handlers above.
 // ---------------------------------------------------------------------------
 
-export type DirectoryReadArgs =
-  | { operation: "agents" }
-  | { operation: "workspaces" }
-  | { operation: "health" };
+export type DirectoryReadArgs = {
+  operation: "agents" | "workspaces" | "health";
+};
 
 export async function directoryRead(
   deps: OnboardingToolDeps,
@@ -181,11 +171,9 @@ export function buildOnboardingTools(deps: OnboardingToolDeps): ToolSet {
         "operation=agents lists agents you can reach (and the channels they're in); " +
         "operation=workspaces lists workspaces you administer (with their admin channels); " +
         "operation=health reports whether you're registered and basic system status.",
-      inputSchema: z.discriminatedUnion("operation", [
-        z.object({ operation: z.literal("agents") }),
-        z.object({ operation: z.literal("workspaces") }),
-        z.object({ operation: z.literal("health") })
-      ]),
+      inputSchema: z.object({
+        operation: z.enum(["agents", "workspaces", "health"])
+      }),
       execute: (args) => directoryRead(deps, args)
     })
   };
