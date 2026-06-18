@@ -73,7 +73,7 @@ function publish(
 /**
  * The generic agent turn shared by every in-repo agent: append the user message,
  * run a Workers-AI `generateText` tool loop over the Session history (primary →
- * fallback model on transient error), persist + publish the final reply, and
+ * fallback model on any error), persist + publish the final reply, and
  * always `finished()`. Agent-specific behavior (which session, which tools, which
  * caller context) is supplied by `cfg.prepare`.
  */
