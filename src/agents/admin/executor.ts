@@ -3,10 +3,8 @@ import type {
   ExecutionEventBus,
   RequestContext
 } from "@a2a-js/sdk/server";
-import type { LanguageModel } from "ai";
 import { getDb } from "@/db/client";
-import { chatModel, fallbackChatModel } from "@/agents/model";
-import { CHAT_MODEL_ID, CHAT_FALLBACK_MODEL_ID } from "@/config";
+import { createModelPair, type ModelOverrides } from "@/agents/model";
 import {
   buildAgentSession,
   type SessionHost,
@@ -22,8 +20,7 @@ export type { SessionHost, SessionLike } from "@/agents/shared/session";
 const COMPACT_AFTER_TOKENS = 60_000;
 
 /** Test seams — production uses the defaults (real model + Sessions store). */
-export interface AdminExecutorOptions {
-  model?: LanguageModel;
+export interface AdminExecutorOptions extends ModelOverrides {
   createSession?: (wsId: number) => SessionLike;
 }
 
@@ -38,17 +35,14 @@ export interface AdminExecutorOptions {
  */
 export class AdminAgentExecutor implements AgentExecutor {
   private session?: SessionLike;
-  private model?: LanguageModel;
+  private readonly models: ReturnType<typeof createModelPair>;
 
   constructor(
     private readonly agent: SessionHost,
     private readonly env: Env,
     private readonly options: AdminExecutorOptions = {}
-  ) {}
-
-  private getModel(): LanguageModel {
-    if (!this.model) this.model = this.options.model ?? chatModel(this.env);
-    return this.model;
+  ) {
+    this.models = createModelPair(this.env, this.options);
   }
 
   /** Lazily build the one Session for this DO; `wsId` is fixed per instance. */
@@ -56,7 +50,7 @@ export class AdminAgentExecutor implements AgentExecutor {
     if (!this.session) {
       this.session = this.options.createSession
         ? this.options.createSession(wsId)
-        : buildAgentSession(this.agent, this.getModel(), {
+        : buildAgentSession(this.agent, this.models.primary(), {
             soul: () => adminSoul(wsId),
             memoryDescription:
               "Durable facts about this workspace — who the admins are, conventions, and decisions. Keep it concise.",
@@ -72,10 +66,7 @@ export class AdminAgentExecutor implements AgentExecutor {
     eventBus: ExecutionEventBus
   ): Promise<void> => {
     await executeAgentTurn(requestContext, eventBus, {
-      model: this.getModel(),
-      fallbackModel: this.options.model ?? fallbackChatModel(this.env),
-      primaryModelId: CHAT_MODEL_ID,
-      fallbackModelId: CHAT_FALLBACK_MODEL_ID,
+      models: this.models,
       unexpectedReply:
         "Sorry, I hit an unexpected error handling that admin request. Please reach out to your developer and check the error logs for more details.",
       prepare: async (_text, metadata) => {

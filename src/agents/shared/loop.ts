@@ -1,7 +1,8 @@
 import type { ExecutionEventBus, RequestContext } from "@a2a-js/sdk/server";
 import type { Message } from "@a2a-js/sdk";
-import type { LanguageModel, ToolSet } from "ai";
+import type { ToolSet } from "ai";
 import { generateText, stepCountIs } from "ai";
+import type { createModelPair } from "@/agents/model";
 import { textOf } from "@/a2a/parts";
 import type { AgentTurnMetadata } from "@/agents/dispatch";
 import type { SessionLike } from "./session";
@@ -37,11 +38,7 @@ export interface PreparedTurn {
 }
 
 export interface AgentTurnConfig {
-  model: LanguageModel;
-  /** Tried when the primary model throws (e.g. capacity). */
-  fallbackModel: LanguageModel;
-  primaryModelId: string;
-  fallbackModelId: string;
+  models: ReturnType<typeof createModelPair>;
   /**
    * Assemble the session/tools/system for this turn. Runs *inside* the protected
    * body, so throwing here (e.g. missing required metadata) yields the friendly
@@ -85,7 +82,7 @@ export async function executeAgentTurn(
   const userMessage = requestContext.userMessage;
   const text = textOf(userMessage);
   const metadata = (userMessage.metadata ?? {}) as Partial<AgentTurnMetadata>;
-  let modelId = cfg.primaryModelId;
+  let modelId = cfg.models.primaryId();
 
   try {
     const {
@@ -108,7 +105,10 @@ export async function executeAgentTurn(
 
     let result: Awaited<ReturnType<typeof generateText>>;
     try {
-      result = await generateText({ model: cfg.model, ...generateArgs });
+      result = await generateText({
+        model: cfg.models.primary(),
+        ...generateArgs
+      });
     } catch (primaryErr) {
       console.warn(
         "[agent-loop] AI error on primary model, retrying with fallback",
@@ -118,9 +118,9 @@ export async function executeAgentTurn(
           contextId: requestContext.contextId
         }
       );
-      modelId = cfg.fallbackModelId;
+      modelId = cfg.models.fallbackId();
       result = await generateText({
-        model: cfg.fallbackModel,
+        model: cfg.models.fallback(),
         ...generateArgs
       });
     }

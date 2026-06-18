@@ -3,10 +3,8 @@ import type {
   ExecutionEventBus,
   RequestContext
 } from "@a2a-js/sdk/server";
-import type { LanguageModel } from "ai";
 import { getDb } from "@/db/client";
-import { chatModel, fallbackChatModel } from "@/agents/model";
-import { CHAT_MODEL_ID, CHAT_FALLBACK_MODEL_ID } from "@/config";
+import { createModelPair, type ModelOverrides } from "@/agents/model";
 import {
   buildAgentSession,
   type SessionHost,
@@ -20,8 +18,7 @@ import { buildOnboardingTools } from "./tools";
 const COMPACT_AFTER_TOKENS = 60_000;
 
 /** Test seams — production uses the defaults (real model + Sessions store). */
-export interface OnboardingExecutorOptions {
-  model?: LanguageModel;
+export interface OnboardingExecutorOptions extends ModelOverrides {
   createSession?: () => SessionLike;
 }
 
@@ -35,17 +32,14 @@ export interface OnboardingExecutorOptions {
  */
 export class OnboardingAgentExecutor implements AgentExecutor {
   private session?: SessionLike;
-  private model?: LanguageModel;
+  private readonly models: ReturnType<typeof createModelPair>;
 
   constructor(
     private readonly agent: SessionHost,
     private readonly env: Env,
     private readonly options: OnboardingExecutorOptions = {}
-  ) {}
-
-  private getModel(): LanguageModel {
-    if (!this.model) this.model = this.options.model ?? chatModel(this.env);
-    return this.model;
+  ) {
+    this.models = createModelPair(this.env, this.options);
   }
 
   /** Lazily build the one Session for this DO (one per user). */
@@ -53,7 +47,7 @@ export class OnboardingAgentExecutor implements AgentExecutor {
     if (!this.session) {
       this.session = this.options.createSession
         ? this.options.createSession()
-        : buildAgentSession(this.agent, this.getModel(), {
+        : buildAgentSession(this.agent, this.models.primary(), {
             soul: onboardingSoul,
             memoryDescription:
               "Durable facts about this user — their name, role, and what they're trying to set up. Keep it concise.",
@@ -69,10 +63,7 @@ export class OnboardingAgentExecutor implements AgentExecutor {
     eventBus: ExecutionEventBus
   ): Promise<void> => {
     await executeAgentTurn(requestContext, eventBus, {
-      model: this.getModel(),
-      fallbackModel: this.options.model ?? fallbackChatModel(this.env),
-      primaryModelId: CHAT_MODEL_ID,
-      fallbackModelId: CHAT_FALLBACK_MODEL_ID,
+      models: this.models,
       unexpectedReply:
         "Sorry, I hit an unexpected error. Please try again in a moment.",
       prepare: async (_text, metadata) => {
