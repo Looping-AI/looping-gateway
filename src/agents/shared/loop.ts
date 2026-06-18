@@ -125,7 +125,29 @@ export async function executeAgentTurn(
       });
     }
 
-    const replyText = result.text.trim() || "Done.";
+    const replyText = result.text.trim();
+    const finishReason = result.finishReason;
+
+    if (!replyText || finishReason === "length") {
+      if (finishReason === "length") {
+        console.warn(
+          "[agent-loop] model response truncated (finish_reason=length)",
+          {
+            model: modelId,
+            contextId: requestContext.contextId
+          }
+        );
+      } else {
+        console.warn("[agent-loop] empty response from model", {
+          model: modelId,
+          finishReason,
+          contextId: requestContext.contextId
+        });
+      }
+      publish(eventBus, requestContext.contextId, TRANSIENT_REPLY);
+      return;
+    }
+
     await session.appendMessage(assistantSessionMessage(replyText));
     publish(eventBus, requestContext.contextId, replyText);
   } catch (err) {
