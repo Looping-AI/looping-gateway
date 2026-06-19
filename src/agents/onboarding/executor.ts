@@ -12,6 +12,8 @@ import {
 } from "@/agents/shared/session";
 import { executeAgentTurn } from "@/agents/shared/loop";
 import { callerContext } from "@/agents/shared/prompt";
+import { archiveMessages } from "@/agents/shared/recall";
+import { recallTools } from "@/agents/shared/recall-tool";
 import { onboardingSoul } from "./prompt";
 import { buildOnboardingTools } from "./tools";
 
@@ -43,7 +45,7 @@ export class OnboardingAgentExecutor implements AgentExecutor {
   }
 
   /** Lazily build the one Session for this DO (one per user). */
-  private getSession(): SessionLike {
+  private getSession(namespace: string | null): SessionLike {
     if (!this.session) {
       this.session = this.options.createSession
         ? this.options.createSession()
@@ -52,7 +54,10 @@ export class OnboardingAgentExecutor implements AgentExecutor {
             memoryDescription:
               "Durable facts about this user — their name, role, and what they're trying to set up. Keep it concise.",
             memoryMaxTokens: 1000,
-            compactAfterTokens: COMPACT_AFTER_TOKENS
+            compactAfterTokens: COMPACT_AFTER_TOKENS,
+            onArchive: namespace
+              ? (msgs) => archiveMessages(this.env, namespace, msgs)
+              : undefined
           });
     }
     return this.session;
@@ -72,10 +77,19 @@ export class OnboardingAgentExecutor implements AgentExecutor {
           throw new Error("[onboarding-executor] expected onboarding metadata");
         }
         const ctx = metadata.user ?? null;
+        // Must match `instanceNameFor` in dispatch.ts (the DO instance key).
+        const namespace = ctx ? `onboarding:${ctx.slackUserId}` : null;
+        const session = this.getSession(namespace);
+        const hasArchive = namespace
+          ? (await session.getCompactions()).length > 0
+          : false;
         return {
-          session: this.getSession(),
+          session,
           systemSuffix: callerContext(ctx),
-          tools: buildOnboardingTools({ db: getDb(this.env), ctx })
+          tools: {
+            ...buildOnboardingTools({ db: getDb(this.env), ctx }),
+            ...(namespace ? recallTools(this.env, namespace, hasArchive) : {})
+          }
         };
       }
     });

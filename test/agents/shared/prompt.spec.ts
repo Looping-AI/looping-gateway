@@ -1,0 +1,105 @@
+import { describe, it, expect } from "vitest";
+import type { UserAuthContext } from "@/auth";
+import { LOOPING_CONSTITUTION, callerContext } from "@/agents/shared/prompt";
+
+const baseCtx: UserAuthContext = {
+  slackUserId: "U123",
+  displayName: "Alice",
+  isPrimaryOwner: false,
+  isOrgAdmin: false,
+  adminWorkspaces: []
+};
+
+describe("LOOPING_CONSTITUTION", () => {
+  it("is an array of exactly 4 strings", () => {
+    expect(Array.isArray(LOOPING_CONSTITUTION)).toBe(true);
+    expect(LOOPING_CONSTITUTION).toHaveLength(4);
+    LOOPING_CONSTITUTION.forEach((line) => expect(typeof line).toBe("string"));
+  });
+
+  it("opens with the Looping AI identity line", () => {
+    expect(LOOPING_CONSTITUTION[0]).toContain("Looping AI");
+  });
+
+  it("references Slack as the interaction channel", () => {
+    expect(LOOPING_CONSTITUTION.join(" ")).toContain("Slack");
+  });
+});
+
+describe("callerContext", () => {
+  it("returns an unknown-caller refusal when ctx is null", () => {
+    const out = callerContext(null);
+    expect(out).toContain("unknown");
+    expect(out).toMatch(/refuse any write operation/i);
+  });
+
+  it("uses displayName when present", () => {
+    const out = callerContext({ ...baseCtx, displayName: "Bob" });
+    expect(out).toContain("Bob");
+  });
+
+  it("falls back to slackUserId when displayName is null", () => {
+    const out = callerContext({ ...baseCtx, displayName: null });
+    expect(out).toContain("U123");
+  });
+
+  it("includes slackUserId in parentheses regardless of displayName", () => {
+    const out = callerContext({ ...baseCtx, displayName: "Bob" });
+    expect(out).toContain("(U123)");
+  });
+
+  it("lists primary-owner role when isPrimaryOwner is true", () => {
+    const out = callerContext({ ...baseCtx, isPrimaryOwner: true });
+    expect(out).toContain("primary-owner");
+  });
+
+  it("lists org-admin role when isOrgAdmin is true", () => {
+    const out = callerContext({ ...baseCtx, isOrgAdmin: true });
+    expect(out).toContain("org-admin");
+  });
+
+  it("lists workspace-admin role with workspace ids when adminWorkspaces is non-empty", () => {
+    const out = callerContext({ ...baseCtx, adminWorkspaces: [42, 7] });
+    expect(out).toContain("workspace-admin");
+    expect(out).toContain("42");
+    expect(out).toContain("7");
+  });
+
+  it("shows 'member (no admin rights)' when the caller has no roles", () => {
+    const out = callerContext(baseCtx);
+    expect(out).toContain("member (no admin rights)");
+  });
+
+  it("lists all roles when all flags are set", () => {
+    const out = callerContext({
+      slackUserId: "U1",
+      displayName: "Super",
+      isPrimaryOwner: true,
+      isOrgAdmin: true,
+      adminWorkspaces: [1]
+    });
+    expect(out).toContain("primary-owner");
+    expect(out).toContain("org-admin");
+    expect(out).toContain("workspace-admin");
+  });
+
+  it("includes the workspace context line when opts.workspaceId is provided", () => {
+    const out = callerContext(baseCtx, { workspaceId: 7 });
+    expect(out).toContain("Active workspace context: 7.");
+  });
+
+  it("omits the workspace context line when opts.workspaceId is not provided", () => {
+    const out = callerContext(baseCtx);
+    expect(out).not.toContain("Active workspace context");
+  });
+
+  it("omits the workspace context line when opts is an empty object", () => {
+    const out = callerContext(baseCtx, {});
+    expect(out).not.toContain("Active workspace context");
+  });
+
+  it("output starts with a double newline separator", () => {
+    const out = callerContext(baseCtx);
+    expect(out.startsWith("\n\n")).toBe(true);
+  });
+});

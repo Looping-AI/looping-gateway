@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { env } from "cloudflare:workers";
 import { MockLanguageModelV3 } from "ai/test";
 import type { SessionMessage } from "agents/experimental/memory/session";
@@ -18,6 +18,7 @@ const caller: UserAuthContext = {
 
 class FakeSession implements SessionLike {
   messages: SessionMessage[] = [];
+  constructor(private compactions: unknown[] = []) {}
   async appendMessage(m: SessionMessage) {
     this.messages.push(m);
   }
@@ -30,6 +31,43 @@ class FakeSession implements SessionLike {
   async tools() {
     return {};
   }
+  async getCompactions() {
+    return this.compactions;
+  }
+}
+
+/** Spread real env but replace AI + VECTORIZE with spies (no network needed). */
+function fakeRecallEnv() {
+  const run = vi.fn(async () => ({ data: [Array(1024).fill(0.1)] }));
+  const query = vi.fn(async (_vector: number[], _opts: unknown) => ({
+    count: 0,
+    matches: []
+  }));
+  return {
+    env: { ...env, AI: { run }, VECTORIZE: { query } } as unknown as Env,
+    run,
+    query
+  };
+}
+
+function toolCallResult(toolName: string, input: unknown) {
+  return {
+    content: [
+      {
+        type: "tool-call",
+        toolCallId: "tc1",
+        toolName,
+        input: JSON.stringify(input)
+      }
+    ],
+    finishReason: { unified: "tool-calls" },
+    usage: {
+      inputTokens: { total: 1, noCache: 1 },
+      outputTokens: { total: 1 },
+      totalTokens: 2
+    },
+    warnings: []
+  };
 }
 
 function makeRequest() {
@@ -121,5 +159,72 @@ describe("OnboardingAgentExecutor", () => {
     expect(t.isFinished()).toBe(true);
     expect(t.published).toHaveLength(1);
     expect(t.published[0].parts[0].text?.toLowerCase()).toContain("error");
+  });
+
+  it("offers recall and routes it through the user namespace", async () => {
+    const session = new FakeSession([{ id: "c1" }]); // hasArchive=true
+    const { env: fenv, query } = fakeRecallEnv();
+    let call = 0;
+    const model = new MockLanguageModelV3({
+      doGenerate: async () =>
+        (call++ === 0
+          ? toolCallResult("recall", { query: "what did I set up before?" })
+          : okResult("Found it in past context.")) as never
+    });
+    const exec = new OnboardingAgentExecutor(sqlHost, fenv, {
+      model,
+      createSession: () => session
+    });
+
+    const t = makeRequest();
+    await exec.execute(t.requestContext, t.eventBus);
+
+    expect(t.isFinished()).toBe(true);
+    expect(t.published).toHaveLength(1);
+    // Recall must be scoped to the caller's user namespace.
+    expect(query).toHaveBeenCalledTimes(1);
+    const opts = query.mock.calls[0][1] as { namespace: string };
+    expect(opts.namespace).toBe("onboarding:U_onb");
+  });
+
+  it("withholds recall and does not crash when caller context is absent", async () => {
+    const session = new FakeSession([{ id: "c1" }]); // hasArchive=true but no user
+    let capturedToolNames: string[] = [];
+    const model = new MockLanguageModelV3({
+      doGenerate: async (options) => {
+        capturedToolNames = (options.tools ?? []).map((t) => t.name);
+        return okResult("Here is what Looping does.") as never;
+      }
+    });
+    const exec = new OnboardingAgentExecutor(sqlHost, env, {
+      model,
+      createSession: () => session
+    });
+
+    // Request without a user — simulates an unauthenticated or pre-bootstrap event.
+    const requestContext = {
+      contextId: "D_ONB:no-user",
+      userMessage: {
+        kind: "message",
+        messageId: "m_nouser",
+        role: "user",
+        parts: [{ kind: "text", text: "hello" }],
+        metadata: { agentKind: "onboarding" } // no user field
+      }
+    };
+    const published: Array<{ parts: Array<{ text?: string }> }> = [];
+    let finished = false;
+    const eventBus = {
+      publish: (e: unknown) => published.push(e as never),
+      finished: () => {
+        finished = true;
+      }
+    };
+
+    await exec.execute(requestContext as never, eventBus as never);
+
+    expect(finished).toBe(true);
+    expect(published).toHaveLength(1);
+    expect(capturedToolNames).not.toContain("recall");
   });
 });
