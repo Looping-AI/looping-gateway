@@ -25,6 +25,8 @@ export interface SessionLike {
   getHistory(): Promise<SessionMessage[]>;
   refreshSystemPrompt(): Promise<string>;
   tools(): Promise<ToolSet>;
+  /** Compaction overlays so far — non-empty ⇒ an episodic archive exists. */
+  getCompactions(): Promise<unknown[]>;
 }
 
 export interface AgentSessionOptions {
@@ -36,6 +38,42 @@ export interface AgentSessionOptions {
   memoryMaxTokens: number;
   /** History token threshold that triggers compaction. */
   compactAfterTokens: number;
+  /**
+   * Archive the raw messages displaced by each compaction (episodic recall).
+   * Best-effort: a throw here must never abort compaction.
+   */
+  onArchive?: (messages: SessionMessage[]) => Promise<void>;
+}
+
+type CompactFn = ReturnType<typeof createCompactFunction>;
+
+/**
+ * Wrap a compaction function so the raw messages it folds into a summary are
+ * also handed to `onArchive` (which embeds them for later recall). The displaced
+ * range is `fromMessageId..toMessageId` of the result, sliced from the `history`
+ * the compaction saw. Archival failure is swallowed — compaction must still
+ * shorten history even if the recall store is briefly unavailable.
+ */
+export function archivingCompaction(
+  base: CompactFn,
+  onArchive?: (messages: SessionMessage[]) => Promise<void>
+): CompactFn {
+  if (!onArchive) return base;
+  return async (history, options) => {
+    const result = await base(history, options);
+    if (result) {
+      const from = history.findIndex((m) => m.id === result.fromMessageId);
+      const to = history.findIndex((m) => m.id === result.toMessageId);
+      if (from !== -1 && to !== -1) {
+        try {
+          await onArchive(history.slice(from, to + 1));
+        } catch (err) {
+          console.error("[recall] archive on compaction failed", err);
+        }
+      }
+    }
+    return result;
+  };
 }
 
 /**
@@ -49,17 +87,18 @@ export function buildAgentSession(
   model: LanguageModel,
   opts: AgentSessionOptions
 ): Session {
+  const compact = archivingCompaction(
+    createCompactFunction({
+      summarize: (prompt) => generateText({ model, prompt }).then((r) => r.text)
+    }),
+    opts.onArchive
+  );
   return Session.create(agent)
     .withContext("soul", { provider: { get: async () => opts.soul() } })
     .withContext("memory", {
       description: opts.memoryDescription,
       maxTokens: opts.memoryMaxTokens
     })
-    .onCompaction(
-      createCompactFunction({
-        summarize: (prompt) =>
-          generateText({ model, prompt }).then((r) => r.text)
-      })
-    )
+    .onCompaction(compact)
     .compactAfter(opts.compactAfterTokens);
 }

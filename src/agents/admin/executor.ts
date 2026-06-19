@@ -11,6 +11,8 @@ import {
   type SessionLike
 } from "@/agents/shared/session";
 import { executeAgentTurn } from "@/agents/shared/loop";
+import { archiveMessages } from "@/agents/shared/recall";
+import { recallTools } from "@/agents/shared/recall-tool";
 import { adminSoul, callerContext } from "./prompt";
 import { buildAdminTools } from "./tools";
 
@@ -48,6 +50,8 @@ export class AdminAgentExecutor implements AgentExecutor {
   /** Lazily build the one Session for this DO; `wsId` is fixed per instance. */
   private getSession(wsId: number): SessionLike {
     if (!this.session) {
+      // Must match `instanceNameFor` in dispatch.ts (the DO instance key).
+      const namespace = `admin:${wsId}`;
       this.session = this.options.createSession
         ? this.options.createSession(wsId)
         : buildAgentSession(this.agent, this.models.primary(), {
@@ -55,7 +59,8 @@ export class AdminAgentExecutor implements AgentExecutor {
             memoryDescription:
               "Durable facts about this workspace — who the admins are, conventions, and decisions. Keep it concise.",
             memoryMaxTokens: 1200,
-            compactAfterTokens: COMPACT_AFTER_TOKENS
+            compactAfterTokens: COMPACT_AFTER_TOKENS,
+            onArchive: (msgs) => archiveMessages(this.env, namespace, msgs)
           });
     }
     return this.session;
@@ -81,10 +86,16 @@ export class AdminAgentExecutor implements AgentExecutor {
         }
         const wsId = metadata.adminWorkspaceId;
         const ctx = metadata.user ?? null;
+        const session = this.getSession(wsId);
+        const namespace = `admin:${wsId}`;
+        const hasArchive = (await session.getCompactions()).length > 0;
         return {
-          session: this.getSession(wsId),
+          session,
           systemSuffix: callerContext(ctx, { workspaceId: wsId }),
-          tools: buildAdminTools({ db: getDb(this.env), ctx, wsId })
+          tools: {
+            ...buildAdminTools({ db: getDb(this.env), ctx, wsId }),
+            ...recallTools(this.env, namespace, hasArchive)
+          }
         };
       }
     });

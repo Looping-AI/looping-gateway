@@ -39,25 +39,25 @@ a faithful port would re-import accidental complexity.
 
 ## Source → Cloudflare mapping (the core of the migration)
 
-| Original (ICP / Motoko)                                                          | Cloudflare target                                                     | Migrate / Simplify / Drop       |
-| -------------------------------------------------------------------------------- | --------------------------------------------------------------------- | ------------------------------- |
-| `control-plane-core` canister                                                    | Gateway Worker + Workflows + Registry (D1) + per-agent DOs            | Re-implement                    |
-| `internal-engine` canister (dynamic spawn)                                       | inline AI-SDK tool loop inside each agent DO                          | **Simplify**                    |
-| event store + router + per-event timer dispatch                                  | event handler classify → **Cloudflare Workflows**                     | **Re-shape**                    |
-| `events/handlers/*` (message, member-joined/left, team-join, msg-deleted/edited) | Lifecycle Workflow (non-agent) + Message Workflow (agent)             | Re-implement                    |
-| `agent-runner` + admin loop + OpenRouter wrapper                                 | per-agent AI-SDK loop (Workers AI) reached via **A2A**                | Re-implement                    |
-| sessions / turns / traces (bespoke)                                              | **Agents SDK Sessions API + context blocks** (writable SQLite memory) | **Drop our impl; use platform** |
-| channel-history-model (bespoke timeline)                                         | raw recent buffer + **Vectorize** embeddings via Compaction Workflow  | Re-implement (leaner)           |
-| Stable memory / canister `var`s                                                  | D1 (global registry) + per-agent DO SQLite                            | Re-implement                    |
-| `slack-adapter.mo` HMAC + normalize (39 KB)                                      | `@chat-adapter/slack`                                                 | **Drop** (SDK does it)          |
-| `slack-wrapper.mo` (users.list, conversations.\*)                                | thin Slack Web API client for reads the chat SDK doesn't cover        | Partial migrate                 |
-| Timers (`Timer.setTimer`, `recurringTimer`)                                      | Workflows + Agents SDK `this.schedule()` / cron                       | Re-implement (smaller)          |
-| Threshold-Schnorr secret encryption + key cache                                  | Cloudflare Secrets Store, or WebCrypto AES-GCM                        | **Deferred**                    |
-| `http-certification.mo`, `httpCertStore`                                         | n/a (ICP query-certification concept)                                 | **Drop**                        |
-| workflow envelope / nonce / scope grants / catalog hash                          | n/a (single-process tool authz; no cross-canister trust boundary)     | **Drop**                        |
-| Approval gate (Block Kit + `ApprovalTimer`)                                      | Agents SDK Workflows human-in-the-loop (later)                        | **Deferred**                    |
-| Agent registry + `::` routing                                                    | D1 tables + Agent Router inside the Message Workflow                  | Migrate                         |
-| Workspace + admin-channel model                                                  | D1 + Slack channel membership                                         | Migrate                         |
+| Original (ICP / Motoko)                                                          | Cloudflare target                                                     | Migrate / Simplify / Drop          |
+| -------------------------------------------------------------------------------- | --------------------------------------------------------------------- | ---------------------------------- |
+| `control-plane-core` canister                                                    | Gateway Worker + Workflows + Registry (D1) + per-agent DOs            | Re-implement                       |
+| `internal-engine` canister (dynamic spawn)                                       | inline AI-SDK tool loop inside each agent DO                          | **Simplify**                       |
+| event store + router + per-event timer dispatch                                  | event handler classify → **Cloudflare Workflows**                     | **Re-shape**                       |
+| `events/handlers/*` (message, member-joined/left, team-join, msg-deleted/edited) | Lifecycle Workflow (non-agent) + Message Workflow (agent)             | Re-implement                       |
+| `agent-runner` + admin loop + OpenRouter wrapper                                 | per-agent AI-SDK loop (Workers AI) reached via **A2A**                | Re-implement                       |
+| sessions / turns / traces (bespoke)                                              | **Agents SDK Sessions API + context blocks** (writable SQLite memory) | **Drop our impl; use platform**    |
+| channel-history-model (bespoke timeline)                                         | per-agent **episodic recall**: compacted-away msgs → **Vectorize**    | **Re-shaped** (recall, not search) |
+| Stable memory / canister `var`s                                                  | D1 (global registry) + per-agent DO SQLite                            | Re-implement                       |
+| `slack-adapter.mo` HMAC + normalize (39 KB)                                      | `@chat-adapter/slack`                                                 | **Drop** (SDK does it)             |
+| `slack-wrapper.mo` (users.list, conversations.\*)                                | thin Slack Web API client for reads the chat SDK doesn't cover        | Partial migrate                    |
+| Timers (`Timer.setTimer`, `recurringTimer`)                                      | Workflows + Agents SDK `this.schedule()` / cron                       | Re-implement (smaller)             |
+| Threshold-Schnorr secret encryption + key cache                                  | Cloudflare Secrets Store, or WebCrypto AES-GCM                        | **Deferred**                       |
+| `http-certification.mo`, `httpCertStore`                                         | n/a (ICP query-certification concept)                                 | **Drop**                           |
+| workflow envelope / nonce / scope grants / catalog hash                          | n/a (single-process tool authz; no cross-canister trust boundary)     | **Drop**                           |
+| Approval gate (Block Kit + `ApprovalTimer`)                                      | Agents SDK Workflows human-in-the-loop (later)                        | **Deferred**                       |
+| Agent registry + `::` routing                                                    | D1 tables + Agent Router inside the Message Workflow                  | Migrate                            |
+| Workspace + admin-channel model                                                  | D1 + Slack channel membership                                         | Migrate                            |
 
 ## Resolved decisions
 
@@ -198,15 +198,15 @@ flowchart LR
 
 ### Component ownership
 
-| Component                                  | Where it lives                              |
-| ------------------------------------------ | ------------------------------------------- |
-| Gateway `fetch` + event handler            | this repo (Worker)                          |
-| Lifecycle / Message / Compaction Workflows | this repo (Cloudflare Workflows)            |
-| Registry (workspaces / users / agents)     | D1                                          |
-| Admin + Onboarding agents                  | this repo (per-agent DOs, A2A servers)      |
-| Custom agents                              | **remote**, outside this repo (A2A)         |
-| Sessions + context-block memory            | per-agent DO SQLite (Agents SDK Sessions)   |
-| Channel-history index                      | this repo's Compaction Workflow → Vectorize |
+| Component                                  | Where it lives                                               |
+| ------------------------------------------ | ------------------------------------------------------------ |
+| Gateway `fetch` + event handler            | this repo (Worker)                                           |
+| Lifecycle / Message / Compaction Workflows | this repo (Cloudflare Workflows)                             |
+| Registry (workspaces / users / agents)     | D1                                                           |
+| Admin + Onboarding agents                  | this repo (per-agent DOs, A2A servers)                       |
+| Custom agents                              | **remote**, outside this repo (A2A)                          |
+| Sessions + context-block memory            | per-agent DO SQLite (Agents SDK Sessions)                    |
+| Episodic-recall index                      | per-agent Vectorize namespace, written at Session compaction |
 
 ### Authorization (kept from original — permissions inherit here)
 
@@ -284,8 +284,22 @@ audit/round-limit trail — revisit later.)
    The generic turn loop, Session factory, message glue, and `callerContext` were
    extracted to `src/agents/shared/` and the Phase-4 admin agent refactored to
    reuse them.
-6. **Channel history + `channel_search` tool** — raw buffer, Compaction Workflow →
-   Vectorize, search tool (Slack + semantic).
+6. **Episodic recall — Vectorize, fed at compaction** — ✅ done. _Replaces the
+   original channel-history / `channel_search` idea._ That was rejected: Slack's AI
+   Search (`assistant.search.context`) is AI-plan-gated, can surface channels the
+   agent isn't authorized to see, and needs an extra `action_token`; raw
+   `conversations.history` is pagination, not semantic search. Instead, when an
+   agent's Session compacts (`compactAfter(60_000)` tokens — rare, often weeks
+   apart) the raw messages it displaces are embedded (Workers AI
+   `@cf/baai/bge-m3` — multilingual, 1024-d) and upserted into **Vectorize**, partitioned per
+   agent instance by `namespace` (`admin:{wsId}` / `onboarding:{userId}`). A single
+   gated `recall` tool semantically searches them — built only once the instance has
+   compacted ≥1 time (before that everything is still in live history). Sourcing
+   **only** from the agent's own compacted history makes recall permission-safe by
+   construction. New `src/agents/shared/recall.ts` + `recall-tool.ts`; archival is
+   hooked via `archivingCompaction` in `src/agents/shared/session.ts`; both executors
+   wired. **Cloudflare AI Search (AutoRAG)** is reserved for a future knowledge-base
+   corpus, not this.
 7. **Remote/custom A2A agents** — register external A2A endpoints; route to them.
 8. **Slack team-id hardening** — the worker serves exactly one Slack team, so
    `team_id` is a global invariant, not per-message data (it was removed from
