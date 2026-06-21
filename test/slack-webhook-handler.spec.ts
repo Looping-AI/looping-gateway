@@ -6,11 +6,7 @@ import {
 } from "../src/slack-webhook-handler";
 import { slackHeaders } from "./helpers/slack";
 import { getDb } from "@/db/client";
-import {
-  setConfig,
-  unsetConfig,
-  SystemConfigKeys
-} from "@/db/models/workspace-configs";
+import { setConfig, SystemConfigKeys } from "@/db/models/workspace-configs";
 import { ORG_WORKSPACE_ID } from "@/db/models/workspaces";
 
 type FakeEnv = Pick<
@@ -355,10 +351,9 @@ describe("error handling", () => {
 describe("team guard", () => {
   const db = getDb(env);
 
-  afterEach(async () => {
-    // Clear the anchor from D1 and reset the isolate-level memo so tests
-    // don't bleed into each other.
-    await unsetConfig(db, ORG_WORKSPACE_ID, SystemConfigKeys.SLACK_TEAM_ID);
+  afterEach(() => {
+    // D1 is reset before each test (apply-migrations.ts); only the
+    // isolate-level memo needs manual clearing.
     _resetAnchorCacheForTest();
   });
 

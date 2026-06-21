@@ -12,7 +12,6 @@ import {
 import {
   getConfig,
   setConfig,
-  unsetConfig,
   SystemConfigKeys
 } from "@/db/models/workspace-configs";
 import { ORG_WORKSPACE_ID } from "@/db/models/workspaces";
@@ -140,11 +139,9 @@ describe("reconcile — admin-channel membership", () => {
 describe("reconcile — team-id anchor (TOFU)", () => {
   const db = getDb(env);
 
-  beforeEach(async () => {
-    // Start each test with a clean anchor and a fresh auth.test cache so the
-    // stub response is always used (the cache is per-token and shared within
-    // the same test file's isolate).
-    await unsetConfig(db, ORG_WORKSPACE_ID, SystemConfigKeys.SLACK_TEAM_ID);
+  beforeEach(() => {
+    // D1 is reset before each test (apply-migrations.ts); only the
+    // isolate-level bot-info cache needs manual clearing.
     _resetBotInfoCacheForTest();
   });
 

@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll } from "vitest";
+import { describe, it, expect, beforeEach } from "vitest";
 import { env } from "cloudflare:workers";
 import { getDb } from "@/db/client";
 import { resolveTarget } from "@/router/resolve";
@@ -9,7 +9,7 @@ import {
 
 const db = getDb(env);
 
-beforeAll(async () => {
+beforeEach(async () => {
   // Org (ws 0) admin channel + a second workspace.
   await setWorkspaceAdminChannel(db, 0, "C_ORGADMIN");
   await upsertWorkspace(db, {
