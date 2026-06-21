@@ -192,8 +192,24 @@ async function triggerWorkflow(
 }
 
 // ---------------------------------------------------------------------------
-// Team-id guard — D1 anchor check on every request
+// Team-id guard — D1 anchor check with isolate-level memoization
 // ---------------------------------------------------------------------------
+
+/**
+ * Isolate-level memo of the pinned Slack team_id anchor. Starts as null
+ * (not yet loaded). Once the anchor is read from D1 and found to be a
+ * non-null string, it is cached here for the lifetime of the isolate,
+ * avoiding a D1 round-trip on every subsequent request.
+ *
+ * While the anchor is unset in D1 (bootstrap grace) this stays null and
+ * each request re-reads D1 — cheap given the grace window is temporary.
+ */
+let cachedAnchorTeamId: string | null = null;
+
+/** Reset the isolate-level anchor cache. Only for test isolation. */
+export function _resetAnchorCacheForTest(): void {
+  cachedAnchorTeamId = null;
+}
 
 /**
  * Enforce the team_id invariant: every request must come from the workspace
@@ -201,8 +217,8 @@ async function triggerWorkflow(
  * a 403. Passes through when the anchor is not yet set (bootstrap grace) or
  * when the event carries no `team_id`.
  *
- * Reads D1 on every request (no module-level cache) so the anchor's durable
- * value is always the final authority.
+ * Uses an isolate-level memo so D1 is read at most once per isolate lifetime.
+ * Until the anchor is pinned in D1, each request does a single D1 read.
  */
 async function guardTeamId(
   eventTeamId: string | undefined,
@@ -210,13 +226,18 @@ async function guardTeamId(
 ): Promise<Response | null> {
   if (!eventTeamId) return null; // no team_id in this event — skip check
 
-  const anchor = await getConfig(
-    db,
-    ORG_WORKSPACE_ID,
-    SystemConfigKeys.SLACK_TEAM_ID
-  );
+  if (cachedAnchorTeamId === null) {
+    const anchor = await getConfig(
+      db,
+      ORG_WORKSPACE_ID,
+      SystemConfigKeys.SLACK_TEAM_ID
+    );
+    if (anchor !== null) {
+      cachedAnchorTeamId = anchor; // pin once; never cleared in production
+    }
+  }
 
-  if (anchor === null) {
+  if (cachedAnchorTeamId === null) {
     // Anchor not yet pinned — bootstrap grace; reconcile will set it on its next run.
     console.log(
       "[gateway] team_id anchor not yet set — skipping guard (bootstrap grace)"
@@ -224,10 +245,10 @@ async function guardTeamId(
     return null;
   }
 
-  if (eventTeamId !== anchor) {
+  if (eventTeamId !== cachedAnchorTeamId) {
     console.error("[gateway] team_id mismatch — rejecting event", {
       eventTeamId,
-      anchor
+      anchor: cachedAnchorTeamId
     });
     return new Response("Forbidden", { status: 403 });
   }

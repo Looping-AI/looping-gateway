@@ -1,6 +1,9 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { env } from "cloudflare:workers";
-import { handleSlackEvent } from "../src/slack-webhook-handler";
+import {
+  handleSlackEvent,
+  _resetAnchorCacheForTest
+} from "../src/slack-webhook-handler";
 import { slackHeaders } from "./helpers/slack";
 import { getDb } from "@/db/client";
 import {
@@ -353,8 +356,10 @@ describe("team guard", () => {
   const db = getDb(env);
 
   afterEach(async () => {
-    // Clear the anchor from D1 so tests don't bleed into each other.
+    // Clear the anchor from D1 and reset the isolate-level memo so tests
+    // don't bleed into each other.
     await unsetConfig(db, ORG_WORKSPACE_ID, SystemConfigKeys.SLACK_TEAM_ID);
+    _resetAnchorCacheForTest();
   });
 
   it("passes through when no anchor is stored (bootstrap grace window)", async () => {
