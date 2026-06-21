@@ -190,7 +190,7 @@ describe("reconcile — team-id anchor (TOFU)", () => {
     ).toBe("T_STABLE");
   });
 
-  it("logs a mismatch but does NOT overwrite the anchor", async () => {
+  it("aborts reconcile and does NOT overwrite the anchor on team_id mismatch", async () => {
     const db = getDb(env);
     await setConfig(
       db,
@@ -198,19 +198,28 @@ describe("reconcile — team-id anchor (TOFU)", () => {
       SystemConfigKeys.SLACK_TEAM_ID,
       "T_ORIGINAL"
     );
+    const calledMethods: string[] = [];
     stubSlack((method) => {
+      calledMethods.push(method);
       if (method === "auth.test")
         return { ok: true, user_id: "UBOT", team_id: "T_DRIFTED" };
-      return baseStub(method);
+      return { ok: true, members: [], channels: [] };
     });
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     const r = await reconcile(env);
     expect(r.teamIdBootstrapped).toBe(false);
+    expect(r.usersUpserted).toBe(0);
+    expect(r.usersDeactivated).toBe(0);
+    expect(r.adminsAdded).toBe(0);
+    expect(r.adminsRemoved).toBe(0);
+    // Anchor is preserved — never overwritten
     expect(
       await getConfig(db, ORG_WORKSPACE_ID, SystemConfigKeys.SLACK_TEAM_ID)
     ).toBe("T_ORIGINAL");
+    // No further Slack API calls after auth.test
+    expect(calledMethods.filter((m) => m !== "auth.test")).toHaveLength(0);
     expect(errorSpy).toHaveBeenCalledWith(
-      expect.stringContaining("team_id mismatch"),
+      expect.stringContaining("drifted to a different Slack workspace"),
       expect.objectContaining({ pinned: "T_ORIGINAL", liveTeamId: "T_DRIFTED" })
     );
     errorSpy.mockRestore();

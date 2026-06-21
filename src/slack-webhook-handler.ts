@@ -192,57 +192,47 @@ async function triggerWorkflow(
 }
 
 // ---------------------------------------------------------------------------
-// Team-id guard — per-isolate memo + D1 anchor check
+// Team-id guard — D1 anchor check on every request
 // ---------------------------------------------------------------------------
 
 /**
- * Isolate-level memo for the pinned Slack team_id anchor.
+ * Enforce the team_id invariant: every request must come from the workspace
+ * whose `team_id` was pinned on first reconcile. On mismatch, log and return
+ * a 403. Passes through when the anchor is not yet set (bootstrap grace) or
+ * when the event carries no `team_id`.
  *
- * - `undefined` → not yet loaded this isolate lifetime (trigger a D1 read).
- * - `null`      → loaded; no anchor row yet (bootstrap grace — skip check).
- * - `string`    → loaded; the pinned team_id to compare against.
- *
- * The cache is deliberately volatile: a new isolate (e.g. after a deploy or
- * secret rotation) starts fresh and re-reads from D1, so the anchor's
- * durable value is always the final authority.
+ * Reads D1 on every request (no module-level cache) so the anchor's durable
+ * value is always the final authority.
  */
-let cachedAnchorTeamId: string | null | undefined = undefined;
-
-/**
- * Reset the isolate memo cache. Exposed only for testing — production code
- * never calls this; cache invalidation happens naturally on isolate restart.
- * @internal
- */
-export function _resetAnchorCacheForTest(): void {
-  cachedAnchorTeamId = undefined;
-}
-
-/**
- * Check whether the event's `team_id` matches the durable anchor.
- *
- * Returns `false` (block the request with 400) only when an anchor is pinned
- * AND the event carries a different team_id. All other cases pass through:
- * - anchor not yet pinned (bootstrap grace window)
- * - event carries no team_id (Q6: skip the check)
- */
-async function teamIdAllowed(
+async function guardTeamId(
   eventTeamId: string | undefined,
   db: ReturnType<typeof getDb>
-): Promise<boolean> {
-  if (!eventTeamId) return true; // no team_id in this event — skip
+): Promise<Response | null> {
+  if (!eventTeamId) return null; // no team_id in this event — skip check
 
-  if (cachedAnchorTeamId === undefined) {
-    // Cold isolate: load from D1 once
-    cachedAnchorTeamId = await getConfig(
-      db,
-      ORG_WORKSPACE_ID,
-      SystemConfigKeys.SLACK_TEAM_ID
+  const anchor = await getConfig(
+    db,
+    ORG_WORKSPACE_ID,
+    SystemConfigKeys.SLACK_TEAM_ID
+  );
+
+  if (anchor === null) {
+    // Anchor not yet pinned — bootstrap grace; reconcile will set it on its next run.
+    console.log(
+      "[gateway] team_id anchor not yet set — skipping guard (bootstrap grace)"
     );
+    return null;
   }
 
-  if (cachedAnchorTeamId === null) return true; // not yet bootstrapped — grace window
+  if (eventTeamId !== anchor) {
+    console.error("[gateway] team_id mismatch — rejecting event", {
+      eventTeamId,
+      anchor
+    });
+    return new Response("Forbidden", { status: 403 });
+  }
 
-  return eventTeamId === cachedAnchorTeamId;
+  return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -253,7 +243,7 @@ async function teamIdAllowed(
  * Verify the Slack signature, classify the event, run the team-id guard,
  * trigger the matching Workflow, and return 200 before any agent work runs.
  *
- * Returns 401 on bad signature, 400 on team_id mismatch, 500 on unexpected
+ * Returns 401 on bad signature, 403 on team_id mismatch, 500 on unexpected
  * Workflow failure (so Slack retries), and 200 for everything else — including
  * ignored events and duplicate event_ids (native dedupe via instance id).
  */
@@ -285,29 +275,17 @@ export async function handleSlackEvent(
       return Response.json({ challenge: classification.challenge });
 
     case "message": {
-      const { teamId, ...workflowParams } = classification.params;
       const db = getDb(env);
-      if (!(await teamIdAllowed(teamId, db))) {
-        console.error("[gateway] team_id mismatch — rejecting event", {
-          eventTeamId: teamId,
-          pinned: cachedAnchorTeamId
-        });
-        return new Response("Forbidden", { status: 400 });
-      }
-      return triggerWorkflow(env.MESSAGE_WORKFLOW, workflowParams);
+      const guardResponse = await guardTeamId(classification.params.teamId, db);
+      if (guardResponse) return guardResponse;
+      return triggerWorkflow(env.MESSAGE_WORKFLOW, classification.params);
     }
 
     case "lifecycle": {
-      const { teamId, ...workflowParams } = classification.params;
       const db = getDb(env);
-      if (!(await teamIdAllowed(teamId, db))) {
-        console.error("[gateway] team_id mismatch — rejecting event", {
-          eventTeamId: teamId,
-          pinned: cachedAnchorTeamId
-        });
-        return new Response("Forbidden", { status: 400 });
-      }
-      return triggerWorkflow(env.LIFECYCLE_WORKFLOW, workflowParams);
+      const guardResponse = await guardTeamId(classification.params.teamId, db);
+      if (guardResponse) return guardResponse;
+      return triggerWorkflow(env.LIFECYCLE_WORKFLOW, classification.params);
     }
 
     case "ignore":

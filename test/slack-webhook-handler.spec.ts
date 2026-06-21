@@ -1,9 +1,6 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { env } from "cloudflare:workers";
-import {
-  handleSlackEvent,
-  _resetAnchorCacheForTest
-} from "../src/slack-webhook-handler";
+import { handleSlackEvent } from "../src/slack-webhook-handler";
 import { slackHeaders } from "./helpers/slack";
 import { getDb } from "@/db/client";
 import {
@@ -356,8 +353,6 @@ describe("team guard", () => {
   const db = getDb(env);
 
   afterEach(async () => {
-    // Reset the isolate memo cache so each test starts with a cold read.
-    _resetAnchorCacheForTest();
     // Clear the anchor from D1 so tests don't bleed into each other.
     await unsetConfig(db, ORG_WORKSPACE_ID, SystemConfigKeys.SLACK_TEAM_ID);
   });
@@ -403,7 +398,7 @@ describe("team guard", () => {
     expect(res.status).toBe(200);
   });
 
-  it("returns 400 when event team_id mismatches the pinned anchor", async () => {
+  it("returns 403 when event team_id mismatches the pinned anchor", async () => {
     await setConfig(
       db,
       ORG_WORKSPACE_ID,
@@ -423,7 +418,7 @@ describe("team guard", () => {
       }
     });
     const res = await post(body, makeEnv());
-    expect(res.status).toBe(400);
+    expect(res.status).toBe(403);
   });
 
   it("blocks lifecycle events with mismatching team_id", async () => {
@@ -440,7 +435,7 @@ describe("team guard", () => {
       event: { type: "member_joined_channel", user: "U2", channel: "C1" }
     });
     const res = await post(body, makeEnv());
-    expect(res.status).toBe(400);
+    expect(res.status).toBe(403);
   });
 
   it("passes through when the event carries no team_id (skip-check path)", async () => {
