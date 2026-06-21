@@ -16,7 +16,6 @@ interface SlackMember {
   is_admin?: boolean;
   is_owner?: boolean;
   is_primary_owner?: boolean;
-  team_id?: string;
   profile?: { real_name?: string; display_name?: string };
 }
 interface UsersListResponse extends SlackApiResponse {
@@ -30,6 +29,7 @@ interface ConversationsListResponse extends SlackApiResponse {
 }
 interface AuthTestResponse extends SlackApiResponse {
   user_id?: string;
+  team_id?: string;
 }
 interface ChatPostMessageResponse extends SlackApiResponse {
   ts?: string;
@@ -41,7 +41,6 @@ export interface SlackUserInfo {
   displayName: string | null;
   isPrimaryOwner: boolean;
   deleted: boolean;
-  teamId?: string;
 }
 
 function normalizeMember(m: SlackMember): SlackUserInfo {
@@ -54,8 +53,7 @@ function normalizeMember(m: SlackMember): SlackUserInfo {
     id: m.id,
     displayName: display,
     isPrimaryOwner: m.is_primary_owner === true,
-    deleted: m.deleted === true,
-    teamId: m.team_id
+    deleted: m.deleted === true
   };
 }
 
@@ -121,13 +119,28 @@ export async function findChannelIdByName(
   return null;
 }
 
-/** The bot's own Slack user id, used to skip the bot in membership handling. */
-// Cached per bot token: auth.test is called once per isolate lifetime (the bot
-// user id never changes while the token is in use).
-const botUserIdCache = new Map<string, string | null>();
+/** The bot's own Slack user id and team id from `auth.test`. */
+export interface BotInfo {
+  userId: string | null;
+  teamId: string | null;
+}
 
-export async function getBotUserId(env: SlackEnv): Promise<string | null> {
-  const cached = botUserIdCache.get(env.SLACK_BOT_TOKEN);
+// Cached per bot token: auth.test is called once per isolate lifetime (the bot
+// identity never changes while the token is in use).
+const botInfoCache = new Map<string, BotInfo>();
+
+/**
+ * Reset the bot-info cache. Exposed only for testing — production code never
+ * calls this; cache invalidation happens naturally on isolate restart.
+ * @internal
+ */
+export function _resetBotInfoCacheForTest(): void {
+  botInfoCache.clear();
+}
+
+/** Fetch (and cache) the bot's `user_id` and `team_id` via `auth.test`. */
+export async function getBotInfo(env: SlackEnv): Promise<BotInfo> {
+  const cached = botInfoCache.get(env.SLACK_BOT_TOKEN);
   if (cached !== undefined) return cached;
   const res = await callSlackApi<AuthTestResponse>(
     "auth.test",
@@ -135,9 +148,17 @@ export async function getBotUserId(env: SlackEnv): Promise<string | null> {
     { token: env.SLACK_BOT_TOKEN }
   );
   assertSlackOk("auth.test", res);
-  const id = res.user_id ?? null;
-  botUserIdCache.set(env.SLACK_BOT_TOKEN, id);
-  return id;
+  const info: BotInfo = {
+    userId: res.user_id ?? null,
+    teamId: res.team_id ?? null
+  };
+  botInfoCache.set(env.SLACK_BOT_TOKEN, info);
+  return info;
+}
+
+/** The bot's own Slack user id, used to skip the bot in membership handling. */
+export async function getBotUserId(env: SlackEnv): Promise<string | null> {
+  return (await getBotInfo(env)).userId;
 }
 
 /**

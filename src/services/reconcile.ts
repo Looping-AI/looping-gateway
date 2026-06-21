@@ -17,10 +17,16 @@ import {
   listWorkspaceAdminIds
 } from "@/db/models/workspace-admins";
 import {
+  getConfig,
+  setConfig,
+  SystemConfigKeys
+} from "@/db/models/workspace-configs";
+import {
   iterateSlackUsers,
   fetchChannelMemberIds,
   findChannelIdByName,
-  getBotUserId
+  getBotUserId,
+  getBotInfo
 } from "@/wrappers/slack";
 
 type ReconcileEnv = Pick<Env, "DB" | "SLACK_BOT_TOKEN">;
@@ -30,6 +36,8 @@ export interface ReconcileResult {
   usersDeactivated: number;
   adminsAdded: number;
   adminsRemoved: number;
+  /** True only when the Slack team_id anchor was pinned for the first time. */
+  teamIdBootstrapped: boolean;
 }
 
 /**
@@ -43,8 +51,52 @@ export async function reconcile(env: ReconcileEnv): Promise<ReconcileResult> {
     usersUpserted: 0,
     usersDeactivated: 0,
     adminsAdded: 0,
-    adminsRemoved: 0
+    adminsRemoved: 0,
+    teamIdBootstrapped: false
   };
+
+  // 0. Team-id anchor — Trust-On-First-Use (TOFU).
+  //
+  // This worker and all its persistent state (D1, Vectorize, KV, Durable Objects)
+  // are permanently bound to a single Slack workspace. Every channel ID, user ID,
+  // primary-owner flag, and auth assumption stored here is workspace-specific.
+  // Swapping the bot token to a different workspace would silently corrupt all of
+  // that state. The only safe path for a workspace migration is to deploy a
+  // brand-new Worker and start fresh — see README for guidance.
+  //
+  // Therefore: pin the team_id on the first run (TOFU), then assert on every
+  // subsequent run. On mismatch we log loudly and ABORT — no Slack-derived writes
+  // occur under a drifted token.
+  const { teamId: liveTeamId } = await getBotInfo(env);
+  if (liveTeamId) {
+    const pinned = await getConfig(
+      db,
+      ORG_WORKSPACE_ID,
+      SystemConfigKeys.SLACK_TEAM_ID
+    );
+    if (pinned === null) {
+      await setConfig(
+        db,
+        ORG_WORKSPACE_ID,
+        SystemConfigKeys.SLACK_TEAM_ID,
+        liveTeamId
+      );
+      result.teamIdBootstrapped = true;
+      console.log("[reconcile] Slack team_id anchored (first run)", {
+        teamId: liveTeamId
+      });
+    } else if (pinned !== liveTeamId) {
+      console.error(
+        `[reconcile] FATAL: bot token has drifted to a different Slack workspace. ` +
+          `This worker's state is permanently bound to team_id=${pinned}. ` +
+          `All channel IDs, user IDs, and auth assumptions belong to that workspace. ` +
+          `Continuing would silently corrupt the registry. ` +
+          `Deploy a brand-new Worker for the new workspace — see README for migration guidance.`,
+        { pinned, liveTeamId }
+      );
+      return result; // Abort — do NOT proceed with any Slack-derived writes
+    }
+  }
 
   // Resolve org admin channel inline (only writes on change). ws0 is assumed
   // to exist — seeded by migrations/0001_seed_builtins.sql at deploy time.
@@ -72,7 +124,6 @@ export async function reconcile(env: ReconcileEnv): Promise<ReconcileResult> {
       displayName: u.displayName,
       isPrimaryOwner: u.isPrimaryOwner,
       isOrgAdmin: orgAdminIds.has(u.id),
-      slackTeamId: u.teamId ?? null,
       deleted: u.deleted
     });
     result.usersUpserted++;

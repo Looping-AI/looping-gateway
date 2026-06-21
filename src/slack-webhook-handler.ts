@@ -6,6 +6,9 @@ import {
 import type { SlackWebhookPayload } from "@chat-adapter/slack/webhook";
 import { isRecord, str } from "@/util/json";
 import { pickDisplayName } from "@/util/display-name";
+import { getDb } from "@/db/client";
+import { getConfig, SystemConfigKeys } from "@/db/models/workspace-configs";
+import { ORG_WORKSPACE_ID } from "@/db/models/workspaces";
 import type {
   MessageWorkflowParams,
   LifecycleWorkflowParams,
@@ -189,22 +192,87 @@ async function triggerWorkflow(
 }
 
 // ---------------------------------------------------------------------------
+// Team-id guard — D1 anchor check with isolate-level memoization
+// ---------------------------------------------------------------------------
+
+/**
+ * Isolate-level memo of the pinned Slack team_id anchor. Starts as null
+ * (not yet loaded). Once the anchor is read from D1 and found to be a
+ * non-null string, it is cached here for the lifetime of the isolate,
+ * avoiding a D1 round-trip on every subsequent request.
+ *
+ * While the anchor is unset in D1 (bootstrap grace) this stays null and
+ * each request re-reads D1 — cheap given the grace window is temporary.
+ */
+let cachedAnchorTeamId: string | null = null;
+
+/** Reset the isolate-level anchor cache. Only for test isolation. */
+export function _resetAnchorCacheForTest(): void {
+  cachedAnchorTeamId = null;
+}
+
+/**
+ * Enforce the team_id invariant: every request must come from the workspace
+ * whose `team_id` was pinned on first reconcile. On mismatch, log and return
+ * a 403. Passes through when the anchor is not yet set (bootstrap grace) or
+ * when the event carries no `team_id`.
+ *
+ * Uses an isolate-level memo so D1 is read at most once per isolate lifetime.
+ * Until the anchor is pinned in D1, each request does a single D1 read.
+ */
+async function guardTeamId(
+  eventTeamId: string | undefined,
+  db: ReturnType<typeof getDb>
+): Promise<Response | null> {
+  if (!eventTeamId) return null; // no team_id in this event — skip check
+
+  if (cachedAnchorTeamId === null) {
+    const anchor = await getConfig(
+      db,
+      ORG_WORKSPACE_ID,
+      SystemConfigKeys.SLACK_TEAM_ID
+    );
+    if (anchor !== null) {
+      cachedAnchorTeamId = anchor; // pin once; never cleared in production
+    }
+  }
+
+  if (cachedAnchorTeamId === null) {
+    // Anchor not yet pinned — bootstrap grace; reconcile will set it on its next run.
+    console.log(
+      "[gateway] team_id anchor not yet set — skipping guard (bootstrap grace)"
+    );
+    return null;
+  }
+
+  if (eventTeamId !== cachedAnchorTeamId) {
+    console.error("[gateway] team_id mismatch — rejecting event", {
+      eventTeamId,
+      anchor: cachedAnchorTeamId
+    });
+    return new Response("Forbidden", { status: 403 });
+  }
+
+  return null;
+}
+
+// ---------------------------------------------------------------------------
 // Entry point — called by the gateway fetch handler
 // ---------------------------------------------------------------------------
 
 /**
- * Verify the Slack signature, classify the event, trigger the matching
- * Workflow, and return 200 before any agent work runs.
+ * Verify the Slack signature, classify the event, run the team-id guard,
+ * trigger the matching Workflow, and return 200 before any agent work runs.
  *
- * Returns 401 on bad signature, 500 on unexpected Workflow failure (so Slack
- * retries), and 200 for everything else — including ignored events and
- * duplicate event_ids (Slack retries get native dedupe via the instance id).
+ * Returns 401 on bad signature, 403 on team_id mismatch, 500 on unexpected
+ * Workflow failure (so Slack retries), and 200 for everything else — including
+ * ignored events and duplicate event_ids (native dedupe via instance id).
  */
 export async function handleSlackEvent(
   request: Request,
   env: Pick<
     Env,
-    "SLACK_SIGNING_SECRET" | "MESSAGE_WORKFLOW" | "LIFECYCLE_WORKFLOW"
+    "DB" | "SLACK_SIGNING_SECRET" | "MESSAGE_WORKFLOW" | "LIFECYCLE_WORKFLOW"
   >
 ): Promise<Response> {
   let rawBody: string;
@@ -226,10 +294,21 @@ export async function handleSlackEvent(
     case "challenge":
       console.log("[gateway] url_verification challenge");
       return Response.json({ challenge: classification.challenge });
-    case "message":
+
+    case "message": {
+      const db = getDb(env);
+      const guardResponse = await guardTeamId(classification.params.teamId, db);
+      if (guardResponse) return guardResponse;
       return triggerWorkflow(env.MESSAGE_WORKFLOW, classification.params);
-    case "lifecycle":
+    }
+
+    case "lifecycle": {
+      const db = getDb(env);
+      const guardResponse = await guardTeamId(classification.params.teamId, db);
+      if (guardResponse) return guardResponse;
       return triggerWorkflow(env.LIFECYCLE_WORKFLOW, classification.params);
+    }
+
     case "ignore":
       console.log("[gateway] event ignored", { reason: classification.reason });
       return OK();

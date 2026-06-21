@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach, vi } from "vitest";
+import { describe, it, expect, afterEach, beforeEach, vi } from "vitest";
 import { env } from "cloudflare:workers";
 import { stubSlack } from "../wrappers/slack-stub";
 import { reconcile } from "@/services/reconcile";
@@ -9,6 +9,13 @@ import {
   addWorkspaceAdmin,
   listWorkspaceAdminIds
 } from "@/db/models/workspace-admins";
+import {
+  getConfig,
+  setConfig,
+  SystemConfigKeys
+} from "@/db/models/workspace-configs";
+import { ORG_WORKSPACE_ID } from "@/db/models/workspaces";
+import { _resetBotInfoCacheForTest } from "@/wrappers/slack";
 
 const db = getDb(env);
 
@@ -126,5 +133,105 @@ describe("reconcile — admin-channel membership", () => {
     expect(r2.adminsAdded).toBe(0);
     expect(r2.adminsRemoved).toBe(0);
     expect(r2.usersDeactivated).toBe(0);
+  });
+});
+
+describe("reconcile — team-id anchor (TOFU)", () => {
+  const db = getDb(env);
+
+  beforeEach(() => {
+    // D1 is reset before each test (apply-migrations.ts); only the
+    // isolate-level bot-info cache needs manual clearing.
+    _resetBotInfoCacheForTest();
+  });
+
+  afterEach(() => vi.unstubAllGlobals());
+
+  const baseStub = (method: string) => {
+    if (method === "users.list") return { ok: true, members: [] };
+    if (method === "conversations.list") return { ok: true, channels: [] };
+    return { ok: true };
+  };
+
+  it("pins the team_id on the first run and sets teamIdBootstrapped", async () => {
+    stubSlack((method) => {
+      if (method === "auth.test")
+        return { ok: true, user_id: "UBOT", team_id: "T_FIRST" };
+      return baseStub(method);
+    });
+    const r = await reconcile(env);
+    expect(r.teamIdBootstrapped).toBe(true);
+    const db = getDb(env);
+    expect(
+      await getConfig(db, ORG_WORKSPACE_ID, SystemConfigKeys.SLACK_TEAM_ID)
+    ).toBe("T_FIRST");
+  });
+
+  it("is a no-op on a subsequent run with the same team_id", async () => {
+    const db = getDb(env);
+    await setConfig(
+      db,
+      ORG_WORKSPACE_ID,
+      SystemConfigKeys.SLACK_TEAM_ID,
+      "T_STABLE"
+    );
+    stubSlack((method) => {
+      if (method === "auth.test")
+        return { ok: true, user_id: "UBOT", team_id: "T_STABLE" };
+      return baseStub(method);
+    });
+    const r = await reconcile(env);
+    expect(r.teamIdBootstrapped).toBe(false);
+    expect(
+      await getConfig(db, ORG_WORKSPACE_ID, SystemConfigKeys.SLACK_TEAM_ID)
+    ).toBe("T_STABLE");
+  });
+
+  it("aborts reconcile and does NOT overwrite the anchor on team_id mismatch", async () => {
+    const db = getDb(env);
+    await setConfig(
+      db,
+      ORG_WORKSPACE_ID,
+      SystemConfigKeys.SLACK_TEAM_ID,
+      "T_ORIGINAL"
+    );
+    const calledMethods: string[] = [];
+    stubSlack((method) => {
+      calledMethods.push(method);
+      if (method === "auth.test")
+        return { ok: true, user_id: "UBOT", team_id: "T_DRIFTED" };
+      return { ok: true, members: [], channels: [] };
+    });
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const r = await reconcile(env);
+    expect(r.teamIdBootstrapped).toBe(false);
+    expect(r.usersUpserted).toBe(0);
+    expect(r.usersDeactivated).toBe(0);
+    expect(r.adminsAdded).toBe(0);
+    expect(r.adminsRemoved).toBe(0);
+    // Anchor is preserved — never overwritten
+    expect(
+      await getConfig(db, ORG_WORKSPACE_ID, SystemConfigKeys.SLACK_TEAM_ID)
+    ).toBe("T_ORIGINAL");
+    // No further Slack API calls after auth.test
+    expect(calledMethods.filter((m) => m !== "auth.test")).toHaveLength(0);
+    expect(errorSpy).toHaveBeenCalledWith(
+      expect.stringContaining("drifted to a different Slack workspace"),
+      expect.objectContaining({ pinned: "T_ORIGINAL", liveTeamId: "T_DRIFTED" })
+    );
+    errorSpy.mockRestore();
+  });
+
+  it("skips pinning when auth.test returns no team_id", async () => {
+    stubSlack((method) => {
+      if (method === "auth.test") return { ok: true, user_id: "UBOT" };
+      return baseStub(method);
+    });
+    const db = getDb(env);
+    const r = await reconcile(env);
+    expect(r.teamIdBootstrapped).toBe(false);
+    expect(
+      await getConfig(db, ORG_WORKSPACE_ID, SystemConfigKeys.SLACK_TEAM_ID)
+    ).toBeNull();
   });
 });

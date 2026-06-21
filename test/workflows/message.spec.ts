@@ -1,4 +1,4 @@
-import { afterEach, beforeAll, describe, it, expect, vi } from "vitest";
+import { afterEach, beforeEach, describe, it, expect, vi } from "vitest";
 import { introspectWorkflow } from "cloudflare:test";
 import { env } from "cloudflare:workers";
 import { getDb } from "@/db/client";
@@ -10,7 +10,7 @@ import { slackHeaders } from "../helpers/slack";
 
 const db = getDb(env);
 
-beforeAll(async () => {
+beforeEach(async () => {
   await setWorkspaceAdminChannel(db, 0, "C_ORGADMIN");
 });
 

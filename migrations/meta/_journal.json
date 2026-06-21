@@ -36,6 +36,13 @@
       "when": 1781716699821,
       "tag": "0004_agents_endpoint_notnull",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "6",
+      "when": 1782032154992,
+      "tag": "0005_phase8_team_id_hardening",
+      "breakpoints": true
     }
   ]
 }
