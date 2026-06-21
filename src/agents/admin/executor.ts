@@ -13,6 +13,7 @@ import {
 import { executeAgentTurn } from "@/agents/shared/loop";
 import { archiveMessages } from "@/agents/shared/recall";
 import { recallTools } from "@/agents/shared/recall-tool";
+import { verifyRemoteAgentEndpoint } from "@/a2a/card-verify";
 import { adminSoul, callerContext } from "./prompt";
 import { buildAdminTools } from "./tools";
 
@@ -93,7 +94,12 @@ export class AdminAgentExecutor implements AgentExecutor {
           session,
           systemSuffix: callerContext(ctx, { workspaceId: wsId }),
           tools: {
-            ...buildAdminTools({ db: getDb(this.env), ctx, wsId }),
+            ...buildAdminTools({
+              db: getDb(this.env),
+              ctx,
+              wsId,
+              verifyEndpoint: (endpoint) => verifyRemoteAgentEndpoint(endpoint)
+            }),
             ...recallTools(this.env, namespace, hasArchive)
           }
         };

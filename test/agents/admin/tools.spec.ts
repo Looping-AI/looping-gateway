@@ -11,6 +11,7 @@ import {
   type AdminToolDeps
 } from "@/agents/admin/tools";
 import { ORG_WORKSPACE_ID, createWorkspace } from "@/db/models/workspaces";
+import { getAgent } from "@/db/models/agents";
 
 const db = getDb(env);
 
@@ -33,7 +34,16 @@ function ctx(overrides: Partial<UserAuthContext> = {}): UserAuthContext {
 const orgAdmin = ctx({ isOrgAdmin: true });
 
 function deps(wsId: number, c: UserAuthContext | null): AdminToolDeps {
-  return { db, ctx: c, wsId };
+  return {
+    db,
+    ctx: c,
+    wsId,
+    // Offline stub: pretend every endpoint serves a validly-signed card.
+    verifyEndpoint: async (endpoint) => ({
+      cardSigningJku: `${new URL(endpoint).origin}/.well-known/jwks.json`,
+      cardSigningKid: "test-kid"
+    })
+  };
 }
 
 describe("admin tools — agents_write / agents_read", () => {
@@ -150,6 +160,113 @@ describe("admin tools — agents_write / agents_read", () => {
     expect(
       await agentsWrite(other, { operation: "unregister", name: "wsA-agent" })
     ).toHaveProperty("error");
+  });
+});
+
+describe("admin tools — card-signing verification + pin (TOFU)", () => {
+  /** deps with an explicit endpoint verifier (signed-card check seam). */
+  function depsWith(
+    wsId: number,
+    c: UserAuthContext | null,
+    verifyEndpoint: AdminToolDeps["verifyEndpoint"]
+  ): AdminToolDeps {
+    return { db, ctx: c, wsId, verifyEndpoint };
+  }
+
+  it("persists the verified signing pin on register", async () => {
+    const wsId = await freshWsId("tools-ws-pin");
+    const d = depsWith(wsId, ctx({ adminWorkspaces: [wsId] }), async () => ({
+      cardSigningJku: "https://signed.example.com/.well-known/jwks.json",
+      cardSigningKid: "pin-kid-1"
+    }));
+    const reg = await agentsWrite(d, {
+      operation: "register",
+      name: "pinned-agent",
+      a2aEndpoint: "https://signed.example.com/a2a"
+    });
+    expect(reg).toMatchObject({ ok: true });
+
+    const row = await getAgent(db, "pinned-agent");
+    expect(row?.cardSigningJku).toBe(
+      "https://signed.example.com/.well-known/jwks.json"
+    );
+    expect(row?.cardSigningKid).toBe("pin-kid-1");
+  });
+
+  it("rejects registration when card verification fails (unsigned/forged)", async () => {
+    const wsId = await freshWsId("tools-ws-unsigned");
+    const d = depsWith(wsId, ctx({ adminWorkspaces: [wsId] }), async () => {
+      throw new Error("AgentCard is not signed");
+    });
+    const res = await agentsWrite(d, {
+      operation: "register",
+      name: "unsigned-agent",
+      a2aEndpoint: "https://unsigned.example.com/a2a"
+    });
+    expect(res).toHaveProperty("error");
+    expect((res as { error: string }).error).toContain("verification failed");
+    expect(await getAgent(db, "unsigned-agent")).toBeNull();
+  });
+
+  it("rejects re-pointing to an endpoint signed by a different key (TOFU)", async () => {
+    const wsId = await freshWsId("tools-ws-tofu");
+    const original = depsWith(
+      wsId,
+      ctx({ adminWorkspaces: [wsId] }),
+      async () => ({
+        cardSigningJku: "https://a.example.com/.well-known/jwks.json",
+        cardSigningKid: "key-A"
+      })
+    );
+    await agentsWrite(original, {
+      operation: "register",
+      name: "tofu-agent",
+      a2aEndpoint: "https://a.example.com/a2a"
+    });
+
+    // A new endpoint that verifies — but with a DIFFERENT pinned identity.
+    const repointed = depsWith(
+      wsId,
+      ctx({ adminWorkspaces: [wsId] }),
+      async () => ({
+        cardSigningJku: "https://b.example.com/.well-known/jwks.json",
+        cardSigningKid: "key-B"
+      })
+    );
+    const res = await agentsWrite(repointed, {
+      operation: "update",
+      name: "tofu-agent",
+      a2aEndpoint: "https://b.example.com/a2a"
+    });
+    expect(res).toHaveProperty("error");
+    expect((res as { error: string }).error).toContain("different key");
+
+    // The original pin and endpoint are unchanged.
+    const row = await getAgent(db, "tofu-agent");
+    expect(row?.cardSigningKid).toBe("key-A");
+    expect(row?.a2aEndpoint).toBe("https://a.example.com/a2a");
+  });
+
+  it("allows re-pointing to a new endpoint with the SAME pinned key", async () => {
+    const wsId = await freshWsId("tools-ws-tofu-ok");
+    const pin = {
+      cardSigningJku: "https://same.example.com/.well-known/jwks.json",
+      cardSigningKid: "key-same"
+    };
+    const d = depsWith(wsId, ctx({ adminWorkspaces: [wsId] }), async () => pin);
+    await agentsWrite(d, {
+      operation: "register",
+      name: "tofu-ok-agent",
+      a2aEndpoint: "https://same.example.com/a2a"
+    });
+    const res = await agentsWrite(d, {
+      operation: "update",
+      name: "tofu-ok-agent",
+      a2aEndpoint: "https://same.example.com/v2"
+    });
+    expect(res).toMatchObject({ ok: true });
+    const row = await getAgent(db, "tofu-ok-agent");
+    expect(row?.a2aEndpoint).toBe("https://same.example.com/v2");
   });
 });
 

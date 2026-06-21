@@ -13,6 +13,7 @@
   "type": "module",
   "scripts": {
     "dev": "wrangler dev",
+    "keygen": "node scripts/generate-gateway-key.mjs",
     "types": "wrangler types env.d.ts --include-runtime false",
     "db:generate": "drizzle-kit generate",
     "db:migrate:local": "wrangler d1 migrations apply looping-registry --local",
@@ -31,6 +32,7 @@
     "ai": "^6.0.208",
     "chat": "^4.31.0",
     "drizzle-orm": "^0.45.2",
+    "jose": "^6.2.3",
     "slackify-markdown": "github:Looping-AI/slackify-markdown#5.0.0",
     "workers-ai-provider": "^3.2.0",
     "zod": "^4.4.3"

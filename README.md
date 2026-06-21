@@ -59,7 +59,17 @@ cp .dev.vars.example .dev.vars
 
 `wrangler dev` loads variables from `.dev.vars` locally. Keep this file uncommitted.
 
-### 6. Deploy
+### 6. Generate gateway identity key
+
+```bash
+npm run keygen
+```
+
+This prints a private JWK and ready-to-paste `wrangler secret put` commands.
+Set the printed key as `GATEWAY_JWT_PRIVATE_KEY` in `.dev.vars` for local dev,
+or via `wrangler secret put` for deployed environments.
+
+### 7. Deploy
 
 ```bash
 npx wrangler deploy
@@ -67,7 +77,7 @@ npx wrangler deploy
 
 Your worker URL will be: `https://looping-gateway.<your-subdomain>.workers.dev`
 
-### 7. Finish Slack configuration
+### 8. Finish Slack configuration
 
 In your Slack App settings, go to **Event Subscriptions → Request URL** and paste:
 

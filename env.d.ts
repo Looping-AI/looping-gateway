@@ -6,6 +6,7 @@ interface __BaseEnv_Env {
 	AI: Ai;
 	SLACK_BOT_TOKEN: string;
 	SLACK_SIGNING_SECRET: string;
+	GATEWAY_JWT_PRIVATE_KEY: string;
 	AdminAgent: DurableObjectNamespace<import("./src/server").AdminAgent>;
 	OnboardingAgent: DurableObjectNamespace<import("./src/server").OnboardingAgent>;
 	MESSAGE_WORKFLOW: Workflow<Parameters<import("./src/server").MessageWorkflow['run']>[0]['payload']>;
@@ -23,5 +24,5 @@ type StringifyValues<EnvType extends Record<string, unknown>> = {
 	[Binding in keyof EnvType]: EnvType[Binding] extends string ? EnvType[Binding] : string;
 };
 declare namespace NodeJS {
-	interface ProcessEnv extends StringifyValues<Pick<Cloudflare.Env, "SLACK_BOT_TOKEN" | "SLACK_SIGNING_SECRET">> {}
+	interface ProcessEnv extends StringifyValues<Pick<Cloudflare.Env, "SLACK_BOT_TOKEN" | "SLACK_SIGNING_SECRET" | "GATEWAY_JWT_PRIVATE_KEY">> {}
 }

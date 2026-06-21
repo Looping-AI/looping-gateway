@@ -80,7 +80,7 @@ export async function dispatchMessage(
   } else if (plan.agent.kind === "onboarding") {
     metadata = { agentKind: "onboarding" };
   } else {
-    metadata = { agentKind: "custom" };
+    metadata = { agentKind: "custom", workspaceId: plan.workspaceId };
   }
 
   return dispatchToAgent(env, plan.agent, {

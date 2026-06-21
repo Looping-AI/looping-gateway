@@ -17,7 +17,15 @@ export const SystemConfigKeys = {
    * successful reconcile (Trust-On-First-Use); never overwritten by reconcile
    * thereafter. Compared against every incoming `/slack/events` `team_id`.
    */
-  SLACK_TEAM_ID: "slack_team_id"
+  SLACK_TEAM_ID: "slack_team_id",
+  /**
+   * The public origin (scheme + host) of this deployed worker. Auto-discovered
+   * on the first inbound `/slack/events` request and cached in the module scope
+   * for the isolate's lifetime. Written to D1 once per isolate cold-start so the
+   * Message Workflow (which has no `Request` in scope) can read it for JWT signing.
+   * Updates automatically when Cloudflare recycles isolates after a domain change.
+   */
+  PUBLIC_URL: "public_url"
 } as const;
 
 export type SystemConfigKey =

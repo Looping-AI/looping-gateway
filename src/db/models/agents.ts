@@ -12,6 +12,9 @@ export interface RegisterAgentInput {
   /** Required: custom agents are remote and addressed by this HTTP endpoint. */
   a2aEndpoint: string;
   workspaceId: number | null;
+  /** Pinned AgentCard signing identity (custom agents; verified at registration). */
+  cardSigningJku?: string | null;
+  cardSigningKid?: string | null;
 }
 
 /** Patch for `updateAgent` — only provided fields are written. */
@@ -19,6 +22,8 @@ export interface UpdateAgentPatch {
   displayName?: string | null;
   a2aEndpoint?: string;
   enabled?: boolean;
+  cardSigningJku?: string | null;
+  cardSigningKid?: string | null;
 }
 
 export interface AgentChannelEntry {
@@ -141,7 +146,9 @@ export async function registerAgent(
       kind: input.kind,
       displayName: input.displayName ?? null,
       a2aEndpoint: input.a2aEndpoint,
-      workspaceId: input.workspaceId
+      workspaceId: input.workspaceId,
+      cardSigningJku: input.cardSigningJku ?? null,
+      cardSigningKid: input.cardSigningKid ?? null
     })
     .returning();
   return rows[0];
@@ -163,6 +170,12 @@ export async function updateAgent(
         ? { a2aEndpoint: patch.a2aEndpoint }
         : {}),
       ...(patch.enabled !== undefined ? { enabled: patch.enabled } : {}),
+      ...(patch.cardSigningJku !== undefined
+        ? { cardSigningJku: patch.cardSigningJku }
+        : {}),
+      ...(patch.cardSigningKid !== undefined
+        ? { cardSigningKid: patch.cardSigningKid }
+        : {}),
       updatedAt: sql`(unixepoch())`
     })
     .where(eq(schema.agents.name, name))

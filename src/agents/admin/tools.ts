@@ -1,6 +1,7 @@
 import { tool, type ToolSet } from "ai";
 import { z } from "zod";
 import { authorize, type UserAuthContext } from "@/auth";
+import type { CardSigningPin } from "@/a2a/card-verify";
 import type { Db } from "@/db/client";
 import {
   type AgentRow,
@@ -41,7 +42,16 @@ export interface AdminToolDeps {
   ctx: UserAuthContext | null;
   /** The workspace this admin instance manages (admin:{wsId}). */
   wsId: number;
+  /**
+   * Validates a custom agent's endpoint (SSRF policy) and verifies its signed
+   * AgentCard, returning the signing identity to pin. Injected so the pure
+   * handlers stay offline-testable; production binds it to the live verifier.
+   */
+  verifyEndpoint: EndpointVerifier;
 }
+
+/** Verify a remote agent endpoint + signed card; resolves to the pin to persist. */
+export type EndpointVerifier = (endpoint: string) => Promise<CardSigningPin>;
 
 /** A reserved/built-in agent name that registry CRUD must never touch. */
 const RESERVED_NAMES = new Set(["admin", "onboarding"]);
@@ -156,22 +166,65 @@ export async function agentsWrite(
         return { error: `"${args.name}" is a reserved built-in agent name.` };
       if (await getAgent(deps.db, args.name))
         return { error: `An agent named "${args.name}" already exists.` };
+      let pin: CardSigningPin;
+      try {
+        pin = await deps.verifyEndpoint(args.a2aEndpoint);
+      } catch (err) {
+        return {
+          error: `Endpoint verification failed: ${(err as Error).message}`
+        };
+      }
       const row = await registerAgent(deps.db, {
         name: args.name,
         kind: "custom",
         displayName: args.displayName ?? null,
         a2aEndpoint: args.a2aEndpoint,
-        workspaceId: deps.wsId
+        workspaceId: deps.wsId,
+        cardSigningJku: pin.cardSigningJku,
+        cardSigningKid: pin.cardSigningKid
       });
       return { ok: true, agent: await present(deps.db, row) };
     }
     case "update": {
       const target = await requireWritableAgent(deps, args.name);
       if ("error" in target) return target;
+      // A re-pointed endpoint is re-verified and must keep the SAME pinned
+      // signing identity (Trust-On-First-Use) — a different signer is rejected.
+      let pin: CardSigningPin | undefined;
+      if (
+        args.a2aEndpoint !== undefined &&
+        args.a2aEndpoint !== target.a2aEndpoint
+      ) {
+        try {
+          pin = await deps.verifyEndpoint(args.a2aEndpoint);
+        } catch (err) {
+          return {
+            error: `Endpoint verification failed: ${(err as Error).message}`
+          };
+        }
+        if (
+          target.cardSigningKid &&
+          (pin.cardSigningKid !== target.cardSigningKid ||
+            pin.cardSigningJku !== target.cardSigningJku)
+        ) {
+          return {
+            error:
+              `New endpoint for "${args.name}" is signed by a different key than the ` +
+              `one pinned at registration. Unregister and re-register if the agent's ` +
+              `signing identity changed intentionally.`
+          };
+        }
+      }
       await updateAgent(deps.db, args.name, {
         displayName: args.displayName,
         enabled: args.enabled,
-        a2aEndpoint: args.a2aEndpoint
+        a2aEndpoint: args.a2aEndpoint,
+        ...(pin
+          ? {
+              cardSigningJku: pin.cardSigningJku,
+              cardSigningKid: pin.cardSigningKid
+            }
+          : {})
       });
       for (const channelId of args.attachChannels ?? [])
         await attachAgentChannel(deps.db, {
