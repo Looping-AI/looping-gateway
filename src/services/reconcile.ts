@@ -17,10 +17,16 @@ import {
   listWorkspaceAdminIds
 } from "@/db/models/workspace-admins";
 import {
+  getConfig,
+  setConfig,
+  SystemConfigKeys
+} from "@/db/models/workspace-configs";
+import {
   iterateSlackUsers,
   fetchChannelMemberIds,
   findChannelIdByName,
-  getBotUserId
+  getBotUserId,
+  getBotInfo
 } from "@/wrappers/slack";
 
 type ReconcileEnv = Pick<Env, "DB" | "SLACK_BOT_TOKEN">;
@@ -30,6 +36,8 @@ export interface ReconcileResult {
   usersDeactivated: number;
   adminsAdded: number;
   adminsRemoved: number;
+  /** True only when the Slack team_id anchor was pinned for the first time. */
+  teamIdBootstrapped: boolean;
 }
 
 /**
@@ -43,8 +51,40 @@ export async function reconcile(env: ReconcileEnv): Promise<ReconcileResult> {
     usersUpserted: 0,
     usersDeactivated: 0,
     adminsAdded: 0,
-    adminsRemoved: 0
+    adminsRemoved: 0,
+    teamIdBootstrapped: false
   };
+
+  // 0. Team-id anchor — Trust-On-First-Use (TOFU): pin on first run, then
+  //    assert on every subsequent run. On mismatch we log loudly but do NOT
+  //    overwrite — the anchor is intentionally write-once so a token swap
+  //    (pointing to a different workspace) is caught rather than silently
+  //    re-pinning, which would break all channel-id and role assumptions.
+  const { teamId: liveTeamId } = await getBotInfo(env);
+  if (liveTeamId) {
+    const pinned = await getConfig(
+      db,
+      ORG_WORKSPACE_ID,
+      SystemConfigKeys.SLACK_TEAM_ID
+    );
+    if (pinned === null) {
+      await setConfig(
+        db,
+        ORG_WORKSPACE_ID,
+        SystemConfigKeys.SLACK_TEAM_ID,
+        liveTeamId
+      );
+      result.teamIdBootstrapped = true;
+      console.log("[reconcile] Slack team_id anchored (first run)", {
+        teamId: liveTeamId
+      });
+    } else if (pinned !== liveTeamId) {
+      console.error(
+        "[reconcile] team_id mismatch — bot token has drifted to a different workspace; NOT overwriting anchor",
+        { pinned, liveTeamId }
+      );
+    }
+  }
 
   // Resolve org admin channel inline (only writes on change). ws0 is assumed
   // to exist — seeded by migrations/0001_seed_builtins.sql at deploy time.
@@ -72,7 +112,6 @@ export async function reconcile(env: ReconcileEnv): Promise<ReconcileResult> {
       displayName: u.displayName,
       isPrimaryOwner: u.isPrimaryOwner,
       isOrgAdmin: orgAdminIds.has(u.id),
-      slackTeamId: u.teamId ?? null,
       deleted: u.deleted
     });
     result.usersUpserted++;

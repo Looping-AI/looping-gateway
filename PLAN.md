@@ -301,12 +301,15 @@ audit/round-limit trail — revisit later.)
    wired. **Cloudflare AI Search (AutoRAG)** is reserved for a future knowledge-base
    corpus, not this.
 7. **Remote/custom A2A agents** — register external A2A endpoints; route to them.
-8. **Slack team-id hardening** — the worker serves exactly one Slack team, so
-   `team_id` is a global invariant, not per-message data (it was removed from
-   dispatch metadata). Add a reconcile job that asserts the configured `team_id`
-   matches incoming events, runs on worker deploy and whenever the bot-token
-   secret rotates, and locks the worker down (refuses requests) on mismatch —
-   otherwise channel-id and role assumptions silently break under a team swap.
+8. **Slack team-id hardening** ✅ done. `team_id` is a global invariant: `workspaces.slack_team_id`
+   and `slack_users.slack_team_id` removed (both were wrong modelling). A new `workspace_configs`
+   (workspace_id + key PK, value NOT NULL) table with `SystemConfigKeys.SLACK_TEAM_ID = "slack_team_id"`
+   stores the anchor on ws0. Reconcile pins it **Trust-On-First-Use** (first `auth.test` call; write-once
+   — mismatch is logged loudly but the anchor is never overwritten). `handleSlackEvent` reads the anchor
+   from D1 on isolate cold-start (memoised after), and returns 400 + error-logs any event whose `team_id`
+   differs from the pinned value. Bootstrap grace window: no anchor yet → skip check. No team_id in
+   event → skip check (Q6). Only `/slack/events` is affected; internal workflows, cron, and agents are
+   untouched. No new binding, no operator config, no secrets involved.
 
 ## Verification
 

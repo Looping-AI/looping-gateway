@@ -11,7 +11,6 @@ export interface UpsertWorkspaceInput {
   id: number;
   name: string;
   adminChannelId?: string | null;
-  slackTeamId?: string | null;
 }
 
 export async function upsertWorkspace(
@@ -23,8 +22,7 @@ export async function upsertWorkspace(
     .values({
       id: input.id,
       name: input.name,
-      adminChannelId: input.adminChannelId ?? null,
-      slackTeamId: input.slackTeamId ?? null
+      adminChannelId: input.adminChannelId ?? null
     })
     .onConflictDoUpdate({
       target: schema.workspaces.id,
@@ -32,9 +30,6 @@ export async function upsertWorkspace(
         name: input.name,
         ...(input.adminChannelId != null
           ? { adminChannelId: input.adminChannelId }
-          : {}),
-        ...(input.slackTeamId != null
-          ? { slackTeamId: input.slackTeamId }
           : {}),
         updatedAt: sql`(unixepoch())`
       }
@@ -44,7 +39,6 @@ export async function upsertWorkspace(
 export interface CreateWorkspaceInput {
   name: string;
   adminChannelId?: string | null;
-  slackTeamId?: string | null;
 }
 
 export async function createWorkspace(
@@ -55,8 +49,7 @@ export async function createWorkspace(
     .insert(schema.workspaces)
     .values({
       name: input.name,
-      adminChannelId: input.adminChannelId ?? null,
-      slackTeamId: input.slackTeamId ?? null
+      adminChannelId: input.adminChannelId ?? null
     })
     .returning();
   return rows[0];

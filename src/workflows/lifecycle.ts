@@ -24,8 +24,7 @@ export async function handleTeamJoin(
   if (!params.userId) return;
   await upsertSlackUser(db, {
     slackUserId: params.userId,
-    displayName: params.displayName ?? null,
-    slackTeamId: params.teamId ?? null
+    displayName: params.displayName ?? null
   });
 }
 

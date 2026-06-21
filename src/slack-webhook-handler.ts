@@ -6,6 +6,9 @@ import {
 import type { SlackWebhookPayload } from "@chat-adapter/slack/webhook";
 import { isRecord, str } from "@/util/json";
 import { pickDisplayName } from "@/util/display-name";
+import { getDb } from "@/db/client";
+import { getConfig, SystemConfigKeys } from "@/db/models/workspace-configs";
+import { ORG_WORKSPACE_ID } from "@/db/models/workspaces";
 import type {
   MessageWorkflowParams,
   LifecycleWorkflowParams,
@@ -189,22 +192,76 @@ async function triggerWorkflow(
 }
 
 // ---------------------------------------------------------------------------
+// Team-id guard — per-isolate memo + D1 anchor check
+// ---------------------------------------------------------------------------
+
+/**
+ * Isolate-level memo for the pinned Slack team_id anchor.
+ *
+ * - `undefined` → not yet loaded this isolate lifetime (trigger a D1 read).
+ * - `null`      → loaded; no anchor row yet (bootstrap grace — skip check).
+ * - `string`    → loaded; the pinned team_id to compare against.
+ *
+ * The cache is deliberately volatile: a new isolate (e.g. after a deploy or
+ * secret rotation) starts fresh and re-reads from D1, so the anchor's
+ * durable value is always the final authority.
+ */
+let cachedAnchorTeamId: string | null | undefined = undefined;
+
+/**
+ * Reset the isolate memo cache. Exposed only for testing — production code
+ * never calls this; cache invalidation happens naturally on isolate restart.
+ * @internal
+ */
+export function _resetAnchorCacheForTest(): void {
+  cachedAnchorTeamId = undefined;
+}
+
+/**
+ * Check whether the event's `team_id` matches the durable anchor.
+ *
+ * Returns `false` (block the request with 400) only when an anchor is pinned
+ * AND the event carries a different team_id. All other cases pass through:
+ * - anchor not yet pinned (bootstrap grace window)
+ * - event carries no team_id (Q6: skip the check)
+ */
+async function teamIdAllowed(
+  eventTeamId: string | undefined,
+  db: ReturnType<typeof getDb>
+): Promise<boolean> {
+  if (!eventTeamId) return true; // no team_id in this event — skip
+
+  if (cachedAnchorTeamId === undefined) {
+    // Cold isolate: load from D1 once
+    cachedAnchorTeamId = await getConfig(
+      db,
+      ORG_WORKSPACE_ID,
+      SystemConfigKeys.SLACK_TEAM_ID
+    );
+  }
+
+  if (cachedAnchorTeamId === null) return true; // not yet bootstrapped — grace window
+
+  return eventTeamId === cachedAnchorTeamId;
+}
+
+// ---------------------------------------------------------------------------
 // Entry point — called by the gateway fetch handler
 // ---------------------------------------------------------------------------
 
 /**
- * Verify the Slack signature, classify the event, trigger the matching
- * Workflow, and return 200 before any agent work runs.
+ * Verify the Slack signature, classify the event, run the team-id guard,
+ * trigger the matching Workflow, and return 200 before any agent work runs.
  *
- * Returns 401 on bad signature, 500 on unexpected Workflow failure (so Slack
- * retries), and 200 for everything else — including ignored events and
- * duplicate event_ids (Slack retries get native dedupe via the instance id).
+ * Returns 401 on bad signature, 400 on team_id mismatch, 500 on unexpected
+ * Workflow failure (so Slack retries), and 200 for everything else — including
+ * ignored events and duplicate event_ids (native dedupe via instance id).
  */
 export async function handleSlackEvent(
   request: Request,
   env: Pick<
     Env,
-    "SLACK_SIGNING_SECRET" | "MESSAGE_WORKFLOW" | "LIFECYCLE_WORKFLOW"
+    "DB" | "SLACK_SIGNING_SECRET" | "MESSAGE_WORKFLOW" | "LIFECYCLE_WORKFLOW"
   >
 ): Promise<Response> {
   let rawBody: string;
@@ -226,10 +283,33 @@ export async function handleSlackEvent(
     case "challenge":
       console.log("[gateway] url_verification challenge");
       return Response.json({ challenge: classification.challenge });
-    case "message":
-      return triggerWorkflow(env.MESSAGE_WORKFLOW, classification.params);
-    case "lifecycle":
-      return triggerWorkflow(env.LIFECYCLE_WORKFLOW, classification.params);
+
+    case "message": {
+      const { teamId, ...workflowParams } = classification.params;
+      const db = getDb(env);
+      if (!(await teamIdAllowed(teamId, db))) {
+        console.error("[gateway] team_id mismatch — rejecting event", {
+          eventTeamId: teamId,
+          pinned: cachedAnchorTeamId
+        });
+        return new Response("Forbidden", { status: 400 });
+      }
+      return triggerWorkflow(env.MESSAGE_WORKFLOW, workflowParams);
+    }
+
+    case "lifecycle": {
+      const { teamId, ...workflowParams } = classification.params;
+      const db = getDb(env);
+      if (!(await teamIdAllowed(teamId, db))) {
+        console.error("[gateway] team_id mismatch — rejecting event", {
+          eventTeamId: teamId,
+          pinned: cachedAnchorTeamId
+        });
+        return new Response("Forbidden", { status: 400 });
+      }
+      return triggerWorkflow(env.LIFECYCLE_WORKFLOW, workflowParams);
+    }
+
     case "ignore":
       console.log("[gateway] event ignored", { reason: classification.reason });
       return OK();

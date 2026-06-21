@@ -27,7 +27,6 @@ describe("handleTeamJoin", () => {
       params({
         type: "team_join",
         userId: "U_new",
-        teamId: "T1",
         displayName: "New Bie"
       })
     );

@@ -24,7 +24,6 @@ export const workspaces = sqliteTable("workspaces", {
   id: integer("id").primaryKey(),
   name: text("name").notNull(),
   adminChannelId: text("admin_channel_id").unique(),
-  slackTeamId: text("slack_team_id"),
   createdAt: timestamp("created_at"),
   updatedAt: timestamp("updated_at")
 });
@@ -43,7 +42,6 @@ export const slackUsers = sqliteTable("slack_users", {
   isOrgAdmin: integer("is_org_admin", { mode: "boolean" })
     .notNull()
     .default(false),
-  slackTeamId: text("slack_team_id"),
   deleted: integer("deleted", { mode: "boolean" }).notNull().default(false),
   createdAt: timestamp("created_at"),
   updatedAt: timestamp("updated_at")
@@ -111,4 +109,28 @@ export const agentChannels = sqliteTable(
     primaryKey({ columns: [t.channelId, t.agentName] }),
     index("idx_agent_channels_agent").on(t.agentName)
   ]
+);
+
+/**
+ * Per-workspace key/value configuration store. The composite PK
+ * `(workspace_id, key)` allows each workspace to hold independent values for
+ * the same key (e.g. ws0 stores the global Slack team anchor). The value
+ * column is NOT NULL — absence of a key is represented by no row, not a null.
+ *
+ * System keys (written only by internal code) are exported from
+ * `src/db/models/workspace-configs.ts` under `SystemConfigKeys`; ad-hoc
+ * admin/operator keys live alongside them without coupling the schema.
+ */
+export const workspaceConfigs = sqliteTable(
+  "workspace_configs",
+  {
+    workspaceId: integer("workspace_id")
+      .notNull()
+      .references(() => workspaces.id),
+    key: text("key").notNull(),
+    value: text("value").notNull(),
+    createdAt: timestamp("created_at"),
+    updatedAt: timestamp("updated_at")
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.key] })]
 );

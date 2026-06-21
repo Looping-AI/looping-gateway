@@ -9,7 +9,6 @@ export interface UpsertSlackUserInput {
   displayName?: string | null;
   isPrimaryOwner?: boolean;
   isOrgAdmin?: boolean;
-  slackTeamId?: string | null;
   deleted?: boolean;
 }
 
@@ -31,7 +30,6 @@ export async function upsertSlackUser(
       displayName: input.displayName ?? null,
       isPrimaryOwner: input.isPrimaryOwner ?? false,
       isOrgAdmin: input.isOrgAdmin ?? false,
-      slackTeamId: input.slackTeamId ?? null,
       deleted: input.deleted ?? false
     })
     .onConflictDoUpdate({
@@ -45,9 +43,6 @@ export async function upsertSlackUser(
           : {}),
         ...(input.isOrgAdmin !== undefined
           ? { isOrgAdmin: input.isOrgAdmin }
-          : {}),
-        ...(input.slackTeamId != null
-          ? { slackTeamId: input.slackTeamId }
           : {}),
         ...(input.deleted !== undefined ? { deleted: input.deleted } : {}),
         updatedAt: sql`(unixepoch())`
