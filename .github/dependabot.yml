@@ -16,6 +16,15 @@ updates:
         patterns:
           - "ai"
           - "agents"
+          - "@a2a-js/sdk"
+      slack:
+        patterns:
+          - "@chat-adapter/*"
+          - "chat"
+      drizzle:
+        patterns:
+          - "drizzle-orm"
+          - "drizzle-kit"
       dev-tooling:
         patterns:
           - "eslint"
@@ -24,6 +33,8 @@ updates:
           - "prettier"
           - "typescript"
           - "@types/*"
+          - "vitest"
+          - "husky"
 
   - package-ecosystem: "github-actions"
     directory: "/"
