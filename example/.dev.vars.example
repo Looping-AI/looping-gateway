@@ -1,7 +1,0 @@
-// Copy to `.dev.vars` for local `wrangler dev`. In production set the secret
-// with `wrangler secret put CARD_SIGNING_PRIVATE_KEY`.
-//
-// CARD_SIGNING_PRIVATE_KEY: an Ed25519 private JWK (one line) that signs this
-// agent's AgentCard. MUST include a `kid`. Generate with `npm run keygen`.
-// Only the matching PUBLIC key is ever exposed, at /.well-known/jwks.json.
-CARD_SIGNING_PRIVATE_KEY={"kty":"OKP","crv":"Ed25519","d":"REPLACE","x":"REPLACE","kid":"example-1","alg":"EdDSA","use":"sig"}

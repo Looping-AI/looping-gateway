@@ -157,6 +157,16 @@ ARCHITECTURE.md   # Agent design, routing, and future A2A layer
 
 ---
 
+## Remote Agent Template
+
+Looking to build a remote agent that connects to this gateway? Use the dedicated template repo:
+
+→ **[Looping-AI/remote-agent](https://github.com/Looping-AI/remote-agent)**
+
+It includes a ready-to-deploy Cloudflare Worker with JWT verification, AgentCard signing, and JSON-RPC routing — everything you need to register a new agent with this gateway.
+
+---
+
 ## Workspace invariant — one Worker, one Slack workspace
 
 A deployed instance of this gateway is **permanently bound to a single Slack workspace** (team ID). On the first `reconcile()` run, the bot's workspace is pinned as a write-once anchor in D1. Every subsequent reconcile, and every inbound Slack event, asserts this anchor. A mismatch causes an immediate abort — no registry writes occur.
