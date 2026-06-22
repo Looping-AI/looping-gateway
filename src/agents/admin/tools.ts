@@ -22,11 +22,17 @@ import {
   createWorkspace,
   setWorkspaceAdminChannel
 } from "@/db/models/workspaces";
+import {
+  getAllowedRemoteAgentDomains,
+  setAllowedRemoteAgentDomains
+} from "@/db/models/workspace-configs";
+import { SHARED_INFRA_ROOTS } from "@/a2a/endpoint";
 
 /**
  * Admin tools — registry + workspace CRUD on D1. Consolidated to read/write per
  * domain (no tool proliferation): `agents_read`, `agents_write`,
- * `workspace_read`, `workspace_write`. Writes use a discriminated `operation`.
+ * `workspace_read`, `workspace_write`, `remote_agent_domains`. Writes use a
+ * discriminated `operation`.
  *
  * Two gating layers (see PLAN Phase 4):
  *  1. Instance-scoped availability — `buildAdminTools` only constructs
@@ -308,6 +314,105 @@ export async function workspaceWrite(
 // ---------------------------------------------------------------------------
 // AI-SDK tool wiring — thin wrappers over the handlers above.
 // ---------------------------------------------------------------------------
+// remote_agent_domains — org-only
+// ---------------------------------------------------------------------------
+
+type RemoteAgentDomainsArgs =
+  | { operation: "list" }
+  | { operation: "add"; domain: string }
+  | { operation: "remove"; domain: string };
+
+export async function remoteAgentDomains(
+  deps: AdminToolDeps,
+  args: RemoteAgentDomainsArgs
+): Promise<ToolResult> {
+  if (deps.wsId !== ORG_WORKSPACE_ID)
+    return deny(
+      "remote agent domain management is only available to the org admin"
+    );
+  if (!deps.ctx)
+    return deny("sign in as the org admin to manage remote agent domains");
+  if (
+    !authorize(deps.ctx, {
+      type: "IsWorkspaceAdmin",
+      workspaceId: ORG_WORKSPACE_ID
+    })
+  )
+    return deny("remote agent domain management requires org admin");
+
+  const current = await getAllowedRemoteAgentDomains(deps.db);
+
+  if (args.operation === "list") {
+    return {
+      approvedDomains: current,
+      note:
+        "Each entry covers that domain and all its subdomains. " +
+        "An empty list means no custom (remote) agents are approved."
+    };
+  }
+
+  const rawDomain = args.domain.trim().toLowerCase();
+
+  // Strip any scheme/path/port the caller may have included.
+  let domain: string;
+  try {
+    const parsed = rawDomain.includes("://")
+      ? new URL(rawDomain).hostname
+      : new URL(`https://${rawDomain}`).hostname;
+    domain = parsed;
+  } catch {
+    return { error: `'${args.domain}' is not a valid domain.` };
+  }
+
+  if (!domain || !domain.includes(".")) {
+    return {
+      error: `'${args.domain}' must be a multi-label domain (e.g. 'agents.example.com').`
+    };
+  }
+
+  if (SHARED_INFRA_ROOTS.has(domain)) {
+    return {
+      error:
+        `'${domain}' is a shared infrastructure root domain — any third-party ` +
+        `can deploy under it and forge agent identities in A2A key verification. ` +
+        `Add a specific account-level subdomain you control instead ` +
+        `(e.g. 'myorg.${domain}').`
+    };
+  }
+
+  if (args.operation === "add") {
+    if (current.includes(domain)) {
+      return {
+        ok: true,
+        approvedDomains: current,
+        note: `'${domain}' was already approved.`
+      };
+    }
+    const updated = [...current, domain];
+    await setAllowedRemoteAgentDomains(deps.db, updated);
+    return {
+      ok: true,
+      approvedDomains: updated,
+      note:
+        `'${domain}' and all its subdomains are now approved for remote agents. ` +
+        `Only add domains your organization fully controls.`
+    };
+  }
+
+  // operation === "remove"
+  if (!current.includes(domain)) {
+    return {
+      ok: true,
+      approvedDomains: current,
+      note: `'${domain}' was not in the approved list.`
+    };
+  }
+  const updated = current.filter((d) => d !== domain);
+  await setAllowedRemoteAgentDomains(deps.db, updated);
+  return { ok: true, approvedDomains: updated };
+}
+
+// ---------------------------------------------------------------------------
 
 /** Build the admin tool set for one instance. `workspace_write` is org-only. */
 export function buildAdminTools(deps: AdminToolDeps): ToolSet {
@@ -376,6 +481,31 @@ export function buildAdminTools(deps: AdminToolDeps): ToolSet {
         })
       ]),
       execute: (args) => workspaceWrite(deps, args)
+    });
+
+    tools.remote_agent_domains = tool({
+      description:
+        "Org-admin only: manage approved domains for remote (custom) A2A agents. " +
+        "Each approved domain covers that domain and all its subdomains — " +
+        "e.g. approving 'myorg.workers.dev' allows any agent hosted under it. " +
+        "Only add domains your organization fully controls: A2A trusts the endpoint " +
+        "domain for cryptographic key verification, so any subdomain of an approved " +
+        "entry can host a verified agent. Shared platform roots (workers.dev, etc.) " +
+        "are permanently blocked regardless. An empty list disables all remote agents.",
+      inputSchema: z.discriminatedUnion("operation", [
+        z.object({ operation: z.literal("list") }),
+        z.object({
+          operation: z.literal("add"),
+          domain: z
+            .string()
+            .describe("Domain to approve (covers all its subdomains)")
+        }),
+        z.object({
+          operation: z.literal("remove"),
+          domain: z.string().describe("Domain to remove from the approved list")
+        })
+      ]),
+      execute: (args) => remoteAgentDomains(deps, args)
     });
   }
 

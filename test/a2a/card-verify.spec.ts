@@ -102,7 +102,7 @@ describe("verifyAgentCardSignature", () => {
     const card = await signCard(baseCard(), key);
 
     const pin = await verifyAgentCardSignature(card, {
-      allowedHosts: ["agent.example.com"]
+      allowedDomains: ["agent.example.com"]
     });
     expect(pin).toEqual({ cardSigningJku: JKU, cardSigningKid: "k1" });
   });
@@ -110,7 +110,7 @@ describe("verifyAgentCardSignature", () => {
   it("rejects an unsigned card", async () => {
     await expect(
       verifyAgentCardSignature(baseCard(), {
-        allowedHosts: ["agent.example.com"]
+        allowedDomains: ["agent.example.com"]
       })
     ).rejects.toThrow(AgentCardVerificationError);
   });
@@ -124,7 +124,7 @@ describe("verifyAgentCardSignature", () => {
 
     await expect(
       verifyAgentCardSignature(tampered, {
-        allowedHosts: ["agent.example.com"]
+        allowedDomains: ["agent.example.com"]
       })
     ).rejects.toThrow(AgentCardVerificationError);
   });
@@ -138,7 +138,7 @@ describe("verifyAgentCardSignature", () => {
 
     await expect(
       verifyAgentCardSignature(card, {
-        allowedHosts: ["agent.example.com"]
+        allowedDomains: ["agent.example.com"]
       })
     ).rejects.toThrow(AgentCardVerificationError);
   });
@@ -165,7 +165,7 @@ describe("verifyAgentCardSignature", () => {
 
     await expect(
       verifyAgentCardSignature(forged, {
-        allowedHosts: ["agent.example.com"]
+        allowedDomains: ["agent.example.com"]
       })
     ).rejects.toThrow(AgentCardVerificationError);
   });

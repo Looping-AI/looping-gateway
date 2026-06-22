@@ -16,11 +16,7 @@ import {
   removeWorkspaceAdmin,
   listWorkspaceAdminIds
 } from "@/db/models/workspace-admins";
-import {
-  getConfig,
-  setConfig,
-  SystemConfigKeys
-} from "@/db/models/workspace-configs";
+import { getSlackTeamId, setSlackTeamId } from "@/db/models/workspace-configs";
 import {
   iterateSlackUsers,
   fetchChannelMemberIds,
@@ -69,18 +65,9 @@ export async function reconcile(env: ReconcileEnv): Promise<ReconcileResult> {
   // occur under a drifted token.
   const { teamId: liveTeamId } = await getBotInfo(env);
   if (liveTeamId) {
-    const pinned = await getConfig(
-      db,
-      ORG_WORKSPACE_ID,
-      SystemConfigKeys.SLACK_TEAM_ID
-    );
+    const pinned = await getSlackTeamId(db);
     if (pinned === null) {
-      await setConfig(
-        db,
-        ORG_WORKSPACE_ID,
-        SystemConfigKeys.SLACK_TEAM_ID,
-        liveTeamId
-      );
+      await setSlackTeamId(db, liveTeamId);
       result.teamIdBootstrapped = true;
       console.log("[reconcile] Slack team_id anchored (first run)", {
         teamId: liveTeamId

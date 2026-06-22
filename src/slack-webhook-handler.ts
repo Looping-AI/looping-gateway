@@ -7,12 +7,7 @@ import type { SlackWebhookPayload } from "@chat-adapter/slack/webhook";
 import { isRecord, str } from "@/util/json";
 import { pickDisplayName } from "@/util/display-name";
 import { getDb } from "@/db/client";
-import {
-  getConfig,
-  setConfig,
-  SystemConfigKeys
-} from "@/db/models/workspace-configs";
-import { ORG_WORKSPACE_ID } from "@/db/models/workspaces";
+import { getSlackTeamId, setPublicUrl } from "@/db/models/workspace-configs";
 import type {
   MessageWorkflowParams,
   LifecycleWorkflowParams,
@@ -242,7 +237,7 @@ async function discoverPublicUrl(
   if (cachedPublicUrl !== null) return;
   const origin = new URL(request.url).origin;
   cachedPublicUrl = origin;
-  await setConfig(db, ORG_WORKSPACE_ID, SystemConfigKeys.PUBLIC_URL, origin);
+  await setPublicUrl(db, origin);
 }
 
 /**
@@ -261,11 +256,7 @@ async function guardTeamId(
   if (!eventTeamId) return null; // no team_id in this event — skip check
 
   if (cachedAnchorTeamId === null) {
-    const anchor = await getConfig(
-      db,
-      ORG_WORKSPACE_ID,
-      SystemConfigKeys.SLACK_TEAM_ID
-    );
+    const anchor = await getSlackTeamId(db);
     if (anchor !== null) {
       cachedAnchorTeamId = anchor; // pin once; never cleared in production
     }

@@ -16,11 +16,3 @@ export const EMBED_MODEL_ID = "@cf/baai/bge-m3";
 
 /** Cloudflare AI Gateway slug — "default" auto-provisions a gateway on first request. */
 export const AI_GATEWAY_ID = "default";
-
-/**
- * Comma-separated allowlist of hosts that custom (remote) A2A agents may be registered
- * on. Leave empty to permit any public HTTPS host (SSRF policy still applies).
- * Hosts are exact-matched against the endpoint's hostname (no port, no path, no wildcards).
- * Example: ["agent.example.com", "api.acme.io"]
- */
-export const REMOTE_AGENT_ALLOWED_HOSTS: string[] = [];

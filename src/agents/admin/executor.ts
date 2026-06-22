@@ -14,6 +14,7 @@ import { executeAgentTurn } from "@/agents/shared/loop";
 import { archiveMessages } from "@/agents/shared/recall";
 import { recallTools } from "@/agents/shared/recall-tool";
 import { verifyRemoteAgentEndpoint } from "@/a2a/card-verify";
+import { getAllowedRemoteAgentDomains } from "@/db/models/workspace-configs";
 import { adminSoul, callerContext } from "./prompt";
 import { buildAdminTools } from "./tools";
 
@@ -98,7 +99,12 @@ export class AdminAgentExecutor implements AgentExecutor {
               db: getDb(this.env),
               ctx,
               wsId,
-              verifyEndpoint: (endpoint) => verifyRemoteAgentEndpoint(endpoint)
+              verifyEndpoint: async (endpoint) => {
+                const allowedDomains = await getAllowedRemoteAgentDomains(
+                  getDb(this.env)
+                );
+                return verifyRemoteAgentEndpoint(endpoint, allowedDomains);
+              }
             }),
             ...recallTools(this.env, namespace, hasArchive)
           }

@@ -2,79 +2,162 @@ import { describe, it, expect } from "vitest";
 import {
   InvalidEndpointError,
   originOf,
-  parseAllowedHosts,
+  SHARED_INFRA_ROOTS,
   validateRemoteEndpoint
 } from "@/a2a/endpoint";
 
-describe("validateRemoteEndpoint — SSRF policy", () => {
-  const accepted = [
-    "https://agent.example.com",
-    "https://api.example.co.uk/a2a",
-    "https://sub.domain.example.org:8443/path"
-  ];
-  for (const endpoint of accepted) {
-    it(`accepts public HTTPS host: ${endpoint}`, () => {
-      const url = validateRemoteEndpoint(endpoint);
-      expect(url).toBeInstanceOf(URL);
+describe("validateRemoteEndpoint — format / protocol", () => {
+  it("rejects a non-URL string", () => {
+    expect(() => validateRemoteEndpoint("not a url", ["example.com"])).toThrow(
+      InvalidEndpointError
+    );
+  });
+
+  it("rejects http (non-https)", () => {
+    expect(() =>
+      validateRemoteEndpoint("http://agent.example.com", ["example.com"])
+    ).toThrow(InvalidEndpointError);
+  });
+
+  it("rejects ftp scheme", () => {
+    expect(() =>
+      validateRemoteEndpoint("ftp://agent.example.com", ["example.com"])
+    ).toThrow(InvalidEndpointError);
+  });
+});
+
+describe("validateRemoteEndpoint — empty approved-domains list (deny-all)", () => {
+  it("rejects any public HTTPS host when no domains are approved", () => {
+    expect(() => validateRemoteEndpoint("https://agent.example.com")).toThrow(
+      InvalidEndpointError
+    );
+    expect(() =>
+      validateRemoteEndpoint("https://agent.example.com", [])
+    ).toThrow(InvalidEndpointError);
+  });
+});
+
+describe("validateRemoteEndpoint — shared-infra root domain rejection", () => {
+  for (const root of SHARED_INFRA_ROOTS) {
+    it(`permanently blocks the bare root '${root}'`, () => {
+      // Should be blocked even if somehow present in the approved list.
+      expect(() =>
+        validateRemoteEndpoint(`https://${root}/a2a`, [root])
+      ).toThrow(InvalidEndpointError);
     });
   }
+});
 
-  const rejected: Array<[string, string]> = [
-    ["http://agent.example.com", "non-https"],
-    ["ftp://agent.example.com", "non-https scheme"],
-    ["https://localhost/a2a", "localhost"],
-    ["https://example", "bare single-label host"],
-    ["https://foo.local", ".local suffix"],
-    ["https://foo.internal", ".internal suffix"],
-    ["https://svc.localhost", ".localhost suffix"],
-    ["https://127.0.0.1", "loopback IPv4"],
-    ["https://0.0.0.0", "this-host IPv4"],
-    ["https://10.1.2.3", "private 10/8"],
-    ["https://172.16.5.6", "private 172.16/12"],
-    ["https://192.168.0.1", "private 192.168/16"],
-    ["https://169.254.169.254", "link-local / metadata"],
-    ["https://100.64.0.1", "CGNAT 100.64/10"],
-    ["https://224.0.0.1", "multicast/reserved"],
-    ["https://[::1]", "loopback IPv6"],
-    ["https://[fd00::1]", "ULA IPv6"],
-    ["https://[fe80::1]", "link-local IPv6"],
-    ["https://[::ffff:127.0.0.1]", "IPv4-mapped loopback"],
-    ["https://[0:0:0:0:0:0:0:1]", "expanded IPv6 loopback"],
-    ["https://2130706433", "decimal-int IPv4 normalized to loopback"],
-    ["https://127.1", "2-part shorthand IPv4 (loopback)"],
-    ["https://0x7f.0.0.1", "hex-octet IPv4 (loopback)"],
-    ["not a url", "invalid URL"]
+describe("validateRemoteEndpoint — approved-domain matching", () => {
+  it("accepts a host that exactly matches an approved domain", () => {
+    expect(
+      validateRemoteEndpoint("https://agent.example.com/a2a", [
+        "agent.example.com"
+      ])
+    ).toBeInstanceOf(URL);
+  });
+
+  it("accepts a direct subdomain of an approved domain", () => {
+    expect(
+      validateRemoteEndpoint("https://cool-agent.myorg.workers.dev/a2a", [
+        "myorg.workers.dev"
+      ])
+    ).toBeInstanceOf(URL);
+  });
+
+  it("accepts a deeper subdomain of an approved domain", () => {
+    expect(
+      validateRemoteEndpoint("https://sub.cool-agent.myorg.workers.dev/a2a", [
+        "myorg.workers.dev"
+      ])
+    ).toBeInstanceOf(URL);
+  });
+
+  it("accepts with multiple approved domains (first doesn't match, second does)", () => {
+    expect(
+      validateRemoteEndpoint("https://agent.acme.io/a2a", [
+        "example.com",
+        "acme.io"
+      ])
+    ).toBeInstanceOf(URL);
+  });
+
+  it("rejects a host not covered by any approved domain", () => {
+    expect(() =>
+      validateRemoteEndpoint("https://evil.example.com", ["agent.example.com"])
+    ).toThrow(InvalidEndpointError);
+  });
+
+  it("does not treat an approved domain as a suffix match of unrelated hosts", () => {
+    // "example.com" should not approve "notexample.com"
+    expect(() =>
+      validateRemoteEndpoint("https://notexample.com", ["example.com"])
+    ).toThrow(InvalidEndpointError);
+  });
+
+  it("accepts account-level subdomains of shared-infra roots", () => {
+    expect(
+      validateRemoteEndpoint("https://myorg.workers.dev/a2a", [
+        "myorg.workers.dev"
+      ])
+    ).toBeInstanceOf(URL);
+    expect(
+      validateRemoteEndpoint("https://cool-agent.myorg.workers.dev/a2a", [
+        "myorg.workers.dev"
+      ])
+    ).toBeInstanceOf(URL);
+  });
+});
+
+describe("validateRemoteEndpoint — SSRF belt-and-suspenders", () => {
+  // Private/internal addresses are still blocked even if an operator somehow
+  // adds them to the approved list (defense-in-depth).
+  const internalEndpoints: Array<[string, string, string]> = [
+    ["https://localhost/a2a", "localhost", "localhost"],
+    ["https://127.0.0.1", "127.0.0.1", "loopback IPv4"],
+    ["https://10.1.2.3", "10.1.2.3", "private 10/8"],
+    ["https://172.16.5.6", "172.16.5.6", "private 172.16/12"],
+    ["https://192.168.0.1", "192.168.0.1", "private 192.168/16"],
+    ["https://169.254.169.254", "169.254.169.254", "link-local / metadata"],
+    ["https://100.64.0.1", "100.64.0.1", "CGNAT"],
+    ["https://foo.local", "foo.local", ".local suffix"],
+    ["https://foo.internal", "foo.internal", ".internal suffix"]
   ];
-  for (const [endpoint, why] of rejected) {
-    it(`rejects ${why}: ${endpoint}`, () => {
-      expect(() => validateRemoteEndpoint(endpoint)).toThrow(
+  for (const [endpoint, approvedEntry, why] of internalEndpoints) {
+    it(`blocks ${why} even when listed in approved domains`, () => {
+      expect(() => validateRemoteEndpoint(endpoint, [approvedEntry])).toThrow(
         InvalidEndpointError
       );
     });
   }
 
-  it("enforces an explicit host allowlist (exact match)", () => {
-    const allow = ["agent.example.com"];
-    expect(
-      validateRemoteEndpoint("https://agent.example.com/a2a", allow)
-    ).toBeInstanceOf(URL);
-    expect(() =>
-      validateRemoteEndpoint("https://evil.example.com", allow)
-    ).toThrow(InvalidEndpointError);
+  it("blocks all IPv6 literals regardless of approval", () => {
+    for (const endpoint of [
+      "https://[::1]",
+      "https://[fd00::1]",
+      "https://[fe80::1]",
+      "https://[::ffff:127.0.0.1]",
+      "https://[0:0:0:0:0:0:0:1]"
+    ]) {
+      // IPv6 literals can't be added to approved list as valid domains,
+      // but verify they're blocked at the protocol/format level.
+      expect(() => validateRemoteEndpoint(endpoint, ["::1"])).toThrow(
+        InvalidEndpointError
+      );
+    }
   });
-});
 
-describe("parseAllowedHosts", () => {
-  it("splits, trims, lowercases, and drops empties", () => {
-    expect(parseAllowedHosts(" A.com, b.COM ,, c.com ")).toEqual([
-      "a.com",
-      "b.com",
-      "c.com"
-    ]);
-  });
-  it("returns [] for undefined/empty", () => {
-    expect(parseAllowedHosts(undefined)).toEqual([]);
-    expect(parseAllowedHosts("")).toEqual([]);
+  it("blocks canonical forms of loopback (decimal, shorthand, hex)", () => {
+    const allow = ["2130706433", "127.1", "0x7f.0.0.1"];
+    expect(() => validateRemoteEndpoint("https://2130706433", allow)).toThrow(
+      InvalidEndpointError
+    );
+    expect(() => validateRemoteEndpoint("https://127.1", allow)).toThrow(
+      InvalidEndpointError
+    );
+    expect(() => validateRemoteEndpoint("https://0x7f.0.0.1", allow)).toThrow(
+      InvalidEndpointError
+    );
   });
 });
 

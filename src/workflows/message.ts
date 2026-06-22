@@ -9,6 +9,7 @@ import {
   type DispatchAgentRef,
   type DispatchMetadata
 } from "@/agents/dispatch";
+import { InvalidEndpointError } from "@/a2a/endpoint";
 import { postReply } from "@/wrappers/slack";
 
 export const NO_AGENT_HINT =
@@ -83,13 +84,22 @@ export async function dispatchMessage(
     metadata = { agentKind: "custom", workspaceId: plan.workspaceId };
   }
 
-  return dispatchToAgent(env, plan.agent, {
-    text: plan.text,
-    channelId: p.channelId,
-    threadTs: p.threadTs || p.ts,
-    user: plan.user,
-    metadata
-  });
+  try {
+    return await dispatchToAgent(env, plan.agent, {
+      text: plan.text,
+      channelId: p.channelId,
+      threadTs: p.threadTs || p.ts,
+      user: plan.user,
+      metadata
+    });
+  } catch (err) {
+    if (err instanceof InvalidEndpointError) {
+      // Policy rejection — not a transient error, so don't let the workflow
+      // retry. Return a user-visible message so the reply step fires normally.
+      return `I wasn't able to reach the agent: ${err.message}`;
+    }
+    throw err;
+  }
 }
 
 // ---------------------------------------------------------------------------

@@ -11,12 +11,18 @@
  *  - Reject all IPv6 literals (see `isIPv6Literal`).
  *  - Reject bare single-label hosts and known-internal suffixes
  *    (`localhost`, `.local`, `.internal`, `.localhost`).
- *  - Optional explicit host allowlist (operator-provided).
+ *  - Reject bare shared-infrastructure root domains (`workers.dev`, etc.) even
+ *    if present in the org's approved-domains list — any third-party can deploy
+ *    under these domains and would pass A2A key verification. Account-level
+ *    subdomains (e.g. `myorg.workers.dev`) are allowed.
+ *  - Required explicit org-approved domain list (org admin-managed). Each entry
+ *    covers that domain and all its subdomains (subdomain-aware matching). An
+ *    empty list means no remote agents are approved — deny all.
  *
  * Residual risk: DNS rebinding. Workers cannot cheaply pre-resolve a hostname to
  * inspect the address it will actually connect to, so a public name that
  * resolves to a private address at request time is not caught here. The
- * allowlist is the mitigation when that risk is unacceptable.
+ * approved-domains list is the mitigation when that risk is unacceptable.
  */
 
 /** Thrown when an endpoint URL is rejected by the SSRF policy. */
@@ -29,6 +35,29 @@ export class InvalidEndpointError extends Error {
 
 /** Hostname suffixes that always resolve to internal/loopback targets. */
 const BLOCKED_SUFFIXES = [".local", ".internal", ".localhost"];
+
+/**
+ * Bare root domains of shared infrastructure platforms where any user can
+ * deploy code. Trusting these as A2A endpoint domains is dangerous because
+ * A2A verifies keys by fetching from the endpoint domain — a third-party
+ * deploying under the same root could forge agent identities.
+ *
+ * Account-level subdomains (e.g. `myorg.workers.dev`) are fine because
+ * the account owner controls all subdomains under their namespace.
+ *
+ * Exported so the admin tool can reuse this set for add-time validation.
+ */
+export const SHARED_INFRA_ROOTS = new Set([
+  "workers.dev",
+  "pages.dev",
+  "vercel.app",
+  "netlify.app",
+  "github.io",
+  "glitch.me",
+  "repl.co",
+  "railway.app",
+  "render.com"
+]);
 
 /** Exact hostnames that are always internal. */
 const BLOCKED_HOSTS = new Set(["localhost", "ip6-localhost", "ip6-loopback"]);
@@ -88,23 +117,20 @@ function isBlockedHost(host: string): boolean {
   return false;
 }
 
-/** Normalize an operator allowlist string (`"a.com, b.com"`) to lowercase hosts. */
-export function parseAllowedHosts(raw: string | undefined): string[] {
-  if (!raw) return [];
-  return raw
-    .split(",")
-    .map((h) => h.trim().toLowerCase())
-    .filter((h) => h.length > 0);
-}
-
 /**
- * Validate a remote A2A endpoint against the SSRF policy. Returns the parsed
- * `URL` on success; throws {@link InvalidEndpointError} otherwise. When
- * `allowedHosts` is non-empty the endpoint host must be a member (exact match).
+ * Validate a remote A2A endpoint against the SSRF policy and org-approved
+ * domain list. Returns the parsed `URL` on success; throws
+ * {@link InvalidEndpointError} otherwise.
+ *
+ * Matching is subdomain-aware: an entry `myorg.workers.dev` in
+ * `allowedDomains` approves `myorg.workers.dev` itself and any host ending
+ * with `.myorg.workers.dev` (e.g. `cool-agent.myorg.workers.dev`).
+ *
+ * An empty `allowedDomains` means no remote agents are approved — deny all.
  */
 export function validateRemoteEndpoint(
   endpoint: string,
-  allowedHosts: string[] = []
+  allowedDomains: string[] = []
 ): URL {
   let url: URL;
   try {
@@ -121,16 +147,44 @@ export function validateRemoteEndpoint(
 
   const host = url.hostname.toLowerCase();
 
-  if (allowedHosts.length > 0) {
-    if (!allowedHosts.includes(host)) {
-      throw new InvalidEndpointError(`host not in allowlist: ${host}`);
-    }
-    return url;
+  // Shared-infra root domains are permanently blocked regardless of the
+  // approved-domains list — any third-party can deploy under these roots.
+  if (SHARED_INFRA_ROOTS.has(host)) {
+    throw new InvalidEndpointError(
+      `'${host}' is a shared infrastructure root domain — any third-party ` +
+        `can deploy under it and forge agent identities in A2A key verification. ` +
+        `Add a specific account-level subdomain you control instead ` +
+        `(e.g. 'myorg.${host}').`
+    );
   }
 
+  if (allowedDomains.length === 0) {
+    throw new InvalidEndpointError(
+      `No remote agent domains are approved by your organization. ` +
+        `The org admin must add at least one approved domain via the admin agent ` +
+        `before custom agents can be registered or dispatched to.`
+    );
+  }
+
+  const approved = allowedDomains.some(
+    (d) => host === d || host.endsWith(`.${d}`)
+  );
+  if (!approved) {
+    throw new InvalidEndpointError(
+      `Host '${host}' is not covered by any of your organization's approved ` +
+        `remote agent domains. Ask your org admin to add an approved domain via ` +
+        `the admin agent. Only domains your organization fully controls ` +
+        `(including all subdomains) should be approved.`
+    );
+  }
+
+  // Belt-and-suspenders: still block internal addresses even when the host
+  // matches an approved domain (guards against approved domains that somehow
+  // resolve to private IPs, e.g. misconfigured split-horizon DNS).
   if (isBlockedHost(host)) {
     throw new InvalidEndpointError(`endpoint host is not allowed: ${host}`);
   }
+
   return url;
 }
 

@@ -6,7 +6,6 @@ import {
   importJWK,
   type JWK
 } from "jose";
-import { REMOTE_AGENT_ALLOWED_HOSTS } from "@/config";
 import { originOf, validateRemoteEndpoint } from "./endpoint";
 
 /**
@@ -104,9 +103,9 @@ async function fetchJsonCapped(url: string): Promise<unknown> {
 /** Fetch the public AgentCard from a remote endpoint's well-known path. */
 export async function fetchAgentCard(
   endpoint: string,
-  allowedHosts: string[] = []
+  allowedDomains: string[] = []
 ): Promise<AgentCard> {
-  validateRemoteEndpoint(endpoint, allowedHosts);
+  validateRemoteEndpoint(endpoint, allowedDomains);
   const path = AGENT_CARD_PATH.startsWith("/")
     ? AGENT_CARD_PATH
     : `/${AGENT_CARD_PATH}`;
@@ -122,9 +121,9 @@ export async function fetchAgentCard(
 async function resolveSigningKey(
   jku: string,
   kid: string,
-  allowedHosts: string[]
+  allowedDomains: string[]
 ): Promise<JWK> {
-  validateRemoteEndpoint(jku, allowedHosts);
+  validateRemoteEndpoint(jku, allowedDomains);
   const jwks = (await fetchJsonCapped(jku)) as { keys?: JWK[] };
   const key = jwks.keys?.find((k) => k.kid === kid);
   if (!key) {
@@ -147,9 +146,9 @@ async function resolveSigningKey(
  */
 export async function verifyAgentCardSignature(
   card: AgentCard,
-  opts: { allowedHosts?: string[] } = {}
+  opts: { allowedDomains?: string[] } = {}
 ): Promise<CardSigningPin> {
-  const allowedHosts = opts.allowedHosts ?? [];
+  const allowedDomains = opts.allowedDomains ?? [];
   const signatures = (card as AgentCard & { signatures?: AgentCardSignature[] })
     .signatures;
   if (!signatures || signatures.length === 0) {
@@ -172,7 +171,11 @@ export async function verifyAgentCardSignature(
       if (!header.kid || !header.jku) {
         throw new Error("protected header missing kid/jku");
       }
-      const key = await resolveSigningKey(header.jku, header.kid, allowedHosts);
+      const key = await resolveSigningKey(
+        header.jku,
+        header.kid,
+        allowedDomains
+      );
       const publicKey = await importJWK(key, ALG);
       await flattenedVerify(
         { protected: sig.protected, signature: sig.signature, payload },
@@ -195,10 +198,9 @@ export async function verifyAgentCardSignature(
  * endpoint, verify its signature, and return the pin to persist.
  */
 export async function verifyRemoteAgentEndpoint(
-  endpoint: string
+  endpoint: string,
+  allowedDomains: string[] = []
 ): Promise<CardSigningPin> {
-  const card = await fetchAgentCard(endpoint, REMOTE_AGENT_ALLOWED_HOSTS);
-  return verifyAgentCardSignature(card, {
-    allowedHosts: REMOTE_AGENT_ALLOWED_HOSTS
-  });
+  const card = await fetchAgentCard(endpoint, allowedDomains);
+  return verifyAgentCardSignature(card, { allowedDomains });
 }

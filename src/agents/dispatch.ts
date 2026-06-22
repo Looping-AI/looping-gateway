@@ -5,10 +5,11 @@ import type { AgentRow } from "@/db/models/agents";
 import { buildAgentCard } from "@/a2a/card";
 import { sendA2AMessage } from "@/a2a/client";
 import { originOf, validateRemoteEndpoint } from "@/a2a/endpoint";
-import { REMOTE_AGENT_ALLOWED_HOSTS } from "@/config";
 import { getDb } from "@/db/client";
-import { getConfig, SystemConfigKeys } from "@/db/models/workspace-configs";
-import { ORG_WORKSPACE_ID } from "@/db/models/workspaces";
+import {
+  getAllowedRemoteAgentDomains,
+  getPublicUrl
+} from "@/db/models/workspace-configs";
 
 /** The subset of an agent registry row the dispatcher needs (Rpc-serializable). */
 export interface DispatchAgentRef {
@@ -60,11 +61,7 @@ export function _resetIssuerCacheForTest(): void {
 /** Read (and memoize) the gateway issuer origin from D1. */
 async function resolveIssuer(env: Env): Promise<string | null> {
   if (cachedIssuer !== null) return cachedIssuer;
-  const issuer = await getConfig(
-    getDb(env),
-    ORG_WORKSPACE_ID,
-    SystemConfigKeys.PUBLIC_URL
-  );
+  const issuer = await getPublicUrl(getDb(env));
   if (issuer) cachedIssuer = issuer;
   return issuer;
 }
@@ -130,7 +127,8 @@ export async function dispatchToAgent(
     // EdDSA-signed gateway JWT (verified by the remote against our public JWKS),
     // NOT as plaintext `message.metadata` — so a remote agent can neither read
     // the full `UserAuthContext` nor forge the caller's permissions.
-    validateRemoteEndpoint(agent.a2aEndpoint, REMOTE_AGENT_ALLOWED_HOSTS); // SSRF defense-in-depth
+    const allowedDomains = await getAllowedRemoteAgentDomains(getDb(env));
+    validateRemoteEndpoint(agent.a2aEndpoint, allowedDomains); // SSRF + approved-domain defense-in-depth
 
     const workspaceId =
       payload.metadata.agentKind === "custom"

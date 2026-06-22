@@ -7,6 +7,7 @@ import {
   agentsWrite,
   workspaceRead,
   workspaceWrite,
+  remoteAgentDomains,
   buildAdminTools,
   type AdminToolDeps
 } from "@/agents/admin/tools";
@@ -297,15 +298,128 @@ describe("admin tools — workspace_write instance scoping", () => {
 });
 
 describe("admin tools — buildAdminTools availability", () => {
-  it("exposes workspace_write only on the org instance", () => {
+  it("exposes workspace_write and remote_agent_domains only on the org instance", () => {
     const orgTools = buildAdminTools(deps(ORG_WORKSPACE_ID, orgAdmin));
     expect(Object.keys(orgTools)).toContain("workspace_write");
+    expect(Object.keys(orgTools)).toContain("remote_agent_domains");
 
     const wsTools = buildAdminTools(deps(3, ctx({ adminWorkspaces: [3] })));
     expect(Object.keys(wsTools)).not.toContain("workspace_write");
+    expect(Object.keys(wsTools)).not.toContain("remote_agent_domains");
     expect(Object.keys(wsTools)).toEqual(
       expect.arrayContaining(["agents_read", "agents_write", "workspace_read"])
     );
+  });
+});
+
+describe("admin tools — remote_agent_domains", () => {
+  const orgDeps = deps(ORG_WORKSPACE_ID, orgAdmin);
+
+  it("lists empty approved domains initially", async () => {
+    const res = (await remoteAgentDomains(orgDeps, { operation: "list" })) as {
+      approvedDomains: string[];
+    };
+    expect(Array.isArray(res.approvedDomains)).toBe(true);
+  });
+
+  it("adds a domain and reads it back via list", async () => {
+    await remoteAgentDomains(orgDeps, {
+      operation: "add",
+      domain: "agents.example-radt.com"
+    });
+    const res = (await remoteAgentDomains(orgDeps, { operation: "list" })) as {
+      approvedDomains: string[];
+    };
+    expect(res.approvedDomains).toContain("agents.example-radt.com");
+  });
+
+  it("is idempotent when adding the same domain twice", async () => {
+    await remoteAgentDomains(orgDeps, {
+      operation: "add",
+      domain: "idempotent.example-radt.com"
+    });
+    await remoteAgentDomains(orgDeps, {
+      operation: "add",
+      domain: "idempotent.example-radt.com"
+    });
+    const res = (await remoteAgentDomains(orgDeps, { operation: "list" })) as {
+      approvedDomains: string[];
+    };
+    const count = res.approvedDomains.filter(
+      (d) => d === "idempotent.example-radt.com"
+    ).length;
+    expect(count).toBe(1);
+  });
+
+  it("removes a domain", async () => {
+    await remoteAgentDomains(orgDeps, {
+      operation: "add",
+      domain: "remove-me.example-radt.com"
+    });
+    await remoteAgentDomains(orgDeps, {
+      operation: "remove",
+      domain: "remove-me.example-radt.com"
+    });
+    const res = (await remoteAgentDomains(orgDeps, { operation: "list" })) as {
+      approvedDomains: string[];
+    };
+    expect(res.approvedDomains).not.toContain("remove-me.example-radt.com");
+  });
+
+  it("remove is a no-op when domain is not in the list", async () => {
+    const res = await remoteAgentDomains(orgDeps, {
+      operation: "remove",
+      domain: "never-added.example-radt.com"
+    });
+    expect(res).toMatchObject({ ok: true });
+  });
+
+  it("rejects adding a bare shared-infra root domain", async () => {
+    for (const root of ["workers.dev", "pages.dev", "vercel.app"]) {
+      const res = (await remoteAgentDomains(orgDeps, {
+        operation: "add",
+        domain: root
+      })) as { error: string };
+      expect(res).toHaveProperty("error");
+      expect(res.error).toContain("shared infrastructure root domain");
+    }
+  });
+
+  it("allows adding an account-level subdomain of a shared-infra root", async () => {
+    const res = await remoteAgentDomains(orgDeps, {
+      operation: "add",
+      domain: "myorg.workers.dev"
+    });
+    expect(res).toMatchObject({ ok: true });
+  });
+
+  it("rejects a bare single-label domain", async () => {
+    const res = await remoteAgentDomains(orgDeps, {
+      operation: "add",
+      domain: "localhost"
+    });
+    expect(res).toHaveProperty("error");
+  });
+
+  it("denies a non-org-admin caller", async () => {
+    const nonOrg = deps(ORG_WORKSPACE_ID, ctx({ adminWorkspaces: [5] }));
+    expect(
+      await remoteAgentDomains(nonOrg, { operation: "list" })
+    ).toHaveProperty("error");
+  });
+
+  it("denies calls from a non-org workspace instance", async () => {
+    const wsInstance = deps(3, orgAdmin);
+    expect(
+      await remoteAgentDomains(wsInstance, { operation: "list" })
+    ).toHaveProperty("error");
+  });
+
+  it("denies unauthenticated calls", async () => {
+    const noAuth = deps(ORG_WORKSPACE_ID, null);
+    expect(
+      await remoteAgentDomains(noAuth, { operation: "list" })
+    ).toHaveProperty("error");
   });
 });
 
