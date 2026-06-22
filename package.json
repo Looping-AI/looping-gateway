@@ -49,5 +49,18 @@
     "typescript-eslint": "^8.61.1",
     "vitest": "^4.1.9",
     "wrangler": "^4.103.0"
+  },
+  "overrides": {
+    "@esbuild-kit/core-utils": {
+      "esbuild": "^0.25.0"
+    }
+  },
+  "allowScripts": {
+    "esbuild": false,
+    "@mongodb-js/zstd": false,
+    "core-js-pure": false,
+    "fsevents": false,
+    "sharp": false,
+    "workerd": false
   }
 }
