@@ -2,11 +2,16 @@ import { describe, it, expect, vi, afterEach } from "vitest";
 import { env } from "cloudflare:workers";
 import {
   handleSlackEvent,
-  _resetAnchorCacheForTest
+  _resetAnchorCacheForTest,
+  _resetPublicUrlCacheForTest
 } from "../src/slack-webhook-handler";
 import { slackHeaders } from "./helpers/slack";
 import { getDb } from "@/db/client";
-import { setConfig, SystemConfigKeys } from "@/db/models/workspace-configs";
+import {
+  getConfig,
+  setConfig,
+  SystemConfigKeys
+} from "@/db/models/workspace-configs";
 import { ORG_WORKSPACE_ID } from "@/db/models/workspaces";
 
 type FakeEnv = Pick<
@@ -471,5 +476,39 @@ describe("team guard", () => {
     expect(res.status).toBe(200);
     const json: { challenge: string } = await res.json();
     expect(json.challenge).toBe("abc_guard");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Public-URL discovery — the JWT issuer/jku anchor is recorded only AFTER the
+// Slack signature is verified, so an unauthenticated caller can't poison it.
+// ---------------------------------------------------------------------------
+
+describe("public url discovery", () => {
+  const db = getDb(env);
+
+  afterEach(() => {
+    _resetPublicUrlCacheForTest();
+  });
+
+  it("persists the gateway public origin after a verified request", async () => {
+    _resetPublicUrlCacheForTest();
+    const body = JSON.stringify({ type: "url_verification", challenge: "x" });
+    const res = await post(body, makeEnv());
+    expect(res.status).toBe(200);
+    expect(
+      await getConfig(db, ORG_WORKSPACE_ID, SystemConfigKeys.PUBLIC_URL)
+    ).toBe("https://example.com");
+  });
+
+  it("does NOT persist the origin when the signature is invalid", async () => {
+    _resetPublicUrlCacheForTest();
+    const body = JSON.stringify({ type: "url_verification", challenge: "x" });
+    const bad = await slackHeaders(body, "wrong-secret");
+    const res = await post(body, makeEnv(), bad);
+    expect(res.status).toBe(401);
+    expect(
+      await getConfig(db, ORG_WORKSPACE_ID, SystemConfigKeys.PUBLIC_URL)
+    ).toBeNull();
   });
 });

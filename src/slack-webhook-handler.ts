@@ -7,7 +7,11 @@ import type { SlackWebhookPayload } from "@chat-adapter/slack/webhook";
 import { isRecord, str } from "@/util/json";
 import { pickDisplayName } from "@/util/display-name";
 import { getDb } from "@/db/client";
-import { getConfig, SystemConfigKeys } from "@/db/models/workspace-configs";
+import {
+  getConfig,
+  setConfig,
+  SystemConfigKeys
+} from "@/db/models/workspace-configs";
 import { ORG_WORKSPACE_ID } from "@/db/models/workspaces";
 import type {
   MessageWorkflowParams,
@@ -212,6 +216,36 @@ export function _resetAnchorCacheForTest(): void {
 }
 
 /**
+ * Isolate-level memo of the gateway's public origin (the JWT `iss` + `jku` host
+ * for remote agents). Discovered from the first *signature-verified* Slack
+ * request and persisted to D1 once per isolate, so the Message Workflow (which
+ * has no `Request` in scope) can read it when signing gateway tokens. Resets to
+ * null on cold start (new deploy, domain change), triggering a fresh write.
+ */
+let cachedPublicUrl: string | null = null;
+
+/** Reset the isolate-level public-url cache. Only for test isolation. */
+export function _resetPublicUrlCacheForTest(): void {
+  cachedPublicUrl = null;
+}
+
+/**
+ * Persist the gateway's public origin, derived from a request that has already
+ * passed Slack signature verification — so an unauthenticated caller can never
+ * set or poison this trust anchor. Cheap after the first write: the isolate memo
+ * short-circuits every subsequent request.
+ */
+async function discoverPublicUrl(
+  request: Request,
+  db: ReturnType<typeof getDb>
+): Promise<void> {
+  if (cachedPublicUrl !== null) return;
+  const origin = new URL(request.url).origin;
+  cachedPublicUrl = origin;
+  await setConfig(db, ORG_WORKSPACE_ID, SystemConfigKeys.PUBLIC_URL, origin);
+}
+
+/**
  * Enforce the team_id invariant: every request must come from the workspace
  * whose `team_id` was pinned on first reconcile. On mismatch, log and return
  * a 403. Passes through when the anchor is not yet set (bootstrap grace) or
@@ -286,6 +320,9 @@ export async function handleSlackEvent(
     }
     throw err;
   }
+
+  // Signature verified above — safe to record the gateway's public origin now.
+  await discoverPublicUrl(request, getDb(env));
 
   const payload = parseSlackWebhookBody(rawBody, { headers: request.headers });
   const classification = classifyEvent(payload);

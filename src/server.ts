@@ -1,14 +1,6 @@
 import { handleSlackEvent } from "@/slack-webhook-handler";
 import { reconcile } from "@/services/reconcile";
 import { getPublicJwks } from "@/auth/agent-jwt";
-import { getDb } from "@/db/client";
-import { setConfig, SystemConfigKeys } from "@/db/models/workspace-configs";
-import { ORG_WORKSPACE_ID } from "@/db/models/workspaces";
-
-// The gateway's public origin, discovered from the first inbound request and
-// memoized for the lifetime of this isolate. Resets to null on a new cold start
-// (new deploy, domain change, etc.), triggering a fresh D1 write.
-let cachedPublicUrl: string | null = null;
 
 // Cloudflare resolves Workflow + Durable Object class_names (wrangler.jsonc)
 // from the entry module's exports.
@@ -36,20 +28,10 @@ export default {
 
     // Slack webhook ingest — verify the signature, classify the event, trigger
     // the matching durable Workflow, and ack within Slack's 3s budget. All agent
-    // work happens asynchronously inside the Workflow, never inline here.
+    // work happens asynchronously inside the Workflow, never inline here. The
+    // gateway's public origin (JWT issuer/jku anchor) is discovered inside
+    // handleSlackEvent, only after the Slack signature has been verified.
     if (request.method === "POST" && url.pathname === "/slack/events") {
-      // Discover + persist the gateway's public origin on the first request of
-      // each isolate. Set the cache synchronously before the await so concurrent
-      // cold-start requests don't each trigger a write.
-      if (cachedPublicUrl === null) {
-        cachedPublicUrl = url.origin;
-        await setConfig(
-          getDb(env),
-          ORG_WORKSPACE_ID,
-          SystemConfigKeys.PUBLIC_URL,
-          url.origin
-        );
-      }
       return handleSlackEvent(request, env);
     }
 

@@ -1,5 +1,12 @@
 import { AGENT_CARD_PATH, type AgentCard } from "@a2a-js/sdk";
-import { flattenedVerify, importJWK, type JWK } from "jose";
+import {
+  base64url,
+  decodeProtectedHeader,
+  flattenedVerify,
+  importJWK,
+  type JWK
+} from "jose";
+import { REMOTE_AGENT_ALLOWED_HOSTS } from "@/config";
 import { originOf, validateRemoteEndpoint } from "./endpoint";
 
 /**
@@ -62,29 +69,6 @@ export function canonicalCardPayload(card: AgentCard): string {
   };
   void _signatures;
   return JSON.stringify(sortKeys(rest));
-}
-
-/** base64url(no padding) of a UTF-8 string. */
-function base64UrlOfString(s: string): string {
-  const bytes = new TextEncoder().encode(s);
-  let bin = "";
-  for (const b of bytes) bin += String.fromCharCode(b);
-  return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
-}
-
-/** Decode a bare base64url JWS protected-header segment to its JSON object. */
-function decodeProtectedSegment(segment: string): Record<string, unknown> {
-  const pad =
-    segment.length % 4 === 0 ? "" : "=".repeat(4 - (segment.length % 4));
-  const b64 = segment.replace(/-/g, "+").replace(/_/g, "/") + pad;
-  const bin = atob(b64);
-  const bytes = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-  const obj = JSON.parse(new TextDecoder().decode(bytes)) as unknown;
-  if (!obj || typeof obj !== "object") {
-    throw new Error("protected header is not a JSON object");
-  }
-  return obj as Record<string, unknown>;
 }
 
 /** GET JSON with an abort timeout and a hard size cap (SSRF/DoS hardening). */
@@ -172,16 +156,16 @@ export async function verifyAgentCardSignature(
     throw new AgentCardVerificationError("AgentCard is not signed");
   }
 
-  const payload = base64UrlOfString(canonicalCardPayload(card));
+  const payload = base64url.encode(canonicalCardPayload(card));
   const errors: string[] = [];
 
   for (const sig of signatures) {
     try {
-      const header = decodeProtectedSegment(sig.protected) as {
-        alg?: string;
-        kid?: string;
-        jku?: string;
-      };
+      const header = decodeProtectedHeader({
+        protected: sig.protected,
+        signature: sig.signature,
+        payload
+      });
       if (header.alg !== ALG) {
         throw new Error(`unexpected alg '${header.alg ?? "none"}'`);
       }
@@ -213,7 +197,6 @@ export async function verifyAgentCardSignature(
 export async function verifyRemoteAgentEndpoint(
   endpoint: string
 ): Promise<CardSigningPin> {
-  const { REMOTE_AGENT_ALLOWED_HOSTS } = await import("@/config");
   const card = await fetchAgentCard(endpoint, REMOTE_AGENT_ALLOWED_HOSTS);
   return verifyAgentCardSignature(card, {
     allowedHosts: REMOTE_AGENT_ALLOWED_HOSTS

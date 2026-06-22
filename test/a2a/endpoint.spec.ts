@@ -39,6 +39,10 @@ describe("validateRemoteEndpoint — SSRF policy", () => {
     ["https://[fd00::1]", "ULA IPv6"],
     ["https://[fe80::1]", "link-local IPv6"],
     ["https://[::ffff:127.0.0.1]", "IPv4-mapped loopback"],
+    ["https://[0:0:0:0:0:0:0:1]", "expanded IPv6 loopback"],
+    ["https://2130706433", "decimal-int IPv4 normalized to loopback"],
+    ["https://127.1", "2-part shorthand IPv4 (loopback)"],
+    ["https://0x7f.0.0.1", "hex-octet IPv4 (loopback)"],
     ["not a url", "invalid URL"]
   ];
   for (const [endpoint, why] of rejected) {

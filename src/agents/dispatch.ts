@@ -44,6 +44,31 @@ export interface DispatchPayload {
   metadata: DispatchMetadata;
 }
 
+/**
+ * Isolate-level memo of the gateway's public origin (the JWT `iss` + `jku` host).
+ * Written to D1 by the fetch isolate on first verified Slack request; the Workflow
+ * isolate reads it once here and caches it for its lifetime. Resets on cold start
+ * (redeploy / domain change), so a changed origin is picked up by the new isolate.
+ */
+let cachedIssuer: string | null = null;
+
+/** Reset the isolate-level issuer cache. Only for test isolation. */
+export function _resetIssuerCacheForTest(): void {
+  cachedIssuer = null;
+}
+
+/** Read (and memoize) the gateway issuer origin from D1. */
+async function resolveIssuer(env: Env): Promise<string | null> {
+  if (cachedIssuer !== null) return cachedIssuer;
+  const issuer = await getConfig(
+    getDb(env),
+    ORG_WORKSPACE_ID,
+    SystemConfigKeys.PUBLIC_URL
+  );
+  if (issuer) cachedIssuer = issuer;
+  return issuer;
+}
+
 /** Stable per-thread A2A context id, e.g. `"{channelId}:{threadTs}"`. */
 export const buildContextId = (channelId: string, threadTs: string): string =>
   `${channelId}:${threadTs}`;
@@ -111,11 +136,7 @@ export async function dispatchToAgent(
       payload.metadata.agentKind === "custom"
         ? payload.metadata.workspaceId
         : null;
-    const issuer = await getConfig(
-      getDb(env),
-      ORG_WORKSPACE_ID,
-      SystemConfigKeys.PUBLIC_URL
-    );
+    const issuer = await resolveIssuer(env);
     if (!issuer) {
       throw new Error(
         "Gateway public URL has not been discovered yet. " +

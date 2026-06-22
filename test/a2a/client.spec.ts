@@ -114,4 +114,22 @@ describe("sendA2AMessage — remote target", () => {
     expect(reply.length).toBe(16_001);
     expect(reply.endsWith("…")).toBe(true);
   });
+
+  it("defangs Slack broadcast sequences so a hostile reply can't @-notify a channel", async () => {
+    const calls: Captured[] = [];
+    stubRemote(
+      "urgent <!channel> and <!here> and <!subteam^S1|@grp> now",
+      calls
+    );
+
+    const reply = await sendA2AMessage(
+      { kind: "remote", endpoint: ENDPOINT, authToken: "t" },
+      userMessage("hi")
+    );
+
+    expect(reply).not.toContain("<!");
+    expect(reply).toContain("@channel");
+    expect(reply).toContain("@here");
+    expect(reply).toContain("@subteam^S1|@grp");
+  });
 });

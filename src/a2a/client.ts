@@ -48,17 +48,25 @@ function remoteFetchImpl(authToken?: string): typeof fetch {
 }
 
 /**
- * Sanitize an untrusted remote reply: strip control characters (keep newlines
- * and tabs) and cap the length so a hostile agent can't flood or break Slack.
+ * Sanitize an untrusted remote reply before it reaches Slack: strip control
+ * characters (keep newlines and tabs), defang Slack broadcast/command sequences
+ * so a hostile agent can't @-notify a whole channel, and cap the length so it
+ * can't flood or break Slack.
  */
 function sanitizeRemoteReply(text: string): string {
   const stripped = text.replace(
     /[\u0000-\u0008\u000b\u000c\u000e-\u001f]/g,
     ""
   );
-  return stripped.length > MAX_REMOTE_REPLY_CHARS
-    ? `${stripped.slice(0, MAX_REMOTE_REPLY_CHARS)}…`
-    : stripped;
+  // Defang Slack broadcast/command sequences (<!channel>, <!here>, <!everyone>,
+  // <!subteam^…>) so a hostile reply can't @-notify a whole channel — even if a
+  // downstream conversion error makes postReply post the raw text. slackifyMarkdown
+  // escapes these on the normal path; this is the belt-and-suspenders at the trust
+  // boundary. Legitimate mentions (<@U…>, <#C…>) are intentionally left intact.
+  const safe = stripped.replace(/<!([^>\n]*)>/g, "@$1");
+  return safe.length > MAX_REMOTE_REPLY_CHARS
+    ? `${safe.slice(0, MAX_REMOTE_REPLY_CHARS)}…`
+    : safe;
 }
 
 /**

@@ -6,7 +6,9 @@
  *
  * Policy (A2A spec §13.2 / §14.1.1):
  *  - HTTPS only.
- *  - Reject loopback / private / link-local / CGNAT / metadata IP literals.
+ *  - Reject loopback / private / link-local / CGNAT / metadata IPv4 literals
+ *    (shorthand/decimal/octal/hex forms are normalized by `new URL()` first).
+ *  - Reject all IPv6 literals (see `isIPv6Literal`).
  *  - Reject bare single-label hosts and known-internal suffixes
  *    (`localhost`, `.local`, `.internal`, `.localhost`).
  *  - Optional explicit host allowlist (operator-provided).
@@ -55,37 +57,30 @@ function isBlockedIPv4(octets: [number, number, number, number]): boolean {
 }
 
 /**
- * Block dangerous IPv6 literals. `URL` strips the surrounding brackets, so
- * `host` here is the bare address. Covers loopback, unspecified, ULA, link-local,
- * and IPv4-mapped forms that embed a blocked v4 address.
+ * Reject every IPv6 literal. After WHATWG URL parsing, `url.hostname` for an
+ * IPv6 host is the *bracketed*, fully-compressed form (`[::1]`, `[fe80::1]`),
+ * and IPv4-mapped addresses are hex-folded (`[::ffff:127.0.0.1]` → `[::ffff:7f00:1]`).
+ * Correctly classifying every special-use IPv6 range after that canonicalization
+ * is error-prone, and a remote A2A endpoint never legitimately needs a bare IPv6
+ * literal — a DNS hostname that happens to resolve over IPv6 is still allowed.
+ * So we deny IPv6 literals outright rather than risk a parsing gap.
  */
-function isBlockedIPv6(host: string): boolean {
-  if (!host.includes(":")) return false;
-  const h = host.toLowerCase();
-  if (h === "::1" || h === "::") return true; // loopback / unspecified
-  // IPv4-mapped / -translated (e.g. ::ffff:127.0.0.1) — inspect embedded v4.
-  const mapped =
-    /(?:::ffff:|::ffff:0:)(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/.exec(h);
-  if (mapped) {
-    const v4 = parseIPv4(mapped[1]);
-    return v4 ? isBlockedIPv4(v4) : true;
-  }
-  const head = h.split(":")[0] ?? "";
-  if (head.startsWith("fe8") || head.startsWith("fe9")) return true; // fe80::/10
-  if (head.startsWith("fea") || head.startsWith("feb")) return true; // fe80::/10
-  if (head.startsWith("fc") || head.startsWith("fd")) return true; // fc00::/7 ULA
-  return false;
+function isIPv6Literal(host: string): boolean {
+  return host.startsWith("[") || host.includes(":");
 }
 
 /** True if the host must never be dialed (internal/private/reserved). */
 function isBlockedHost(host: string): boolean {
   const h = host.toLowerCase();
+  if (isIPv6Literal(h)) return true;
   if (BLOCKED_HOSTS.has(h)) return true;
   if (BLOCKED_SUFFIXES.some((s) => h.endsWith(s))) return true;
 
+  // WHATWG `new URL()` has already canonicalized shorthand/decimal/octal/hex
+  // IPv4 forms (e.g. `2130706433`, `127.1`, `0x7f.0.0.1`) to dotted-quad, so a
+  // single decimal check on the canonical hostname catches all of them.
   const v4 = parseIPv4(h);
   if (v4) return isBlockedIPv4(v4);
-  if (isBlockedIPv6(h)) return true;
 
   // Reject bare single-label hosts (no dot) — they only resolve on internal
   // search domains. IP literals are handled above, so this is hostnames only.
