@@ -117,7 +117,7 @@ describe("admin tools — agents_write / agents_read", () => {
     ).toHaveProperty("error");
   });
 
-  it("update attaches and detaches channels", async () => {
+  it("adds and removes channels one at a time", async () => {
     const wsId = await freshWsId("tools-ws-chan");
     const d = deps(wsId, ctx({ adminWorkspaces: [wsId] }));
     await agentsWrite(d, {
@@ -128,8 +128,17 @@ describe("admin tools — agents_write / agents_read", () => {
     await agentsWrite(d, {
       operation: "update",
       name: "chan-agent",
-      displayName: "Channeled",
-      attachChannels: ["C_A", "C_B"]
+      displayName: "Channeled"
+    });
+    await agentsWrite(d, {
+      operation: "add_channel",
+      name: "chan-agent",
+      channelId: "C_A"
+    });
+    await agentsWrite(d, {
+      operation: "add_channel",
+      name: "chan-agent",
+      channelId: "C_B"
     });
     const afterAttach = (await agentsRead(d, { name: "chan-agent" })) as {
       agents: Array<{ displayName: string; channels: string[] }>;
@@ -138,14 +147,40 @@ describe("admin tools — agents_write / agents_read", () => {
     expect(afterAttach.agents[0].channels.sort()).toEqual(["C_A", "C_B"]);
 
     await agentsWrite(d, {
-      operation: "update",
+      operation: "remove_channel",
       name: "chan-agent",
-      detachChannels: ["C_A"]
+      channelId: "C_A"
     });
     const afterDetach = (await agentsRead(d, { name: "chan-agent" })) as {
       agents: Array<{ channels: string[] }>;
     };
     expect(afterDetach.agents[0].channels).toEqual(["C_B"]);
+  });
+
+  it("rejects channel ops on built-in / cross-workspace agents", async () => {
+    const wsA = await freshWsId("tools-ws-chan-owner");
+    const wsB = await freshWsId("tools-ws-chan-other");
+    const owner = deps(wsA, ctx({ adminWorkspaces: [wsA] }));
+    await agentsWrite(owner, {
+      operation: "register",
+      name: "chan-owned",
+      a2aEndpoint: "https://example.com/chan-owned"
+    });
+    const other = deps(wsB, ctx({ adminWorkspaces: [wsB] }));
+    expect(
+      await agentsWrite(other, {
+        operation: "add_channel",
+        name: "chan-owned",
+        channelId: "C_X"
+      })
+    ).toHaveProperty("error");
+    expect(
+      await agentsWrite(owner, {
+        operation: "remove_channel",
+        name: "admin",
+        channelId: "C_X"
+      })
+    ).toHaveProperty("error");
   });
 
   it("cannot write to an agent in another workspace", async () => {

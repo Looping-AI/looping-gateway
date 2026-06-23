@@ -151,9 +151,9 @@ export type AgentsWriteArgs =
       displayName?: string;
       enabled?: boolean;
       a2aEndpoint?: string;
-      attachChannels?: string[];
-      detachChannels?: string[];
     }
+  | { operation: "add_channel"; name: string; channelId: string }
+  | { operation: "remove_channel"; name: string; channelId: string }
   | { operation: "unregister"; name: string };
 
 export async function agentsWrite(
@@ -232,19 +232,27 @@ export async function agentsWrite(
             }
           : {})
       });
-      for (const channelId of args.attachChannels ?? [])
-        await attachAgentChannel(deps.db, {
-          agentName: args.name,
-          channelId,
-          workspaceId: deps.wsId
-        });
-      for (const channelId of args.detachChannels ?? [])
-        await detachAgentChannel(deps.db, args.name, channelId);
       const updated = await getAgent(deps.db, args.name);
       return {
         ok: true,
         agent: updated ? await present(deps.db, updated) : null
       };
+    }
+    case "add_channel": {
+      const target = await requireWritableAgent(deps, args.name);
+      if ("error" in target) return target;
+      await attachAgentChannel(deps.db, {
+        agentName: args.name,
+        channelId: args.channelId,
+        workspaceId: deps.wsId
+      });
+      return { ok: true, agent: await present(deps.db, target) };
+    }
+    case "remove_channel": {
+      const target = await requireWritableAgent(deps, args.name);
+      if ("error" in target) return target;
+      await detachAgentChannel(deps.db, args.name, args.channelId);
+      return { ok: true, agent: await present(deps.db, target) };
     }
     case "unregister": {
       const target = await requireWritableAgent(deps, args.name);
@@ -428,7 +436,8 @@ export function buildAdminTools(deps: AdminToolDeps): ToolSet {
     agents_write: tool({
       description:
         "Create, update, or remove a custom agent in this workspace. " +
-        "Use operation=update to change fields and/or attach/detach channels. " +
+        "Use operation=update to change fields; add_channel/remove_channel to " +
+        "manage one channel at a time. " +
         "Built-in admin/onboarding agents cannot be modified.",
       inputSchema: z.discriminatedUnion("operation", [
         z.object({
@@ -449,12 +458,21 @@ export function buildAdminTools(deps: AdminToolDeps): ToolSet {
             .describe(
               "Set false to disable — disabled agents receive no messages and won't be routed to"
             ),
-          a2aEndpoint: z.string().optional(),
-          attachChannels: z
-            .array(z.string())
-            .optional()
-            .describe("Channel ids to make this agent routable in"),
-          detachChannels: z.array(z.string()).optional()
+          a2aEndpoint: z.string().optional()
+        }),
+        z.object({
+          operation: z.literal("add_channel"),
+          name: z.string(),
+          channelId: z
+            .string()
+            .describe("A channel id to make this agent routable in")
+        }),
+        z.object({
+          operation: z.literal("remove_channel"),
+          name: z.string(),
+          channelId: z
+            .string()
+            .describe("A channel id to stop routing this agent in")
         }),
         z.object({ operation: z.literal("unregister"), name: z.string() })
       ]),
