@@ -463,7 +463,7 @@ export function buildAdminTools(deps: AdminToolDeps): ToolSet {
     workspace_read: tool({
       description:
         "Read workspace(s). Omit `id` to list (org admin) or get your own.",
-      inputSchema: z.object({ id: z.number().int().optional() }),
+      inputSchema: z.object({ id: z.coerce.number().int().optional() }),
       execute: (args) => workspaceRead(deps, args)
     })
   };
@@ -476,7 +476,7 @@ export function buildAdminTools(deps: AdminToolDeps): ToolSet {
         z.object({ operation: z.literal("create"), name: z.string() }),
         z.object({
           operation: z.literal("set_admin_channel"),
-          id: z.number().int(),
+          id: z.coerce.number().int(),
           channelId: z.string()
         })
       ]),

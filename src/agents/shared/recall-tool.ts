@@ -28,7 +28,7 @@ export function recallTools(
         "in the messages above.",
       inputSchema: z.object({
         query: z.string().describe("What to look for in past conversations"),
-        topK: z
+        topK: z.coerce
           .number()
           .int()
           .min(1)
