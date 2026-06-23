@@ -122,26 +122,43 @@ export class MessageWorkflow extends WorkflowEntrypoint<
     const p = event.payload;
     const threadTs = replyThreadTs(p);
 
-    const plan = await step.do("resolve", () => resolveMessage(this.env, p));
+    // Wrap the whole run so a failing step surfaces with detail. Without this,
+    // a step whose retries are exhausted bubbles up as Cloudflare's opaque
+    // "workflow" exception log (just the workflow name, no cause). The agent
+    // dispatch (A2A) and the Slack post (chat.postMessage) throw on transient
+    // errors that are otherwise invisible. We log the real cause, then rethrow
+    // to preserve retry/backoff.
+    try {
+      const plan = await step.do("resolve", () => resolveMessage(this.env, p));
 
-    if (plan.kind === "none") {
-      await step.do("hint", () =>
-        postReply(
-          this.env,
-          p.channelId,
-          threadTs,
-          plan.userMessage ?? NO_AGENT_HINT
-        )
+      if (plan.kind === "none") {
+        await step.do("hint", () =>
+          postReply(
+            this.env,
+            p.channelId,
+            threadTs,
+            plan.userMessage ?? NO_AGENT_HINT
+          )
+        );
+        return;
+      }
+
+      const reply = await step.do("dispatch", () =>
+        dispatchMessage(this.env, p, plan)
       );
-      return;
+
+      await step.do("reply", () =>
+        postReply(this.env, p.channelId, threadTs, reply)
+      );
+    } catch (err) {
+      console.error("[message] workflow run failed", {
+        instanceId: event.instanceId,
+        eventId: p.eventId,
+        channelId: p.channelId,
+        error: err instanceof Error ? err.message : String(err),
+        stack: err instanceof Error ? err.stack : undefined
+      });
+      throw err;
     }
-
-    const reply = await step.do("dispatch", () =>
-      dispatchMessage(this.env, p, plan)
-    );
-
-    await step.do("reply", () =>
-      postReply(this.env, p.channelId, threadTs, reply)
-    );
   }
 }

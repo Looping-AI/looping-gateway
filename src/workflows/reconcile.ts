@@ -192,7 +192,7 @@ export class ReconcileWorkflow extends WorkflowEntrypoint<
   ReconcileWorkflowPayload
 > {
   async run(
-    _event: WorkflowEvent<ReconcileWorkflowPayload>,
+    event: WorkflowEvent<ReconcileWorkflowPayload>,
     step: WorkflowStep
   ) {
     const db = getDb(this.env);
@@ -204,27 +204,42 @@ export class ReconcileWorkflow extends WorkflowEntrypoint<
       teamIdBootstrapped: false
     };
 
-    const anchor = await step.do("anchor-team-id", () =>
-      anchorTeamId(this.env, db)
-    );
-    result.teamIdBootstrapped = anchor.teamIdBootstrapped;
-    if (anchor.drifted) return result;
+    // Wrap the whole run so a failing step surfaces with detail. Without this,
+    // a step whose retries are exhausted bubbles up as Cloudflare's opaque
+    // "workflow" exception log (just the workflow name, no cause). Slack API
+    // calls inside the steps throw on transient errors (rate limits, timeouts)
+    // and on missing scopes — those are the usual culprits and are otherwise
+    // invisible. We log the real cause, then rethrow to preserve retry/backoff.
+    try {
+      const anchor = await step.do("anchor-team-id", () =>
+        anchorTeamId(this.env, db)
+      );
+      result.teamIdBootstrapped = anchor.teamIdBootstrapped;
+      if (anchor.drifted) return result;
 
-    const org = await step.do("resolve-org-channel", () =>
-      resolveOrgChannel(this.env, db)
-    );
-    const users = await step.do("sync-users", () =>
-      syncUsers(this.env, db, org.channelId)
-    );
-    result.usersUpserted = users.usersUpserted;
-    result.usersDeactivated = users.usersDeactivated;
+      const org = await step.do("resolve-org-channel", () =>
+        resolveOrgChannel(this.env, db)
+      );
+      const users = await step.do("sync-users", () =>
+        syncUsers(this.env, db, org.channelId)
+      );
+      result.usersUpserted = users.usersUpserted;
+      result.usersDeactivated = users.usersDeactivated;
 
-    const admins = await step.do("sync-admin-memberships", () =>
-      syncAdminMemberships(this.env, db)
-    );
-    result.adminsAdded = admins.adminsAdded;
-    result.adminsRemoved = admins.adminsRemoved;
+      const admins = await step.do("sync-admin-memberships", () =>
+        syncAdminMemberships(this.env, db)
+      );
+      result.adminsAdded = admins.adminsAdded;
+      result.adminsRemoved = admins.adminsRemoved;
 
-    return result;
+      return result;
+    } catch (err) {
+      console.error("[reconcile] workflow run failed", {
+        instanceId: event.instanceId,
+        error: err instanceof Error ? err.message : String(err),
+        stack: err instanceof Error ? err.stack : undefined
+      });
+      throw err;
+    }
   }
 }

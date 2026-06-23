@@ -70,38 +70,55 @@ export class LifecycleWorkflow extends WorkflowEntrypoint<
   async run(event: WorkflowEvent<LifecycleWorkflowParams>, step: WorkflowStep) {
     const { type, subtype } = event.payload;
 
-    switch (type) {
-      case "team_join":
-        await step.do("team-join", () =>
-          handleTeamJoin(getDb(this.env), event.payload)
-        );
-        return;
+    // Wrap the whole run so a failing step surfaces with detail. Without this,
+    // a step whose retries are exhausted bubbles up as Cloudflare's opaque
+    // "workflow" exception log (just the workflow name, no cause). The Slack
+    // calls inside the steps (getBotUserId) and the D1 writes throw on transient
+    // errors that are otherwise invisible. We log the real cause, then rethrow
+    // to preserve retry/backoff.
+    try {
+      switch (type) {
+        case "team_join":
+          await step.do("team-join", () =>
+            handleTeamJoin(getDb(this.env), event.payload)
+          );
+          return;
 
-      case "member_joined_channel":
-        await step.do("member-joined", async () => {
-          const botUserId = await getBotUserId(this.env);
-          await handleMemberJoined(getDb(this.env), event.payload, botUserId);
-        });
-        return;
-
-      case "member_left_channel":
-        await step.do("member-left", async () => {
-          const botUserId = await getBotUserId(this.env);
-          await handleMemberLeft(getDb(this.env), event.payload, botUserId);
-        });
-        return;
-
-      default:
-        // message_changed / message_deleted edits — no registry impact yet.
-        // TODO(phase-6): feed the channel-history raw buffer + Vectorize index.
-        await step.do("noop-message-edit", async () => {
-          console.log("LifecycleWorkflow: no-op lifecycle event", {
-            instanceId: event.instanceId,
-            type,
-            subtype
+        case "member_joined_channel":
+          await step.do("member-joined", async () => {
+            const botUserId = await getBotUserId(this.env);
+            await handleMemberJoined(getDb(this.env), event.payload, botUserId);
           });
-        });
-        return;
+          return;
+
+        case "member_left_channel":
+          await step.do("member-left", async () => {
+            const botUserId = await getBotUserId(this.env);
+            await handleMemberLeft(getDb(this.env), event.payload, botUserId);
+          });
+          return;
+
+        default:
+          // message_changed / message_deleted edits — no registry impact yet.
+          // TODO(phase-6): feed the channel-history raw buffer + Vectorize index.
+          await step.do("noop-message-edit", async () => {
+            console.log("LifecycleWorkflow: no-op lifecycle event", {
+              instanceId: event.instanceId,
+              type,
+              subtype
+            });
+          });
+          return;
+      }
+    } catch (err) {
+      console.error("[lifecycle] workflow run failed", {
+        instanceId: event.instanceId,
+        type,
+        subtype,
+        error: err instanceof Error ? err.message : String(err),
+        stack: err instanceof Error ? err.stack : undefined
+      });
+      throw err;
     }
   }
 }
