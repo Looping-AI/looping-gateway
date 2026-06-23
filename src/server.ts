@@ -1,11 +1,11 @@
 import { handleSlackEvent } from "@/slack-webhook-handler";
-import { reconcile } from "@/services/reconcile";
 import { getPublicJwks } from "@/auth/agent-jwt";
 
 // Cloudflare resolves Workflow + Durable Object class_names (wrangler.jsonc)
 // from the entry module's exports.
 export { MessageWorkflow } from "./workflows/message";
 export { LifecycleWorkflow } from "./workflows/lifecycle";
+export { ReconcileWorkflow } from "./workflows/reconcile";
 
 // In-repo agents — each is its own A2A server. The Message Workflow reaches them
 // in-process via their DO `stub.fetch` (see src/agents/dispatch.ts); they need no
@@ -43,8 +43,10 @@ export default {
   // rethrown — a failed run just retries on the next tick.
   async scheduled(_controller: ScheduledController, env: Env) {
     try {
-      const result = await reconcile(env);
-      console.log("Reconciliation complete", result);
+      const instance = await env.RECONCILE_WORKFLOW.create({});
+      console.log("Reconciliation workflow triggered", {
+        id: instance.id
+      });
     } catch (err) {
       console.error("Reconciliation failed", err);
     }

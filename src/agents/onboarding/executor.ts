@@ -87,7 +87,11 @@ export class OnboardingAgentExecutor implements AgentExecutor {
           session,
           systemSuffix: callerContext(ctx),
           tools: {
-            ...buildOnboardingTools({ db: getDb(this.env), ctx }),
+            ...buildOnboardingTools({
+              db: getDb(this.env),
+              ctx,
+              reconcileWorkflow: this.env.RECONCILE_WORKFLOW
+            }),
             ...(namespace ? recallTools(this.env, namespace, hasArchive) : {})
           }
         };

@@ -64,6 +64,11 @@
       "name": "lifecycle-workflow",
       "binding": "LIFECYCLE_WORKFLOW",
       "class_name": "LifecycleWorkflow"
+    },
+    {
+      "name": "reconcile-workflow",
+      "binding": "RECONCILE_WORKFLOW",
+      "class_name": "ReconcileWorkflow"
     }
   ],
   "observability": {
