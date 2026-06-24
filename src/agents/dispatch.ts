@@ -48,6 +48,8 @@ export interface DispatchPayload {
   metadata: DispatchMetadata;
 }
 
+const ORG_WIDE_AGENT_SCOPE = "org";
+
 /**
  * Isolate-level memo of the gateway's public origin (the JWT `iss` + `jku` host).
  * Written to D1 by the fetch isolate on first verified Slack request; the Workflow
@@ -80,7 +82,7 @@ export const buildContextId = (channelId: string, threadTs: string): string =>
 export function buildAgentInstanceKey(
   agent: Pick<DispatchAgentRef, "kind" | "workspaceId" | "name">
 ): string {
-  return `${agent.kind}:${agent.workspaceId ?? "org"}:${agent.name}`;
+  return `${agent.kind}:${agent.workspaceId ?? ORG_WIDE_AGENT_SCOPE}:${agent.name}`;
 }
 
 /** Canonical signed identity of the gateway-agent instance calling remotely. */
