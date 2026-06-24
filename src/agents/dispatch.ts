@@ -138,16 +138,40 @@ export function parseContextId(id: string): {
     : { channelId: id.slice(0, sep), threadTs: id.slice(sep + 1) };
 }
 
-function remoteProvenance(payload: DispatchPayload): {
+/**
+ * Untrusted "who said what, when" attribution for a single turn, carried on the
+ * remote `message.metadata`. A custom agent integrates turns from many channels
+ * (and, later, many sources) into one history keyed by its own identity; this
+ * lets it record per-turn authorship and ordering — the thing a flat `"user"`
+ * role cannot express once a thread has multiple human actors.
+ *
+ * It is **provenance, not authority**: the gateway's authoritative caller
+ * identity is the *agent instance* in the signed JWT (see {@link RemoteIdentity}).
+ * Nothing here grants permissions, and a remote must treat it as caller-supplied.
+ */
+export interface RemoteProvenance {
+  /** The channel type this turn originated from. */
   source: "slack";
-  author: { slackUserId: string; displayName: string | null };
+  /** WHO authored the turn. */
+  author: {
+    /** Stable, source-qualified actor key (e.g. `slack:U123`) for attribution. */
+    id: string;
+    slackUserId: string;
+    displayName: string | null;
+  };
+  /** WHERE — the channel the turn arrived on. */
   channelId: string;
+  /** The thread key within {@link RemoteProvenance.channelId}. */
   threadTs: string;
+  /** WHEN — Slack ts of this specific turn (sortable per channel). */
   messageTs: string;
-} {
+}
+
+function remoteProvenance(payload: DispatchPayload): RemoteProvenance {
   return {
     source: "slack",
     author: {
+      id: `slack:${payload.user.slackUserId}`,
       slackUserId: payload.user.slackUserId,
       displayName: payload.user.displayName
     },
@@ -230,7 +254,10 @@ export async function dispatchToAgent(
         payload.channelId,
         payload.threadTs
       ),
-      // Per-kind extras only — no user/auth context crosses the trust boundary.
+      // The signed token is the only authority — it names the calling
+      // gateway-agent instance, not any Slack user. `provenance` adds untrusted
+      // "who/where/when" attribution for the remote's own history; no gateway
+      // authorization or permission context ever crosses this boundary.
       metadata: {
         ...payload.metadata,
         provenance: remoteProvenance(payload)

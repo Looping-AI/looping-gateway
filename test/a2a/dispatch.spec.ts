@@ -190,7 +190,7 @@ describe("dispatchToAgent (local Durable Object)", () => {
       workspaceId: 7,
       provenance: {
         source: "slack",
-        author: { slackUserId: "U1", displayName: null },
+        author: { id: "slack:U1", slackUserId: "U1", displayName: null },
         channelId: "C_SHARED",
         threadTs: "171813.100",
         messageTs: "171813.100"
@@ -198,7 +198,7 @@ describe("dispatchToAgent (local Durable Object)", () => {
     });
     expect(posts[1].message.metadata).toMatchObject({
       provenance: {
-        author: { slackUserId: "U2", displayName: "Grace" },
+        author: { id: "slack:U2", slackUserId: "U2", displayName: "Grace" },
         messageTs: "171813.200"
       }
     });
