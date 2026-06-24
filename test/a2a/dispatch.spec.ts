@@ -182,9 +182,6 @@ describe("dispatchToAgent (local Durable Object)", () => {
     expect(posts[0].message.contextId).toContain("custom%3A7%3Aalpha");
     expect(posts[1].message.contextId).toContain("custom%3A7%3Abeta");
     expect(posts[0].message.metadata).toMatchObject({
-      provenance: { author: { slackUserId: "U1", displayName: null } }
-    });
-    expect(posts[0].message.metadata).toMatchObject({
       agentKind: "custom",
       workspaceId: 7,
       provenance: {

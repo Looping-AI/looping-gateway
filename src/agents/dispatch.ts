@@ -120,9 +120,14 @@ export function parseContextId(id: string): {
 } {
   if (id.startsWith("agent=")) {
     const params = new URLSearchParams(id);
+    const channelId = params.get("channel");
+    const threadTs = params.get("thread");
+    if (!channelId || !threadTs) {
+      throw new Error(`invalid remote context id: ${id}`);
+    }
     return {
-      channelId: params.get("channel") ?? "",
-      threadTs: params.get("thread") ?? ""
+      channelId,
+      threadTs
     };
   }
   const sep = id.indexOf(":");
