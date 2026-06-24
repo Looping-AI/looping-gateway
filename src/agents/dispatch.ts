@@ -123,7 +123,9 @@ export function parseContextId(id: string): {
     const channelId = params.get("channel");
     const threadTs = params.get("thread");
     if (!channelId || !threadTs) {
-      throw new Error(`invalid remote context id: ${id}`);
+      throw new Error(
+        `invalid remote context id (missing required params): ${id}`
+      );
     }
     return {
       channelId,

@@ -179,8 +179,12 @@ describe("dispatchToAgent (local Durable Object)", () => {
     expect(posts[0].authorization?.startsWith("Bearer ")).toBe(true);
     expect(posts[1].authorization?.startsWith("Bearer ")).toBe(true);
     expect(posts[0].message.contextId).not.toBe(posts[1].message.contextId);
-    expect(posts[0].message.contextId).toContain("custom%3A7%3Aalpha");
-    expect(posts[1].message.contextId).toContain("custom%3A7%3Abeta");
+    expect(posts[0].message.contextId).toContain(
+      encodeURIComponent("custom:7:alpha")
+    );
+    expect(posts[1].message.contextId).toContain(
+      encodeURIComponent("custom:7:beta")
+    );
     expect(posts[0].message.metadata).toMatchObject({
       agentKind: "custom",
       workspaceId: 7,
