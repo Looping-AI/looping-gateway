@@ -11,6 +11,7 @@ import {
   type SessionLike
 } from "@/agents/shared/session";
 import { executeAgentTurn } from "@/agents/shared/loop";
+import { authorFromUser } from "@/agents/shared/messages";
 import { archiveMessages } from "@/agents/shared/recall";
 import { recallTools } from "@/agents/shared/recall-tool";
 import { verifyRemoteAgentEndpoint } from "@/a2a/card-verify";
@@ -94,6 +95,9 @@ export class AdminAgentExecutor implements AgentExecutor {
         return {
           session,
           systemSuffix: callerContext(ctx, { workspaceId: wsId }),
+          // The admin channel is multi-actor: attribute each turn to its author
+          // so history records who said what across users.
+          author: ctx ? authorFromUser(ctx) : undefined,
           tools: {
             ...buildAdminTools({
               db: getDb(this.env),

@@ -9,7 +9,8 @@ import type { SessionLike } from "./session";
 import {
   assistantSessionMessage,
   toModelMessages,
-  userSessionMessage
+  userSessionMessage,
+  type TurnAuthor
 } from "./messages";
 
 const MAX_STEPS = 8;
@@ -35,6 +36,11 @@ export interface PreparedTurn {
   systemSuffix: string;
   /** Agent-specific tools merged over the session's own `set_context` tool. */
   tools: ToolSet;
+  /**
+   * Author of this user turn, persisted into history so multi-actor channels
+   * keep "who said what". Omit for single-actor sessions (e.g. onboarding DMs).
+   */
+  author?: TurnAuthor;
 }
 
 export interface AgentTurnConfig {
@@ -88,10 +94,11 @@ export async function executeAgentTurn(
     const {
       session,
       systemSuffix,
-      tools: extraTools
+      tools: extraTools,
+      author
     } = await cfg.prepare(text, metadata);
 
-    await session.appendMessage(userSessionMessage(text));
+    await session.appendMessage(userSessionMessage(text, author));
     const history = await session.getHistory();
     const system = (await session.refreshSystemPrompt()) + systemSuffix;
     const tools = { ...(await session.tools()), ...extraTools };

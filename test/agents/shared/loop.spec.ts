@@ -180,6 +180,33 @@ describe("executeAgentTurn", () => {
     expect(session.messages.map((m) => m.role)).toEqual(["user", "assistant"]);
   });
 
+  it("prefixes the persisted user turn with the author from prepare()", async () => {
+    const session = new FakeSession();
+    const model = new MockLanguageModelV3({
+      doGenerate: async () => okResult("ok") as never
+    });
+    const bus = fakeEventBus();
+
+    await executeAgentTurn(
+      fakeRequestContext("register a bot"),
+      bus.eventBus,
+      makeCfg(session, fakeModels(model), {
+        prepare: async () => ({
+          session,
+          systemSuffix: "",
+          tools: {},
+          author: { id: "slack:U2", label: "Grace" }
+        })
+      })
+    );
+
+    const userTurn = session.messages.find((m) => m.role === "user");
+    expect(userTurn?.parts[0]).toMatchObject({
+      type: "text",
+      text: "Grace (slack:U2): register a bot"
+    });
+  });
+
   it("falls back to the fallback model when the primary throws", async () => {
     const session = new FakeSession();
     const fallbackModel = new MockLanguageModelV3({

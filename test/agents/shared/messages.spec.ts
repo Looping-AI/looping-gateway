@@ -3,6 +3,8 @@ import type { SessionMessage } from "agents/experimental/memory/session";
 import {
   userSessionMessage,
   assistantSessionMessage,
+  authorFromUser,
+  attributeTurnText,
   sessionText,
   toModelMessages
 } from "@/agents/shared/messages";
@@ -25,6 +27,43 @@ describe("userSessionMessage", () => {
     const a = userSessionMessage("x");
     const b = userSessionMessage("x");
     expect(a.id).not.toBe(b.id);
+  });
+
+  it("prefixes the text with the author tag when one is given", () => {
+    const m = userSessionMessage("register the bot", {
+      id: "slack:U2",
+      label: "Grace"
+    });
+    expect(sessionText(m)).toBe("Grace (slack:U2): register the bot");
+  });
+
+  it("leaves text unprefixed when no author is given (single-actor)", () => {
+    const m = userSessionMessage("just me");
+    expect(sessionText(m)).toBe("just me");
+  });
+});
+
+describe("authorFromUser", () => {
+  it("derives a source-qualified id and uses displayName as the label", () => {
+    expect(authorFromUser({ slackUserId: "U7", displayName: "Ada" })).toEqual({
+      id: "slack:U7",
+      label: "Ada"
+    });
+  });
+
+  it("falls back to the slack user id when displayName is null", () => {
+    expect(authorFromUser({ slackUserId: "U9", displayName: null })).toEqual({
+      id: "slack:U9",
+      label: "U9"
+    });
+  });
+});
+
+describe("attributeTurnText", () => {
+  it("formats a leading authoritative speaker tag", () => {
+    expect(attributeTurnText("hi", { id: "slack:U1", label: "Bo" })).toBe(
+      "Bo (slack:U1): hi"
+    );
   });
 });
 
