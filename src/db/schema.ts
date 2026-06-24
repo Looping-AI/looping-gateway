@@ -86,6 +86,11 @@ export const agents = sqliteTable(
     // Always set: custom agents carry a real HTTP endpoint; built-ins use an
     // `http://{name}.local` sentinel. Routing is by `kind`, not this value.
     a2aEndpoint: text("a2a_endpoint").notNull(),
+    // Pinned AgentCard signing identity for custom agents (Trust-On-First-Use).
+    // Verified at registration; a later card signed by a different key is
+    // rejected. Null for built-in local agents (admin/onboarding are unsigned).
+    cardSigningJku: text("card_signing_jku"),
+    cardSigningKid: text("card_signing_kid"),
     enabled: integer("enabled", { mode: "boolean" }).notNull().default(true),
     workspaceId: integer("workspace_id").references(() => workspaces.id),
     createdAt: timestamp("created_at"),

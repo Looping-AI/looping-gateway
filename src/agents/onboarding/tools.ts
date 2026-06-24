@@ -30,6 +30,7 @@ import { getSlackUser } from "@/db/models/users";
 export interface OnboardingToolDeps {
   db: Db;
   ctx: UserAuthContext | null;
+  reconcileWorkflow: Env["RECONCILE_WORKFLOW"];
 }
 
 type ToolResult = Record<string, unknown>;
@@ -162,6 +163,25 @@ export async function directoryRead(
   }
 }
 
+export async function triggerReconcile(
+  deps: OnboardingToolDeps
+): Promise<ToolResult> {
+  const canTrigger =
+    !!deps.ctx && (deps.ctx.isOrgAdmin || deps.ctx.isPrimaryOwner);
+  if (!canTrigger) {
+    return {
+      triggered: false,
+      error: "Only org admins or the primary owner can trigger a reconcile run."
+    };
+  }
+
+  const instance = await deps.reconcileWorkflow.create({});
+  return {
+    triggered: true,
+    instanceId: instance.id
+  };
+}
+
 /** Build the onboarding concierge's (read-only) tool set. */
 export function buildOnboardingTools(deps: OnboardingToolDeps): ToolSet {
   return {
@@ -175,6 +195,12 @@ export function buildOnboardingTools(deps: OnboardingToolDeps): ToolSet {
         operation: z.enum(["agents", "workspaces", "health"])
       }),
       execute: (args) => directoryRead(deps, args)
+    }),
+    trigger_reconcile: tool({
+      description:
+        "Trigger an asynchronous reconcile workflow run to sync Slack reality into the registry.",
+      inputSchema: z.object({}),
+      execute: () => triggerReconcile(deps)
     })
   };
 }

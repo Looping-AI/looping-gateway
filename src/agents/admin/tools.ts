@@ -1,6 +1,7 @@
 import { tool, type ToolSet } from "ai";
 import { z } from "zod";
 import { authorize, type UserAuthContext } from "@/auth";
+import type { CardSigningPin } from "@/a2a/card-verify";
 import type { Db } from "@/db/client";
 import {
   type AgentRow,
@@ -21,11 +22,17 @@ import {
   createWorkspace,
   setWorkspaceAdminChannel
 } from "@/db/models/workspaces";
+import {
+  getAllowedRemoteAgentDomains,
+  setAllowedRemoteAgentDomains
+} from "@/db/models/workspace-configs";
+import { SHARED_INFRA_ROOTS } from "@/a2a/endpoint";
 
 /**
  * Admin tools — registry + workspace CRUD on D1. Consolidated to read/write per
  * domain (no tool proliferation): `agents_read`, `agents_write`,
- * `workspace_read`, `workspace_write`. Writes use a discriminated `operation`.
+ * `workspace_read`, `workspace_write`, `remote_agent_domains`. Writes use a
+ * discriminated `operation`.
  *
  * Two gating layers (see PLAN Phase 4):
  *  1. Instance-scoped availability — `buildAdminTools` only constructs
@@ -41,7 +48,16 @@ export interface AdminToolDeps {
   ctx: UserAuthContext | null;
   /** The workspace this admin instance manages (admin:{wsId}). */
   wsId: number;
+  /**
+   * Validates a custom agent's endpoint (SSRF policy) and verifies its signed
+   * AgentCard, returning the signing identity to pin. Injected so the pure
+   * handlers stay offline-testable; production binds it to the live verifier.
+   */
+  verifyEndpoint: EndpointVerifier;
 }
+
+/** Verify a remote agent endpoint + signed card; resolves to the pin to persist. */
+export type EndpointVerifier = (endpoint: string) => Promise<CardSigningPin>;
 
 /** A reserved/built-in agent name that registry CRUD must never touch. */
 const RESERVED_NAMES = new Set(["admin", "onboarding"]);
@@ -135,9 +151,9 @@ export type AgentsWriteArgs =
       displayName?: string;
       enabled?: boolean;
       a2aEndpoint?: string;
-      attachChannels?: string[];
-      detachChannels?: string[];
     }
+  | { operation: "add_channel"; name: string; channelId: string }
+  | { operation: "remove_channel"; name: string; channelId: string }
   | { operation: "unregister"; name: string };
 
 export async function agentsWrite(
@@ -156,36 +172,87 @@ export async function agentsWrite(
         return { error: `"${args.name}" is a reserved built-in agent name.` };
       if (await getAgent(deps.db, args.name))
         return { error: `An agent named "${args.name}" already exists.` };
+      let pin: CardSigningPin;
+      try {
+        pin = await deps.verifyEndpoint(args.a2aEndpoint);
+      } catch (err) {
+        return {
+          error: `Endpoint verification failed: ${(err as Error).message}`
+        };
+      }
       const row = await registerAgent(deps.db, {
         name: args.name,
         kind: "custom",
         displayName: args.displayName ?? null,
         a2aEndpoint: args.a2aEndpoint,
-        workspaceId: deps.wsId
+        workspaceId: deps.wsId,
+        cardSigningJku: pin.cardSigningJku,
+        cardSigningKid: pin.cardSigningKid
       });
       return { ok: true, agent: await present(deps.db, row) };
     }
     case "update": {
       const target = await requireWritableAgent(deps, args.name);
       if ("error" in target) return target;
+      // A re-pointed endpoint is re-verified and must keep the SAME pinned
+      // signing identity (Trust-On-First-Use) — a different signer is rejected.
+      let pin: CardSigningPin | undefined;
+      if (
+        args.a2aEndpoint !== undefined &&
+        args.a2aEndpoint !== target.a2aEndpoint
+      ) {
+        try {
+          pin = await deps.verifyEndpoint(args.a2aEndpoint);
+        } catch (err) {
+          return {
+            error: `Endpoint verification failed: ${(err as Error).message}`
+          };
+        }
+        if (
+          target.cardSigningKid &&
+          (pin.cardSigningKid !== target.cardSigningKid ||
+            pin.cardSigningJku !== target.cardSigningJku)
+        ) {
+          return {
+            error:
+              `New endpoint for "${args.name}" is signed by a different key than the ` +
+              `one pinned at registration. Unregister and re-register if the agent's ` +
+              `signing identity changed intentionally.`
+          };
+        }
+      }
       await updateAgent(deps.db, args.name, {
         displayName: args.displayName,
         enabled: args.enabled,
-        a2aEndpoint: args.a2aEndpoint
+        a2aEndpoint: args.a2aEndpoint,
+        ...(pin
+          ? {
+              cardSigningJku: pin.cardSigningJku,
+              cardSigningKid: pin.cardSigningKid
+            }
+          : {})
       });
-      for (const channelId of args.attachChannels ?? [])
-        await attachAgentChannel(deps.db, {
-          agentName: args.name,
-          channelId,
-          workspaceId: deps.wsId
-        });
-      for (const channelId of args.detachChannels ?? [])
-        await detachAgentChannel(deps.db, args.name, channelId);
       const updated = await getAgent(deps.db, args.name);
       return {
         ok: true,
         agent: updated ? await present(deps.db, updated) : null
       };
+    }
+    case "add_channel": {
+      const target = await requireWritableAgent(deps, args.name);
+      if ("error" in target) return target;
+      await attachAgentChannel(deps.db, {
+        agentName: args.name,
+        channelId: args.channelId,
+        workspaceId: deps.wsId
+      });
+      return { ok: true, agent: await present(deps.db, target) };
+    }
+    case "remove_channel": {
+      const target = await requireWritableAgent(deps, args.name);
+      if ("error" in target) return target;
+      await detachAgentChannel(deps.db, args.name, args.channelId);
+      return { ok: true, agent: await present(deps.db, target) };
     }
     case "unregister": {
       const target = await requireWritableAgent(deps, args.name);
@@ -255,6 +322,105 @@ export async function workspaceWrite(
 // ---------------------------------------------------------------------------
 // AI-SDK tool wiring — thin wrappers over the handlers above.
 // ---------------------------------------------------------------------------
+// remote_agent_domains — org-only
+// ---------------------------------------------------------------------------
+
+type RemoteAgentDomainsArgs =
+  | { operation: "list" }
+  | { operation: "add"; domain: string }
+  | { operation: "remove"; domain: string };
+
+export async function remoteAgentDomains(
+  deps: AdminToolDeps,
+  args: RemoteAgentDomainsArgs
+): Promise<ToolResult> {
+  if (deps.wsId !== ORG_WORKSPACE_ID)
+    return deny(
+      "remote agent domain management is only available to the org admin"
+    );
+  if (!deps.ctx)
+    return deny("sign in as the org admin to manage remote agent domains");
+  if (
+    !authorize(deps.ctx, {
+      type: "IsWorkspaceAdmin",
+      workspaceId: ORG_WORKSPACE_ID
+    })
+  )
+    return deny("remote agent domain management requires org admin");
+
+  const current = await getAllowedRemoteAgentDomains(deps.db);
+
+  if (args.operation === "list") {
+    return {
+      approvedDomains: current,
+      note:
+        "Each entry covers that domain and all its subdomains. " +
+        "An empty list means no custom (remote) agents are approved."
+    };
+  }
+
+  const rawDomain = args.domain.trim().toLowerCase();
+
+  // Strip any scheme/path/port the caller may have included.
+  let domain: string;
+  try {
+    const parsed = rawDomain.includes("://")
+      ? new URL(rawDomain).hostname
+      : new URL(`https://${rawDomain}`).hostname;
+    domain = parsed;
+  } catch {
+    return { error: `'${args.domain}' is not a valid domain.` };
+  }
+
+  if (!domain || !domain.includes(".")) {
+    return {
+      error: `'${args.domain}' must be a multi-label domain (e.g. 'agents.example.com').`
+    };
+  }
+
+  if (SHARED_INFRA_ROOTS.has(domain)) {
+    return {
+      error:
+        `'${domain}' is a shared infrastructure root domain — any third-party ` +
+        `can deploy under it and forge agent identities in A2A key verification. ` +
+        `Add a specific account-level subdomain you control instead ` +
+        `(e.g. 'myorg.${domain}').`
+    };
+  }
+
+  if (args.operation === "add") {
+    if (current.includes(domain)) {
+      return {
+        ok: true,
+        approvedDomains: current,
+        note: `'${domain}' was already approved.`
+      };
+    }
+    const updated = [...current, domain];
+    await setAllowedRemoteAgentDomains(deps.db, updated);
+    return {
+      ok: true,
+      approvedDomains: updated,
+      note:
+        `'${domain}' and all its subdomains are now approved for remote agents. ` +
+        `Only add domains your organization fully controls.`
+    };
+  }
+
+  // operation === "remove"
+  if (!current.includes(domain)) {
+    return {
+      ok: true,
+      approvedDomains: current,
+      note: `'${domain}' was not in the approved list.`
+    };
+  }
+  const updated = current.filter((d) => d !== domain);
+  await setAllowedRemoteAgentDomains(deps.db, updated);
+  return { ok: true, approvedDomains: updated };
+}
+
+// ---------------------------------------------------------------------------
 
 /** Build the admin tool set for one instance. `workspace_write` is org-only. */
 export function buildAdminTools(deps: AdminToolDeps): ToolSet {
@@ -270,7 +436,8 @@ export function buildAdminTools(deps: AdminToolDeps): ToolSet {
     agents_write: tool({
       description:
         "Create, update, or remove a custom agent in this workspace. " +
-        "Use operation=update to change fields and/or attach/detach channels. " +
+        "Use operation=update to change fields; add_channel/remove_channel to " +
+        "manage one channel at a time. " +
         "Built-in admin/onboarding agents cannot be modified.",
       inputSchema: z.discriminatedUnion("operation", [
         z.object({
@@ -291,12 +458,21 @@ export function buildAdminTools(deps: AdminToolDeps): ToolSet {
             .describe(
               "Set false to disable — disabled agents receive no messages and won't be routed to"
             ),
-          a2aEndpoint: z.string().optional(),
-          attachChannels: z
-            .array(z.string())
-            .optional()
-            .describe("Channel ids to make this agent routable in"),
-          detachChannels: z.array(z.string()).optional()
+          a2aEndpoint: z.string().optional()
+        }),
+        z.object({
+          operation: z.literal("add_channel"),
+          name: z.string(),
+          channelId: z
+            .string()
+            .describe("A channel id to make this agent routable in")
+        }),
+        z.object({
+          operation: z.literal("remove_channel"),
+          name: z.string(),
+          channelId: z
+            .string()
+            .describe("A channel id to stop routing this agent in")
         }),
         z.object({ operation: z.literal("unregister"), name: z.string() })
       ]),
@@ -305,7 +481,7 @@ export function buildAdminTools(deps: AdminToolDeps): ToolSet {
     workspace_read: tool({
       description:
         "Read workspace(s). Omit `id` to list (org admin) or get your own.",
-      inputSchema: z.object({ id: z.number().int().optional() }),
+      inputSchema: z.object({ id: z.coerce.number().int().optional() }),
       execute: (args) => workspaceRead(deps, args)
     })
   };
@@ -318,11 +494,36 @@ export function buildAdminTools(deps: AdminToolDeps): ToolSet {
         z.object({ operation: z.literal("create"), name: z.string() }),
         z.object({
           operation: z.literal("set_admin_channel"),
-          id: z.number().int(),
+          id: z.coerce.number().int(),
           channelId: z.string()
         })
       ]),
       execute: (args) => workspaceWrite(deps, args)
+    });
+
+    tools.remote_agent_domains = tool({
+      description:
+        "Org-admin only: manage approved domains for remote (custom) A2A agents. " +
+        "Each approved domain covers that domain and all its subdomains — " +
+        "e.g. approving 'myorg.workers.dev' allows any agent hosted under it. " +
+        "Only add domains your organization fully controls: A2A trusts the endpoint " +
+        "domain for cryptographic key verification, so any subdomain of an approved " +
+        "entry can host a verified agent. Shared platform roots (workers.dev, etc.) " +
+        "are permanently blocked regardless. An empty list disables all remote agents.",
+      inputSchema: z.discriminatedUnion("operation", [
+        z.object({ operation: z.literal("list") }),
+        z.object({
+          operation: z.literal("add"),
+          domain: z
+            .string()
+            .describe("Domain to approve (covers all its subdomains)")
+        }),
+        z.object({
+          operation: z.literal("remove"),
+          domain: z.string().describe("Domain to remove from the approved list")
+        })
+      ]),
+      execute: (args) => remoteAgentDomains(deps, args)
     });
   }
 

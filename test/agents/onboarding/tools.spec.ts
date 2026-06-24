@@ -31,7 +31,13 @@ function ctx(overrides: Partial<UserAuthContext> = {}): UserAuthContext {
 }
 
 function deps(c: UserAuthContext | null): OnboardingToolDeps {
-  return { db, ctx: c };
+  return {
+    db,
+    ctx: c,
+    reconcileWorkflow: {
+      create: async () => ({ id: "wf-test" })
+    } as unknown as Env["RECONCILE_WORKFLOW"]
+  };
 }
 
 type AgentList = { agents: Array<{ name: string; kind: string }> };
@@ -145,8 +151,32 @@ describe("onboarding tools — directory_read health", () => {
 });
 
 describe("onboarding tools — buildOnboardingTools", () => {
-  it("exposes exactly the read-only directory_read tool", () => {
+  it("exposes directory_read and trigger_reconcile tools", () => {
     const tools = buildOnboardingTools(deps(ctx()));
-    expect(Object.keys(tools)).toEqual(["directory_read"]);
+    expect(Object.keys(tools)).toEqual(["directory_read", "trigger_reconcile"]);
+  });
+
+  it("trigger_reconcile is denied for non-admin callers", async () => {
+    const tools = buildOnboardingTools(deps(ctx()));
+    const result = await (
+      tools.trigger_reconcile as unknown as { execute: () => Promise<unknown> }
+    ).execute();
+    expect(result).toMatchObject({
+      triggered: false,
+      error: expect.stringMatching(/only org admins|primary owner/i)
+    });
+  });
+
+  it("trigger_reconcile starts workflow for org admin callers", async () => {
+    const create = async () => ({ id: "wf-real" });
+    const tools = buildOnboardingTools({
+      db,
+      ctx: ctx({ isOrgAdmin: true }),
+      reconcileWorkflow: { create } as unknown as Env["RECONCILE_WORKFLOW"]
+    });
+    const result = await (
+      tools.trigger_reconcile as unknown as { execute: () => Promise<unknown> }
+    ).execute();
+    expect(result).toMatchObject({ triggered: true, instanceId: "wf-real" });
   });
 });

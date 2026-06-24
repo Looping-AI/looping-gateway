@@ -43,6 +43,13 @@
       "when": 1782032154992,
       "tag": "0005_phase8_team_id_hardening",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "6",
+      "when": 1782059233189,
+      "tag": "0006_phase7_agent_card_signing_pin",
+      "breakpoints": true
     }
   ]
 }

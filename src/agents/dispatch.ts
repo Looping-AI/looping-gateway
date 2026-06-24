@@ -1,8 +1,15 @@
 import type { Message } from "@a2a-js/sdk";
 import type { UserAuthContext } from "@/auth";
+import { signGatewayToken, toRemoteIdentity } from "@/auth/agent-jwt";
 import type { AgentRow } from "@/db/models/agents";
 import { buildAgentCard } from "@/a2a/card";
 import { sendA2AMessage } from "@/a2a/client";
+import { originOf, validateRemoteEndpoint } from "@/a2a/endpoint";
+import { getDb } from "@/db/client";
+import {
+  getAllowedRemoteAgentDomains,
+  getPublicUrl
+} from "@/db/models/workspace-configs";
 
 /** The subset of an agent registry row the dispatcher needs (Rpc-serializable). */
 export interface DispatchAgentRef {
@@ -20,7 +27,7 @@ export interface DispatchAgentRef {
 export type DispatchMetadata =
   | { agentKind: "admin"; adminWorkspaceId: number }
   | { agentKind: "onboarding" }
-  | { agentKind: "custom" };
+  | { agentKind: "custom"; workspaceId: number | null };
 
 /** What rides on the A2A `message.metadata` and what the executor reads back. */
 export type AgentTurnMetadata = { user: UserAuthContext } & DispatchMetadata;
@@ -36,6 +43,27 @@ export interface DispatchPayload {
   user: UserAuthContext;
   /** Only the per-kind extras; merged with `user` onto the wire metadata. */
   metadata: DispatchMetadata;
+}
+
+/**
+ * Isolate-level memo of the gateway's public origin (the JWT `iss` + `jku` host).
+ * Written to D1 by the fetch isolate on first verified Slack request; the Workflow
+ * isolate reads it once here and caches it for its lifetime. Resets on cold start
+ * (redeploy / domain change), so a changed origin is picked up by the new isolate.
+ */
+let cachedIssuer: string | null = null;
+
+/** Reset the isolate-level issuer cache. Only for test isolation. */
+export function _resetIssuerCacheForTest(): void {
+  cachedIssuer = null;
+}
+
+/** Read (and memoize) the gateway issuer origin from D1. */
+async function resolveIssuer(env: Env): Promise<string | null> {
+  if (cachedIssuer !== null) return cachedIssuer;
+  const issuer = await getPublicUrl(getDb(env));
+  if (issuer) cachedIssuer = issuer;
+  return issuer;
 }
 
 /** Stable per-thread A2A context id, e.g. `"{channelId}:{threadTs}"`. */
@@ -91,7 +119,52 @@ export async function dispatchToAgent(
   agent: DispatchAgentRef,
   payload: DispatchPayload
 ): Promise<string> {
-  // Merge the universal caller with the per-kind extras for the wire.
+  const contextId = buildContextId(payload.channelId, payload.threadTs);
+  const bindingName = LOCAL_BINDINGS[agent.kind];
+
+  if (!bindingName) {
+    // Custom agent → real HTTP. The caller's identity travels in a short-lived,
+    // EdDSA-signed gateway JWT (verified by the remote against our public JWKS),
+    // NOT as plaintext `message.metadata` — so a remote agent can neither read
+    // the full `UserAuthContext` nor forge the caller's permissions.
+    const allowedDomains = await getAllowedRemoteAgentDomains(getDb(env));
+    validateRemoteEndpoint(agent.a2aEndpoint, allowedDomains); // SSRF + approved-domain defense-in-depth
+
+    const workspaceId =
+      payload.metadata.agentKind === "custom"
+        ? payload.metadata.workspaceId
+        : null;
+    const issuer = await resolveIssuer(env);
+    if (!issuer) {
+      throw new Error(
+        "Gateway public URL has not been discovered yet. " +
+          "Ensure the worker has received at least one Slack event before registering remote agents."
+      );
+    }
+    const token = await signGatewayToken(env, {
+      audience: originOf(agent.a2aEndpoint),
+      issuer,
+      identity: toRemoteIdentity(payload.user, workspaceId),
+      agentKind: payload.metadata.agentKind
+    });
+
+    const remoteMessage: Message = {
+      kind: "message",
+      messageId: crypto.randomUUID(),
+      role: "user",
+      parts: [{ kind: "text", text: payload.text }],
+      contextId,
+      // Per-kind extras only — no user/auth context crosses the trust boundary.
+      metadata: { ...payload.metadata }
+    };
+    return sendA2AMessage(
+      { kind: "remote", endpoint: agent.a2aEndpoint, authToken: token },
+      remoteMessage
+    );
+  }
+
+  // Local agent → in-process via DO stub.fetch. Trusted same-worker dispatch, so
+  // the full caller context rides on the message metadata.
   const metadata: AgentTurnMetadata = {
     user: payload.user,
     ...payload.metadata
@@ -101,18 +174,9 @@ export async function dispatchToAgent(
     messageId: crypto.randomUUID(),
     role: "user",
     parts: [{ kind: "text", text: payload.text }],
-    contextId: buildContextId(payload.channelId, payload.threadTs),
+    contextId,
     metadata: { ...metadata }
   };
-
-  const bindingName = LOCAL_BINDINGS[agent.kind];
-  if (!bindingName) {
-    // Custom agent → real HTTP. `a2aEndpoint` is guaranteed non-null.
-    return sendA2AMessage(
-      { kind: "remote", endpoint: agent.a2aEndpoint },
-      message
-    );
-  }
 
   const instanceName = instanceNameFor(metadata);
 

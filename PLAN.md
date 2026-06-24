@@ -300,7 +300,47 @@ audit/round-limit trail — revisit later.)
    hooked via `archivingCompaction` in `src/agents/shared/session.ts`; both executors
    wired. **Cloudflare AI Search (AutoRAG)** is reserved for a future knowledge-base
    corpus, not this.
-7. **Remote/custom A2A agents** — register external A2A endpoints; route to them.
+7. **Remote/custom A2A agents** ✅ done. Register external A2A endpoints and route to them
+   over real HTTP — **zero-trust, no shared secrets**; all trust flows through asymmetric
+   Ed25519 (EdDSA) signatures over public JWKS.
+   - **Gateway identity (B authenticates A).** The gateway holds an Ed25519 private JWK
+     (`GATEWAY_JWT_PRIVATE_KEY` secret; `kid` for rotation) and publishes only the public
+     half at `GET /.well-known/jwks.json` (`src/auth/agent-jwt.ts` → `getPublicJwks`,
+     wired in `src/server.ts`). Each remote dispatch mints a short-lived (120 s) signed JWT
+     (`signGatewayToken`) with `iss = GATEWAY_ISSUER`, `aud = originOf(endpoint)`,
+     `sub`/`iat`/`exp`/`jti`, and a **minimal** identity under the namespaced
+     `https://looping.ai/identity` claim (`slackUserId`, `displayName`, `workspaceId`,
+     `agentKind`). The full `UserAuthContext` — and any permission flags — **never** cross
+     the trust boundary; remote `message.metadata` carries only per-kind routing extras
+     (`src/agents/dispatch.ts`).
+   - **Agent identity / TOFU pin (A knows B is really B).** At registration the gateway
+     fetches the remote's **signed AgentCard** (A2A §8.4, RFC 7515 detached EdDSA flattened
+     JWS over the card's canonical JSON), verifies it, and **pins** the signing key's
+     `kid` + `jku` in the registry (`agents.card_signing_jku` / `card_signing_kid`,
+     migration `0006`). Re-pointing an agent re-verifies and must keep the **same** pinned
+     identity (a different signer is rejected) — the same Trust-On-First-Use anchor pattern
+     as the Slack `team_id`. `src/a2a/card-verify.ts`; injected into admin tools via
+     `AdminToolDeps.verifyEndpoint` so the pure handlers stay offline-testable.
+   - **Canonical JSON contract.** Card signing/verification is over a deterministic
+     serialization: object keys sorted recursively, `JSON.stringify` with no whitespace,
+     `signatures` excluded, UTF-8 → base64url. The gateway verifier and the `example/`
+     signer share this byte-for-byte (`src/a2a/card-verify.ts` ↔ `example/src/canonical.ts`).
+   - **SSRF defense.** Remote endpoints (and `jku`s) are HTTPS-only and rejected if they
+     resolve to loopback / private / link-local / CGNAT / metadata IPv4+IPv6, bare
+     single-label hosts, or `.local`/`.internal`/`.localhost`; an optional operator
+     allowlist (`REMOTE_AGENT_ALLOWED_HOSTS`) overrides with exact-host matching
+     (`src/a2a/endpoint.ts`). Residual DNS-rebinding risk is documented; the allowlist is
+     the mitigation.
+   - **Untrusted-reply hardening.** Remote calls run with a 30 s timeout and the reply is
+     control-char-stripped + length-capped (16 k) before reaching Slack (`src/a2a/client.ts`).
+   - **Reference worker.** `example/` is a complete, deployable custom agent that signs its
+     own card, publishes its card-signing JWKS, **verifies the gateway JWT** (`iss`/`aud`/`exp`
+     against the gateway's public JWKS), and echoes the caller — the external contract,
+     documented in `example/README.md`.
+   - **Deferred / future.** Async, scope-based capability permissions on a Gateway API
+     (remote agents calling _back_ into the gateway — e.g. a recall-like read with the
+     caller's scoped consent) are out of scope here; Cloudflare Access / a reverse-direction
+     JWT are the likely building blocks.
 8. **Slack team-id hardening** ✅ done. `team_id` is a global invariant: `workspaces.slack_team_id`
    and `slack_users.slack_team_id` removed (both were wrong modelling). A new `workspace_configs`
    (workspace_id + key PK, value NOT NULL) table with `SystemConfigKeys.SLACK_TEAM_ID = "slack_team_id"`
@@ -339,7 +379,10 @@ audit/round-limit trail — revisit later.)
 - ~~Confirm exact Agents SDK Sessions/Agent Memory bindings + Vectorize wiring.~~
   Resolved (Phase 4): Sessions API (`agents/experimental/memory/session`, **experimental**)
   - context blocks; agents `extend Agent` for `this.sql`. No Vectorize for admin memory.
-- A2A contract: `UserAuthContext` is now carried on `message.metadata` (trusted
-  for local same-worker dispatch). Still open: streaming milestones / task
-  lifecycle, and authenticating `metadata` for **remote** agents (Phase 7).
+- A2A contract: `UserAuthContext` is carried on `message.metadata` (trusted for **local**
+  same-worker dispatch). ~~Still open: authenticating `metadata` for remote agents (Phase 7).~~
+  Resolved (Phase 7): remote dispatch carries a short-lived **signed gateway JWT** (EdDSA,
+  verified against the gateway's public JWKS) with a minimal scoped identity claim — never
+  the full context — and the remote's signed AgentCard is verified + key-pinned (TOFU) at
+  registration. Still open: streaming milestones / task lifecycle for remote agents.
 - Decide secrets model (Secrets Store vs WebCrypto AES-GCM) when requirements firm up.

@@ -26,6 +26,16 @@ export default defineConfig({
         bindings: {
           SLACK_BOT_TOKEN: "xoxb-test-token",
           SLACK_SIGNING_SECRET: "test-signing-secret",
+          // Fixed Ed25519 private JWK for deterministic JWT sign/verify in tests.
+          GATEWAY_JWT_PRIVATE_KEY: JSON.stringify({
+            crv: "Ed25519",
+            d: "1xgbYpMkLQ7HSsmNt-fKKJq2UFstxDxuzpZ_30tl7bs",
+            x: "HozhHMwqLW4u9YAyv3UBLj3tcQrLi9lUA335i3xdFE8",
+            kty: "OKP",
+            kid: "gw-test-1",
+            alg: "EdDSA",
+            use: "sig"
+          }),
           TEST_MIGRATIONS: migrations
         }
       }

@@ -2,3 +2,9 @@
 # In production these are set with `npx wrangler secret put <NAME>`.
 SLACK_BOT_TOKEN=xoxb-your-bot-token
 SLACK_SIGNING_SECRET=your-signing-secret
+
+# Gateway identity key for remote (custom) A2A agents — zero-trust, no shared secrets.
+# Generate with: npm run keygen
+# Then set the printed private JWK as GATEWAY_JWT_PRIVATE_KEY (see instructions above).
+GATEWAY_JWT_PRIVATE_KEY=
+

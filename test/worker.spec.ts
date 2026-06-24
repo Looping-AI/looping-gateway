@@ -9,7 +9,7 @@ import worker from "../src/server";
 describe("Worker routing", () => {
   it("returns 404 for GET /", async () => {
     const ctx = createExecutionContext();
-    const res = await worker.fetch(new Request("http://localhost/"), env, ctx);
+    const res = await worker.fetch(new Request("http://localhost/"), env);
     await waitOnExecutionContext(ctx);
     expect(res.status).toBe(404);
   });
@@ -18,8 +18,7 @@ describe("Worker routing", () => {
     const ctx = createExecutionContext();
     const res = await worker.fetch(
       new Request("http://localhost/some-unknown-path"),
-      env,
-      ctx
+      env
     );
     await waitOnExecutionContext(ctx);
     expect(res.status).toBe(404);
@@ -35,11 +34,29 @@ describe("Worker routing", () => {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ type: "url_verification", challenge: "x" })
       }),
-      env,
-      ctx
+      env
     );
     await waitOnExecutionContext(ctx);
     // No signature headers → 401 from the handler (proves routing reached it)
     expect(res.status).toBe(401);
+  });
+
+  it("serves the gateway public JWKS at /.well-known/jwks.json", async () => {
+    const ctx = createExecutionContext();
+    const res = await worker.fetch(
+      new Request("http://localhost/.well-known/jwks.json"),
+      env
+    );
+    await waitOnExecutionContext(ctx);
+    expect(res.status).toBe(200);
+    expect(res.headers.get("cache-control")).toContain("max-age");
+    const body = (await res.json()) as {
+      keys: Array<{ kty: string; crv: string; kid: string; d?: string }>;
+    };
+    expect(body.keys).toHaveLength(1);
+    expect(body.keys[0]).toMatchObject({ kty: "OKP", crv: "Ed25519" });
+    // Never leak the private scalar.
+    expect(body.keys[0].d).toBeUndefined();
+    expect(body.keys[0].kid).toBeTruthy();
   });
 });
