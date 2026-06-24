@@ -1,7 +1,16 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import { env } from "cloudflare:workers";
-import { dispatchToAgent } from "@/agents/dispatch";
+import type { Message } from "@a2a-js/sdk";
+import { importJWK, jwtVerify } from "jose";
+import { _resetIssuerCacheForTest, dispatchToAgent } from "@/agents/dispatch";
 import type { UserAuthContext } from "@/auth";
+import { getPublicJwks, IDENTITY_CLAIM } from "@/auth/agent-jwt";
+import { buildAgentCard } from "@/a2a/card";
+import { getDb } from "@/db/client";
+import {
+  setAllowedRemoteAgentDomains,
+  setPublicUrl
+} from "@/db/models/workspace-configs";
 
 const user = (slackUserId: string): UserAuthContext => ({
   slackUserId,
@@ -9,6 +18,64 @@ const user = (slackUserId: string): UserAuthContext => ({
   isPrimaryOwner: false,
   isOrgAdmin: false,
   adminWorkspaces: []
+});
+
+const ENDPOINT = "https://remote.example.com/a2a";
+
+interface RemotePost {
+  authorization: string | null;
+  message: Message;
+}
+
+async function publicKey() {
+  const { keys } = getPublicJwks(env);
+  return importJWK(keys[0], "EdDSA");
+}
+
+function stubRemote(posts: RemotePost[]) {
+  const card = buildAgentCard({
+    name: "Remote",
+    description: "remote dispatch test agent",
+    url: ENDPOINT
+  });
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const request =
+        input instanceof Request ? input : new Request(input, init);
+      const method = request.method.toUpperCase();
+      if (method === "POST") {
+        const rpc = (await request.clone().json()) as {
+          id?: unknown;
+          params?: { message?: Message };
+        };
+        posts.push({
+          authorization: request.headers.get("authorization"),
+          message: rpc.params?.message as Message
+        });
+        return Response.json({
+          jsonrpc: "2.0",
+          id: rpc.id ?? 1,
+          result: {
+            kind: "message",
+            messageId: "reply-1",
+            role: "agent",
+            parts: [{ kind: "text", text: "ok" }],
+            contextId: "reply"
+          }
+        });
+      }
+      return Response.json(card);
+    })
+  );
+}
+
+afterEach(async () => {
+  vi.unstubAllGlobals();
+  _resetIssuerCacheForTest();
+  const db = getDb(env);
+  await setPublicUrl(db, "https://gateway.test");
+  await setAllowedRemoteAgentDomains(db, []);
 });
 
 // End-to-end of the local A2A path: client (official SDK) → DO stub.fetch →
@@ -23,11 +90,17 @@ describe("dispatchToAgent (local Durable Object)", () => {
     // proves card discovery + JSON-RPC + the DO executor are wired correctly.
     const reply = await dispatchToAgent(
       env,
-      { name: "admin", kind: "admin", a2aEndpoint: "http://admin.local" },
+      {
+        name: "admin",
+        kind: "admin",
+        a2aEndpoint: "http://admin.local",
+        workspaceId: null
+      },
       {
         text: "ping",
         channelId: "C1",
         threadTs: "1.1",
+        messageTs: "1.1",
         user: user("U1"),
         metadata: { agentKind: "admin", adminWorkspaceId: 0 }
       }
@@ -44,16 +117,116 @@ describe("dispatchToAgent (local Durable Object)", () => {
       {
         name: "onboarding",
         kind: "onboarding",
-        a2aEndpoint: "http://onboarding.local"
+        a2aEndpoint: "http://onboarding.local",
+        workspaceId: null
       },
       {
         text: "hi",
         channelId: "D1",
         threadTs: "1.1",
+        messageTs: "1.1",
         user: user("U_onb"),
         metadata: { agentKind: "onboarding" }
       }
     );
     expect(reply.length).toBeGreaterThan(0);
+  });
+
+  it("namespaces remote identity and context per logical agent instance", async () => {
+    const db = getDb(env);
+    await setPublicUrl(db, "https://gateway.test");
+    await setAllowedRemoteAgentDomains(db, ["example.com"]);
+    const posts: RemotePost[] = [];
+    stubRemote(posts);
+
+    await dispatchToAgent(
+      env,
+      {
+        name: "alpha",
+        kind: "custom",
+        a2aEndpoint: ENDPOINT,
+        workspaceId: 7
+      },
+      {
+        text: "first",
+        channelId: "C_SHARED",
+        threadTs: "171813.100",
+        messageTs: "171813.100",
+        user: user("U1"),
+        metadata: { agentKind: "custom", workspaceId: 7 }
+      }
+    );
+
+    await dispatchToAgent(
+      env,
+      {
+        name: "beta",
+        kind: "custom",
+        a2aEndpoint: ENDPOINT,
+        workspaceId: 7
+      },
+      {
+        text: "second",
+        channelId: "C_SHARED",
+        threadTs: "171813.100",
+        messageTs: "171813.200",
+        user: { ...user("U2"), displayName: "Grace" },
+        metadata: { agentKind: "custom", workspaceId: 7 }
+      }
+    );
+
+    expect(posts).toHaveLength(2);
+    expect(posts[0].authorization?.startsWith("Bearer ")).toBe(true);
+    expect(posts[1].authorization?.startsWith("Bearer ")).toBe(true);
+    expect(posts[0].message.contextId).not.toBe(posts[1].message.contextId);
+    expect(posts[0].message.contextId).toContain("custom%3A7%3Aalpha");
+    expect(posts[1].message.contextId).toContain("custom%3A7%3Abeta");
+    expect(posts[0].message.metadata).toMatchObject({
+      agentKind: "custom",
+      workspaceId: 7,
+      provenance: {
+        source: "slack",
+        author: { slackUserId: "U1", displayName: null },
+        channelId: "C_SHARED",
+        threadTs: "171813.100",
+        messageTs: "171813.100"
+      }
+    });
+    expect(posts[1].message.metadata).toMatchObject({
+      provenance: {
+        author: { slackUserId: "U2", displayName: "Grace" },
+        messageTs: "171813.200"
+      }
+    });
+
+    const tokenA = posts[0].authorization?.split(" ")[1] ?? "";
+    const tokenB = posts[1].authorization?.split(" ")[1] ?? "";
+    const [{ payload: payloadA }, { payload: payloadB }] = await Promise.all([
+      jwtVerify(tokenA, await publicKey(), {
+        issuer: "https://gateway.test",
+        audience: "https://remote.example.com",
+        algorithms: ["EdDSA"]
+      }),
+      jwtVerify(tokenB, await publicKey(), {
+        issuer: "https://gateway.test",
+        audience: "https://remote.example.com",
+        algorithms: ["EdDSA"]
+      })
+    ]);
+
+    expect(payloadA.sub).toBe("custom:7:alpha");
+    expect(payloadB.sub).toBe("custom:7:beta");
+    expect(payloadA[IDENTITY_CLAIM]).toMatchObject({
+      key: "custom:7:alpha",
+      name: "alpha",
+      kind: "custom",
+      workspaceId: 7
+    });
+    expect(payloadB[IDENTITY_CLAIM]).toMatchObject({
+      key: "custom:7:beta",
+      name: "beta",
+      kind: "custom",
+      workspaceId: 7
+    });
   });
 });

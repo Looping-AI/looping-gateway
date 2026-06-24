@@ -58,7 +58,8 @@ export async function resolveMessage(
     agent: {
       name: target.agent.name,
       kind: target.agent.kind,
-      a2aEndpoint: target.agent.a2aEndpoint
+      a2aEndpoint: target.agent.a2aEndpoint,
+      workspaceId: target.agent.workspaceId
     },
     workspaceId: target.workspaceId,
     text: target.text,
@@ -89,6 +90,7 @@ export async function dispatchMessage(
       text: plan.text,
       channelId: p.channelId,
       threadTs: p.threadTs || p.ts,
+      messageTs: p.ts,
       user: plan.user,
       metadata
     });

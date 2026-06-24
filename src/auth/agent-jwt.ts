@@ -1,5 +1,4 @@
 import { SignJWT, importJWK, type JWK } from "jose";
-import type { UserAuthContext } from "@/auth";
 
 /**
  * Gateway outbound identity for remote (custom) A2A agents.
@@ -9,8 +8,8 @@ import type { UserAuthContext } from "@/auth";
  * `/.well-known/jwks.json`). When dispatching to a remote agent it mints a
  * short-lived signed JWT; the remote verifies it against the public JWKS. This
  * proves "this request really came from the gateway" (the remote authenticates
- * the caller, A2A spec §7.4) and carries the caller's minimal identity in
- * tamper-proof claims — so it never travels as plaintext `message.metadata`.
+ * the caller, A2A spec §7.4) and carries the calling gateway-agent instance in
+ * tamper-proof claims — so endpoint sharing never aliases two logical agents.
  *
  * Algorithm is **EdDSA (Ed25519)**. The private key is a JWK stored in the
  * `GATEWAY_JWT_PRIVATE_KEY` secret; its `kid` identifies the key for rotation.
@@ -19,35 +18,29 @@ import type { UserAuthContext } from "@/auth";
 /** JWS / JWT algorithm for the gateway identity. */
 const ALG = "EdDSA";
 
-/** Namespaced claim carrying the minimal, scoped caller identity. */
+/** Namespaced claim carrying the signed gateway-agent caller identity. */
 export const IDENTITY_CLAIM = "https://looping.ai/identity";
 
 /** Token lifetime — short, since each dispatch mints a fresh one. */
 const TOKEN_TTL_SECONDS = 120;
 
 /**
- * The minimal identity forwarded to a remote agent. Deliberately a strict
- * subset of {@link UserAuthContext}: no permission flags or admin-workspace
- * lists cross the trust boundary — a remote agent gets who the user is, not
- * what they're allowed to do on the gateway.
+ * Stable identity of the logical gateway-agent instance making a remote call.
+ * Derived from the registered agent row, not from the endpoint URL, so two
+ * distinct agents can safely share one remote service.
  */
 export interface RemoteIdentity {
-  slackUserId: string;
-  displayName: string | null;
-  /** Workspace the routed agent belongs to (org-wide custom agents may be null). */
+  /**
+   * Canonical instance key used for `sub` and remote state partitioning.
+   * Example: `custom:7:analytics`.
+   */
+  key: string;
+  /** Registry name of the logical agent instance. */
+  name: string;
+  /** Dispatch kind of the caller (today always `"custom"` for remote agents). */
+  kind: string;
+  /** Workspace the registered agent belongs to (org-wide custom agents may be null). */
   workspaceId: number | null;
-}
-
-/** Project the full auth context down to the minimal cross-boundary identity. */
-export function toRemoteIdentity(
-  user: UserAuthContext,
-  workspaceId: number | null
-): RemoteIdentity {
-  return {
-    slackUserId: user.slackUserId,
-    displayName: user.displayName,
-    workspaceId
-  };
 }
 
 interface SignGatewayTokenArgs {
@@ -58,10 +51,8 @@ interface SignGatewayTokenArgs {
    * request and passed in here so Workflow context (no `Request`) can sign correctly.
    */
   issuer: string;
-  /** Minimal caller identity embedded under {@link IDENTITY_CLAIM}. */
+  /** Stable gateway-agent identity embedded under {@link IDENTITY_CLAIM}. */
   identity: RemoteIdentity;
-  /** The dispatch agent kind (always `"custom"` for remote today). */
-  agentKind: string;
 }
 
 type GatewayJwtEnv = Pick<Env, "GATEWAY_JWT_PRIVATE_KEY">;
@@ -91,8 +82,8 @@ function privateJwk(env: GatewayJwtEnv): JWK & { kid: string } {
 
 /**
  * Mint a short-lived gateway identity JWT for one remote dispatch. Signed with
- * EdDSA; carries `iss`/`aud`/`sub`/`iat`/`exp`/`jti` plus the minimal identity
- * claim. The remote agent verifies it against the gateway's public JWKS.
+ * EdDSA; carries `iss`/`aud`/`sub`/`iat`/`exp`/`jti` plus the gateway-agent
+ * identity claim. The remote agent verifies it against the gateway's public JWKS.
  */
 export async function signGatewayToken(
   env: GatewayJwtEnv,
@@ -106,17 +97,17 @@ export async function signGatewayToken(
   return (
     new SignJWT({
       [IDENTITY_CLAIM]: {
-        slackUserId: args.identity.slackUserId,
-        displayName: args.identity.displayName,
-        workspaceId: args.identity.workspaceId,
-        agentKind: args.agentKind
+        key: args.identity.key,
+        name: args.identity.name,
+        kind: args.identity.kind,
+        workspaceId: args.identity.workspaceId
       }
     })
       // jku (RFC 7515 §4.1.2): the URL of our public JWKS, embedded in the token so
       // remote agents can locate the verification key without separate configuration.
       .setProtectedHeader({ alg: ALG, kid: jwk.kid, typ: "JWT", jku: jwksUrl })
       .setIssuer(issuer)
-      .setSubject(args.identity.slackUserId)
+      .setSubject(args.identity.key)
       .setAudience(args.audience)
       .setIssuedAt()
       .setExpirationTime(`${TOKEN_TTL_SECONDS}s`)

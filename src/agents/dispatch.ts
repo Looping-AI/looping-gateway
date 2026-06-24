@@ -1,6 +1,6 @@
 import type { Message } from "@a2a-js/sdk";
 import type { UserAuthContext } from "@/auth";
-import { signGatewayToken, toRemoteIdentity } from "@/auth/agent-jwt";
+import { signGatewayToken, type RemoteIdentity } from "@/auth/agent-jwt";
 import type { AgentRow } from "@/db/models/agents";
 import { buildAgentCard } from "@/a2a/card";
 import { sendA2AMessage } from "@/a2a/client";
@@ -16,6 +16,7 @@ export interface DispatchAgentRef {
   name: string;
   kind: AgentRow["kind"];
   a2aEndpoint: string;
+  workspaceId: number | null;
 }
 
 /**
@@ -39,6 +40,8 @@ export interface DispatchPayload {
   channelId: string;
   /** Thread timestamp (or message `ts` for top-level) — the thread key. */
   threadTs: string;
+  /** Slack message timestamp of the originating user turn. */
+  messageTs: string;
   /** The caller — ALWAYS present (the classifier boundary guarantees it). */
   user: UserAuthContext;
   /** Only the per-kind extras; merged with `user` onto the wire metadata. */
@@ -70,15 +73,79 @@ async function resolveIssuer(env: Env): Promise<string | null> {
 export const buildContextId = (channelId: string, threadTs: string): string =>
   `${channelId}:${threadTs}`;
 
+/**
+ * Stable remote caller key derived from the registered agent row. The endpoint
+ * is intentionally excluded so multiple logical agents can safely share it.
+ */
+export function buildAgentInstanceKey(
+  agent: Pick<DispatchAgentRef, "kind" | "workspaceId" | "name">
+): string {
+  return `${agent.kind}:${agent.workspaceId ?? "org"}:${agent.name}`;
+}
+
+/** Canonical signed identity of the gateway-agent instance calling remotely. */
+export function buildRemoteIdentity(
+  agent: Pick<DispatchAgentRef, "kind" | "workspaceId" | "name">
+): RemoteIdentity {
+  return {
+    key: buildAgentInstanceKey(agent),
+    name: agent.name,
+    kind: agent.kind,
+    workspaceId: agent.workspaceId
+  };
+}
+
+/**
+ * Remote context id namespaces channel/thread history by the calling agent
+ * instance so sibling agents sharing one endpoint never collide.
+ */
+export function buildRemoteContextId(
+  identity: Pick<RemoteIdentity, "key">,
+  channelId: string,
+  threadTs: string
+): string {
+  return (
+    `agent=${encodeURIComponent(identity.key)}` +
+    `&channel=${encodeURIComponent(channelId)}` +
+    `&thread=${encodeURIComponent(threadTs)}`
+  );
+}
+
 /** Inverse of {@link buildContextId}; splits on the first `:` only. */
 export function parseContextId(id: string): {
   channelId: string;
   threadTs: string;
 } {
+  if (id.startsWith("agent=")) {
+    const params = new URLSearchParams(id);
+    return {
+      channelId: params.get("channel") ?? "",
+      threadTs: params.get("thread") ?? ""
+    };
+  }
   const sep = id.indexOf(":");
   return sep === -1
     ? { channelId: id, threadTs: "" }
     : { channelId: id.slice(0, sep), threadTs: id.slice(sep + 1) };
+}
+
+function remoteProvenance(payload: DispatchPayload): {
+  source: "slack";
+  author: { slackUserId: string; displayName: string | null };
+  channelId: string;
+  threadTs: string;
+  messageTs: string;
+} {
+  return {
+    source: "slack",
+    author: {
+      slackUserId: payload.user.slackUserId,
+      displayName: payload.user.displayName
+    },
+    channelId: payload.channelId,
+    threadTs: payload.threadTs,
+    messageTs: payload.messageTs
+  };
 }
 
 // Built-in local agents map their `kind` to a Durable Object namespace binding.
@@ -119,7 +186,7 @@ export async function dispatchToAgent(
   agent: DispatchAgentRef,
   payload: DispatchPayload
 ): Promise<string> {
-  const contextId = buildContextId(payload.channelId, payload.threadTs);
+  const localContextId = buildContextId(payload.channelId, payload.threadTs);
   const bindingName = LOCAL_BINDINGS[agent.kind];
 
   if (!bindingName) {
@@ -130,10 +197,7 @@ export async function dispatchToAgent(
     const allowedDomains = await getAllowedRemoteAgentDomains(getDb(env));
     validateRemoteEndpoint(agent.a2aEndpoint, allowedDomains); // SSRF + approved-domain defense-in-depth
 
-    const workspaceId =
-      payload.metadata.agentKind === "custom"
-        ? payload.metadata.workspaceId
-        : null;
+    const identity = buildRemoteIdentity(agent);
     const issuer = await resolveIssuer(env);
     if (!issuer) {
       throw new Error(
@@ -144,8 +208,7 @@ export async function dispatchToAgent(
     const token = await signGatewayToken(env, {
       audience: originOf(agent.a2aEndpoint),
       issuer,
-      identity: toRemoteIdentity(payload.user, workspaceId),
-      agentKind: payload.metadata.agentKind
+      identity
     });
 
     const remoteMessage: Message = {
@@ -153,9 +216,16 @@ export async function dispatchToAgent(
       messageId: crypto.randomUUID(),
       role: "user",
       parts: [{ kind: "text", text: payload.text }],
-      contextId,
+      contextId: buildRemoteContextId(
+        identity,
+        payload.channelId,
+        payload.threadTs
+      ),
       // Per-kind extras only — no user/auth context crosses the trust boundary.
-      metadata: { ...payload.metadata }
+      metadata: {
+        ...payload.metadata,
+        provenance: remoteProvenance(payload)
+      }
     };
     return sendA2AMessage(
       { kind: "remote", endpoint: agent.a2aEndpoint, authToken: token },
@@ -174,7 +244,7 @@ export async function dispatchToAgent(
     messageId: crypto.randomUUID(),
     role: "user",
     parts: [{ kind: "text", text: payload.text }],
-    contextId,
+    contextId: localContextId,
     metadata: { ...metadata }
   };
 
