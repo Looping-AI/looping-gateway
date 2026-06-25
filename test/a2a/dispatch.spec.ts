@@ -99,6 +99,7 @@ describe("dispatchToAgent (local Durable Object)", () => {
       {
         text: "ping",
         channelId: "C1",
+        channelName: null,
         threadTs: "1.1",
         messageTs: "1.1",
         user: user("U1"),
@@ -123,6 +124,7 @@ describe("dispatchToAgent (local Durable Object)", () => {
       {
         text: "hi",
         channelId: "D1",
+        channelName: null,
         threadTs: "1.1",
         messageTs: "1.1",
         user: user("U_onb"),
@@ -150,6 +152,7 @@ describe("dispatchToAgent (local Durable Object)", () => {
       {
         text: "first",
         channelId: "C_SHARED",
+        channelName: "general",
         threadTs: "171813.100",
         messageTs: "171813.100",
         user: user("U1"),
@@ -168,6 +171,7 @@ describe("dispatchToAgent (local Durable Object)", () => {
       {
         text: "second",
         channelId: "C_SHARED",
+        channelName: null,
         threadTs: "171813.100",
         messageTs: "171813.200",
         user: { ...user("U2"), displayName: "Grace" },
@@ -192,6 +196,7 @@ describe("dispatchToAgent (local Durable Object)", () => {
         source: "slack",
         author: { id: "slack:U1", slackUserId: "U1", displayName: null },
         channelId: "C_SHARED",
+        channelName: "general",
         threadTs: "171813.100",
         messageTs: "171813.100"
       }

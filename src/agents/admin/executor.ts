@@ -78,17 +78,20 @@ export class AdminAgentExecutor implements AgentExecutor {
       unexpectedReply:
         "Sorry, I hit an unexpected error handling that admin request. Please reach out to your developer and check the error logs for more details.",
       prepare: async (_text, metadata) => {
-        // Validate the deserialized wire metadata at this boundary.
+        // Validate the deserialized wire metadata at this boundary. Both the
+        // workspace id and the Slack user are guaranteed preconditions (the
+        // classifier drops sender-less events), so treat them as required.
         if (
           metadata.agentKind !== "admin" ||
-          metadata.adminWorkspaceId == null
+          metadata.adminWorkspaceId == null ||
+          metadata.user == null
         ) {
           throw new Error(
-            "[admin-executor] expected admin metadata with an adminWorkspaceId"
+            "[admin-executor] expected admin metadata with an adminWorkspaceId and user"
           );
         }
         const wsId = metadata.adminWorkspaceId;
-        const ctx = metadata.user ?? null;
+        const ctx = metadata.user;
         const session = this.getSession(wsId);
         const namespace = `admin:${wsId}`;
         const hasArchive = (await session.getCompactions()).length > 0;
@@ -97,7 +100,7 @@ export class AdminAgentExecutor implements AgentExecutor {
           systemSuffix: callerContext(ctx, { workspaceId: wsId }),
           // The admin channel is multi-actor: attribute each turn to its author
           // so history records who said what across users.
-          author: ctx ? authorFromUser(ctx) : undefined,
+          author: authorFromUser(ctx),
           tools: {
             ...buildAdminTools({
               db: getDb(this.env),

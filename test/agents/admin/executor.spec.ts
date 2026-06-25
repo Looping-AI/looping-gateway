@@ -7,6 +7,7 @@ import {
   type SessionHost,
   type SessionLike
 } from "@/agents/admin/executor";
+import { slackTsToIso } from "@/agents/shared/messages";
 import type { UserAuthContext } from "@/auth";
 
 const sqlHost: SessionHost = { sql: () => [] };
@@ -92,7 +93,9 @@ function makeRequest() {
       metadata: {
         user: caller,
         agentKind: "admin",
-        adminWorkspaceId: 0
+        adminWorkspaceId: 0,
+        messageTs: "1700000000.000400",
+        channelName: "admin-ops"
       }
     }
   };
@@ -138,6 +141,28 @@ describe("AdminAgentExecutor", () => {
     expect(t.published[0].parts[0].text).toBe("Here are your agents.");
     // user turn + assistant turn persisted
     expect(session.messages.map((m) => m.role)).toEqual(["user", "assistant"]);
+  });
+
+  it("attributes the user turn with who/where/when", async () => {
+    const session = new FakeSession();
+    const model = new MockLanguageModelV3({
+      doGenerate: async () => okResult("ok") as never
+    });
+    const exec = new AdminAgentExecutor(sqlHost, env, {
+      model,
+      createSession: () => session
+    });
+
+    const t = makeRequest();
+    await exec.execute(t.requestContext, t.eventBus);
+
+    const userTurn = session.messages.find((m) => m.role === "user");
+    expect(userTurn?.parts[0]).toMatchObject({
+      type: "text",
+      text:
+        `<turn from="Tester" id="U1" channel="#admin-ops" ` +
+        `at="${slackTsToIso("1700000000.000400")}">list agents</turn>`
+    });
   });
 
   it("publishes a friendly error and still finishes when the loop throws", async () => {

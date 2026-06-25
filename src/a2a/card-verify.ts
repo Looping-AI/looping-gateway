@@ -46,7 +46,7 @@ interface AgentCardSignature {
 }
 
 const FETCH_TIMEOUT_MS = 10_000;
-const MAX_CARD_BYTES = 256 * 1024;
+const MAX_CARD_LENGTH = 256 * 1024;
 const ALG = "EdDSA";
 
 /** Recursively sort object keys so serialization is deterministic. */
@@ -86,7 +86,7 @@ async function fetchJsonCapped(url: string): Promise<unknown> {
       );
     }
     const text = await res.text();
-    if (text.length > MAX_CARD_BYTES) {
+    if (text.length > MAX_CARD_LENGTH) {
       throw new AgentCardVerificationError(`response from ${url} too large`);
     }
     return JSON.parse(text);

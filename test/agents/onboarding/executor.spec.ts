@@ -3,6 +3,7 @@ import { env } from "cloudflare:workers";
 import { MockLanguageModelV3 } from "ai/test";
 import type { SessionMessage } from "agents/experimental/memory/session";
 import { OnboardingAgentExecutor } from "@/agents/onboarding/executor";
+import { slackTsToIso } from "@/agents/shared/messages";
 import type { SessionHost, SessionLike } from "@/agents/shared/session";
 import type { UserAuthContext } from "@/auth";
 
@@ -88,7 +89,9 @@ function makeRequest() {
       parts: [{ kind: "text", text: "how does Looping work?" }],
       metadata: {
         user: caller,
-        agentKind: "onboarding"
+        agentKind: "onboarding",
+        messageTs: "1700000000.000300",
+        channelName: null
       }
     }
   };
@@ -139,6 +142,30 @@ describe("OnboardingAgentExecutor", () => {
     expect(session.messages.map((m) => m.role)).toEqual(["user", "assistant"]);
   });
 
+  it("attributes the user turn with who/where/when (uniform with admin)", async () => {
+    const session = new FakeSession();
+    const model = new MockLanguageModelV3({
+      doGenerate: async () => okResult("ok") as never
+    });
+    const exec = new OnboardingAgentExecutor(sqlHost, env, {
+      model,
+      createSession: () => session
+    });
+
+    const t = makeRequest();
+    await exec.execute(t.requestContext, t.eventBus);
+
+    const userTurn = session.messages.find((m) => m.role === "user");
+    // Single-actor DM: author present; channel falls back to the contextId's
+    // channel id since a DM has no resolved name.
+    expect(userTurn?.parts[0]).toMatchObject({
+      type: "text",
+      text:
+        `<turn from="Newbie" id="U_onb" channel="D_ONB" ` +
+        `at="${slackTsToIso("1700000000.000300")}">how does Looping work?</turn>`
+    });
+  });
+
   it("publishes a friendly error and still finishes when the loop throws", async () => {
     class ThrowingSession extends FakeSession {
       async refreshSystemPrompt(): Promise<string> {
@@ -187,13 +214,13 @@ describe("OnboardingAgentExecutor", () => {
     expect(opts.namespace).toBe("onboarding:U_onb");
   });
 
-  it("withholds recall and does not crash when caller context is absent", async () => {
-    const session = new FakeSession([{ id: "c1" }]); // hasArchive=true but no user
-    let capturedToolNames: string[] = [];
+  it("errors at the boundary when caller context is absent (no null path)", async () => {
+    const session = new FakeSession([{ id: "c1" }]);
+    let modelCalled = false;
     const model = new MockLanguageModelV3({
-      doGenerate: async (options) => {
-        capturedToolNames = (options.tools ?? []).map((t) => t.name);
-        return okResult("Here is what Looping does.") as never;
+      doGenerate: async () => {
+        modelCalled = true;
+        return okResult("unused") as never;
       }
     });
     const exec = new OnboardingAgentExecutor(sqlHost, env, {
@@ -201,7 +228,9 @@ describe("OnboardingAgentExecutor", () => {
       createSession: () => session
     });
 
-    // Request without a user — simulates an unauthenticated or pre-bootstrap event.
+    // Request without a user — the Slack user is now a required precondition
+    // (uniform with admin), so prepare throws and the loop publishes the
+    // friendly error rather than running a degraded, null-tolerant turn.
     const requestContext = {
       contextId: "D_ONB:no-user",
       userMessage: {
@@ -225,6 +254,7 @@ describe("OnboardingAgentExecutor", () => {
 
     expect(finished).toBe(true);
     expect(published).toHaveLength(1);
-    expect(capturedToolNames).not.toContain("recall");
+    expect(published[0].parts[0].text?.toLowerCase()).toContain("error");
+    expect(modelCalled).toBe(false);
   });
 });

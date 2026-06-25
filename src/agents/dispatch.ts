@@ -30,14 +30,26 @@ export type DispatchMetadata =
   | { agentKind: "onboarding" }
   | { agentKind: "custom"; workspaceId: number | null };
 
-/** What rides on the A2A `message.metadata` and what the executor reads back. */
-export type AgentTurnMetadata = { user: UserAuthContext } & DispatchMetadata;
+/**
+ * What rides on the A2A `message.metadata` and what the executor reads back.
+ * `messageTs`/`channelName` are the universal per-turn "when"/"where" that the
+ * shared loop projects into stored turn provenance (see `TurnContext`).
+ */
+export type AgentTurnMetadata = {
+  user: UserAuthContext;
+  /** Slack ts of this turn — the "when", rendered as the turn's `at`. */
+  messageTs: string;
+  /** Resolved channel name (`general`), or null when unresolved / a DM. */
+  channelName: string | null;
+} & DispatchMetadata;
 
 export interface DispatchPayload {
   /** Cleaned user text (bot mention + `::ref` stripped). */
   text: string;
   /** Slack channel id — combined with `threadTs` into the A2A `contextId`. */
   channelId: string;
+  /** Resolved human channel name (`general`), or null when unresolved / a DM. */
+  channelName: string | null;
   /** Thread timestamp (or message `ts` for top-level) — the thread key. */
   threadTs: string;
   /** Slack message timestamp of the originating user turn. */
@@ -161,6 +173,8 @@ export interface RemoteProvenance {
   };
   /** WHERE — the channel the turn arrived on. */
   channelId: string;
+  /** Human channel name (`general`, no `#`), or null when unresolved / a DM. */
+  channelName: string | null;
   /** The thread key within {@link RemoteProvenance.channelId}. */
   threadTs: string;
   /** WHEN — Slack ts of this specific turn (sortable per channel). */
@@ -176,6 +190,7 @@ function remoteProvenance(payload: DispatchPayload): RemoteProvenance {
       displayName: payload.user.displayName
     },
     channelId: payload.channelId,
+    channelName: payload.channelName,
     threadTs: payload.threadTs,
     messageTs: payload.messageTs
   };
@@ -273,6 +288,8 @@ export async function dispatchToAgent(
   // the full caller context rides on the message metadata.
   const metadata: AgentTurnMetadata = {
     user: payload.user,
+    messageTs: payload.messageTs,
+    channelName: payload.channelName,
     ...payload.metadata
   };
   const message: Message = {

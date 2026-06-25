@@ -27,6 +27,9 @@ interface ConversationsMembersResponse extends SlackApiResponse {
 interface ConversationsListResponse extends SlackApiResponse {
   channels?: { id: string; name?: string }[];
 }
+interface ConversationsInfoResponse extends SlackApiResponse {
+  channel?: { id: string; name?: string; is_im?: boolean; is_mpim?: boolean };
+}
 interface AuthTestResponse extends SlackApiResponse {
   user_id?: string;
   team_id?: string;
@@ -117,6 +120,25 @@ export async function findChannelIdByName(
     cursor = res.response_metadata?.next_cursor || undefined;
   } while (cursor);
   return null;
+}
+
+/**
+ * The human channel name (`general`, no `#`) for a channel id, or null when the
+ * conversation has no name — DMs (`is_im`) and group DMs (`is_mpim`). Throws on
+ * Slack-level failures (e.g. `channel_not_found`, `missing_scope`); callers that
+ * must not fail a turn should catch.
+ */
+export async function getChannelName(
+  env: SlackEnv,
+  channelId: string
+): Promise<string | null> {
+  const res = await callSlackApi<ConversationsInfoResponse>(
+    "conversations.info",
+    { channel: channelId },
+    { token: env.SLACK_BOT_TOKEN }
+  );
+  assertSlackOk("conversations.info", res);
+  return res.channel?.name ?? null;
 }
 
 /** The bot's own Slack user id and team id from `auth.test`. */

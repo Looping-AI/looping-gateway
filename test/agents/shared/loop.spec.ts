@@ -9,6 +9,7 @@ import {
   executeAgentTurn,
   type AgentTurnConfig
 } from "@/agents/shared/loop";
+import { slackTsToIso } from "@/agents/shared/messages";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -72,15 +73,18 @@ function fakeEventBus() {
   return { eventBus, published, publish, finished };
 }
 
-function fakeRequestContext(text = "hello") {
+function fakeRequestContext(
+  text = "hello",
+  opts: { contextId?: string; metadata?: Record<string, unknown> } = {}
+) {
   return {
-    contextId: "ctx-1",
+    contextId: opts.contextId ?? "ctx-1",
     userMessage: {
       kind: "message",
       messageId: "m1",
       role: "user",
       parts: [{ kind: "text", text }],
-      metadata: {}
+      metadata: opts.metadata ?? {}
     }
   } as never;
 }
@@ -180,7 +184,7 @@ describe("executeAgentTurn", () => {
     expect(session.messages.map((m) => m.role)).toEqual(["user", "assistant"]);
   });
 
-  it("prefixes the persisted user turn with the author from prepare()", async () => {
+  it("wraps the persisted user turn with who/where/when from prepare + metadata", async () => {
     const session = new FakeSession();
     const model = new MockLanguageModelV3({
       doGenerate: async () => okResult("ok") as never
@@ -188,7 +192,10 @@ describe("executeAgentTurn", () => {
     const bus = fakeEventBus();
 
     await executeAgentTurn(
-      fakeRequestContext("register a bot"),
+      fakeRequestContext("register a bot", {
+        contextId: "C42:1700000000.000100",
+        metadata: { messageTs: "1700000000.000100", channelName: "general" }
+      }),
       bus.eventBus,
       makeCfg(session, fakeModels(model), {
         prepare: async () => ({
@@ -203,7 +210,41 @@ describe("executeAgentTurn", () => {
     const userTurn = session.messages.find((m) => m.role === "user");
     expect(userTurn?.parts[0]).toMatchObject({
       type: "text",
-      text: "Grace (slack:U2): register a bot"
+      text:
+        `<turn from="Grace" id="U2" channel="#general" ` +
+        `at="${slackTsToIso("1700000000.000100")}">register a bot</turn>`
+    });
+  });
+
+  it("falls back to the channel id from the contextId when no channel name", async () => {
+    const session = new FakeSession();
+    const model = new MockLanguageModelV3({
+      doGenerate: async () => okResult("ok") as never
+    });
+    const bus = fakeEventBus();
+
+    await executeAgentTurn(
+      fakeRequestContext("hi there", {
+        contextId: "C99:1700000000.000200",
+        metadata: { messageTs: "1700000000.000200", channelName: null }
+      }),
+      bus.eventBus,
+      makeCfg(session, fakeModels(model), {
+        prepare: async () => ({
+          session,
+          systemSuffix: "",
+          tools: {},
+          author: { id: "slack:U7", label: "Ada" }
+        })
+      })
+    );
+
+    const userTurn = session.messages.find((m) => m.role === "user");
+    expect(userTurn?.parts[0]).toMatchObject({
+      type: "text",
+      text:
+        `<turn from="Ada" id="U7" channel="C99" ` +
+        `at="${slackTsToIso("1700000000.000200")}">hi there</turn>`
     });
   });
 

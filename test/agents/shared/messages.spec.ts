@@ -4,10 +4,18 @@ import {
   userSessionMessage,
   assistantSessionMessage,
   authorFromUser,
-  attributeTurnText,
+  renderTurn,
+  slackTsToIso,
   sessionText,
-  toModelMessages
+  toModelMessages,
+  type TurnContext
 } from "@/agents/shared/messages";
+
+const ctx: TurnContext = {
+  author: { id: "slack:U2", label: "Grace" },
+  channel: "#general",
+  at: "2026-06-25T14:30:00.000Z"
+};
 
 describe("userSessionMessage", () => {
   it("produces a user-role message with the given text", () => {
@@ -29,15 +37,15 @@ describe("userSessionMessage", () => {
     expect(a.id).not.toBe(b.id);
   });
 
-  it("prefixes the text with the author tag when one is given", () => {
-    const m = userSessionMessage("register the bot", {
-      id: "slack:U2",
-      label: "Grace"
-    });
-    expect(sessionText(m)).toBe("Grace (slack:U2): register the bot");
+  it("wraps the text in a <turn> element when a context is given", () => {
+    const m = userSessionMessage("register the bot", ctx);
+    expect(sessionText(m)).toBe(
+      '<turn from="Grace" id="U2" channel="#general" ' +
+        'at="2026-06-25T14:30:00.000Z">register the bot</turn>'
+    );
   });
 
-  it("leaves text unprefixed when no author is given (single-actor)", () => {
+  it("leaves text unwrapped when no context is given (single-shot)", () => {
     const m = userSessionMessage("just me");
     expect(sessionText(m)).toBe("just me");
   });
@@ -59,10 +67,31 @@ describe("authorFromUser", () => {
   });
 });
 
-describe("attributeTurnText", () => {
-  it("formats a leading authoritative speaker tag", () => {
-    expect(attributeTurnText("hi", { id: "slack:U1", label: "Bo" })).toBe(
-      "Bo (slack:U1): hi"
+describe("renderTurn", () => {
+  it("emits a closed <turn> element, dropping the slack: source from id", () => {
+    expect(renderTurn("hi", ctx)).toBe(
+      '<turn from="Grace" id="U2" channel="#general" ' +
+        'at="2026-06-25T14:30:00.000Z">hi</turn>'
+    );
+  });
+
+  it("escapes attribute values but leaves the body raw", () => {
+    const out = renderTurn('use <Foo> & "bar"', {
+      author: { id: "slack:U1", label: 'A&B <"x">' },
+      channel: "#dev",
+      at: "2026-06-25T00:00:00.000Z"
+    });
+    expect(out).toBe(
+      '<turn from="A&amp;B &lt;&quot;x&quot;&gt;" id="U1" channel="#dev" ' +
+        'at="2026-06-25T00:00:00.000Z">use <Foo> & "bar"</turn>'
+    );
+  });
+});
+
+describe("slackTsToIso", () => {
+  it("converts a Slack ts to an ISO-8601 instant", () => {
+    expect(slackTsToIso("1750861800.123456")).toBe(
+      new Date(1750861800123).toISOString()
     );
   });
 });

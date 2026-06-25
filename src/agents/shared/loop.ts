@@ -5,9 +5,11 @@ import { generateText, stepCountIs } from "ai";
 import type { createModelPair } from "@/agents/model";
 import { textOf } from "@/a2a/parts";
 import type { AgentTurnMetadata } from "@/agents/dispatch";
+import { parseContextId } from "@/agents/dispatch";
 import type { SessionLike } from "./session";
 import {
   assistantSessionMessage,
+  slackTsToIso,
   toModelMessages,
   userSessionMessage,
   type TurnAuthor
@@ -98,7 +100,21 @@ export async function executeAgentTurn(
       author
     } = await cfg.prepare(text, metadata);
 
-    await session.appendMessage(userSessionMessage(text, author));
+    // Project who/where/when into the persisted turn. `channelName` falls back
+    // to the channel id parsed from the contextId; the guard keeps callers
+    // without turn metadata (e.g. unit tests) on the plain-text path.
+    const turnContext =
+      author && metadata.messageTs
+        ? {
+            author,
+            channel: metadata.channelName
+              ? `#${metadata.channelName}`
+              : parseContextId(requestContext.contextId).channelId,
+            at: slackTsToIso(metadata.messageTs)
+          }
+        : undefined;
+
+    await session.appendMessage(userSessionMessage(text, turnContext));
     const history = await session.getHistory();
     const system = (await session.refreshSystemPrompt()) + systemSuffix;
     const tools = { ...(await session.tools()), ...extraTools };
