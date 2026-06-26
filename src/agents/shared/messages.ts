@@ -14,7 +14,7 @@ import type { SessionMessage } from "agents/experimental/memory/session";
  * channel) where a flat `role: "user"` is ambiguous.
  */
 export interface TurnAuthor {
-  /** Stable, source-qualified actor key (e.g. `slack:U123`). */
+  /** Stable actor key — the raw Slack user id (e.g. `U123`). */
   id: string;
   /** Human-readable name, falling back to the raw user id. */
   label: string;
@@ -40,7 +40,7 @@ export function authorFromUser(user: {
   displayName: string | null;
 }): TurnAuthor {
   return {
-    id: `slack:${user.slackUserId}`,
+    id: user.slackUserId,
     label: user.displayName ?? user.slackUserId
   };
 }
@@ -70,14 +70,12 @@ export function slackTsToIso(ts: string): string {
  * authoritative; the body is the user's raw words, kept unescaped so code/markdown
  * read naturally for the model. Attribution is advisory — the real authorization
  * boundary lives in each tool, not the prompt — so a body containing a lookalike
- * `</turn>` is cosmetic, not a spoof. The `slack:` source prefix is dropped from
- * the `id` attribute since every turn is from Slack.
+ * `</turn>` is cosmetic, not a spoof.
  */
 export function renderTurn(text: string, ctx: TurnContext): string {
-  const id = ctx.author.id.replace(/^slack:/, "");
   return (
     `<turn from="${escAttr(ctx.author.label)}"` +
-    ` id="${escAttr(id)}"` +
+    ` id="${escAttr(ctx.author.id)}"` +
     ` channel="${escAttr(ctx.channel)}"` +
     ` at="${escAttr(ctx.at)}">` +
     `${text}</turn>`
@@ -113,7 +111,7 @@ function unescAttr(value: string): string {
 /** The fields recovered from a rendered `<turn>` wrapper. */
 export interface ParsedTurn {
   from: string;
-  /** Bare Slack user id (no `slack:` prefix), as rendered. */
+  /** Slack user id, as rendered. */
   id: string;
   channel: string;
   at: string;
