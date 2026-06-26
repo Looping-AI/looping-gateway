@@ -57,6 +57,14 @@ function escAttr(value: string): string {
   return value.replace(/[&<>"]/g, (c) => ATTR_ESCAPES[c]);
 }
 
+/**
+ * Strip any `<turn …>` / `</turn>` lookalikes from user body text so a crafted
+ * message cannot inject gateway-authored provenance wrappers into model context.
+ */
+function sanitizeBody(text: string): string {
+  return text.replace(/<\s*\/?\s*turn(\s[^>]*)?\s*>/gi, "");
+}
+
 /** Convert a Slack message ts (`"1719331800.123456"`) to an ISO-8601 instant. */
 export function slackTsToIso(ts: string): string {
   return new Date(Math.round(parseFloat(ts) * 1000)).toISOString();
@@ -66,11 +74,9 @@ export function slackTsToIso(ts: string): string {
  * Project a {@link TurnContext} into the authoritative `<turn>` wrapper the
  * Gateway inlines into the outbound message text — the single source of
  * who/where/when read by the model, by remote agents, and (via {@link parseTurn})
- * by the recall archiver. The element and its attributes are gateway-applied and
- * authoritative; the body is the user's raw words, kept unescaped so code/markdown
- * read naturally for the model. Attribution is advisory — the real authorization
- * boundary lives in each tool, not the prompt — so a body containing a lookalike
- * `</turn>` is cosmetic, not a spoof.
+ * by the recall archiver. Attributes are escaped with {@link escAttr}; the body
+ * is sanitized with {@link sanitizeBody} to strip any `<turn>`/`</turn>` lookalikes
+ * that could spoof provenance in the model-visible history.
  */
 export function renderTurn(text: string, ctx: TurnContext): string {
   return (
@@ -78,7 +84,7 @@ export function renderTurn(text: string, ctx: TurnContext): string {
     ` id="${escAttr(ctx.author.id)}"` +
     ` channel="${escAttr(ctx.channel)}"` +
     ` at="${escAttr(ctx.at)}">` +
-    `${text}</turn>`
+    `${sanitizeBody(text)}</turn>`
   );
 }
 
