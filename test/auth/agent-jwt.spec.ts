@@ -4,22 +4,12 @@ import { decodeProtectedHeader, importJWK, jwtVerify, type JWK } from "jose";
 import {
   IDENTITY_CLAIM,
   getPublicJwks,
-  signGatewayToken,
-  toRemoteIdentity
+  signGatewayToken
 } from "@/auth/agent-jwt";
-import type { UserAuthContext } from "@/auth";
 
 const AUD = "https://agent.example.com";
 const PUBLIC_URL = "https://gateway.test";
 const EXPECTED_JKU = `${PUBLIC_URL}/.well-known/jwks.json`;
-
-const user: UserAuthContext = {
-  slackUserId: "U123",
-  displayName: "Ada",
-  isPrimaryOwner: false,
-  isOrgAdmin: false,
-  adminWorkspaces: []
-};
 
 async function publicKey() {
   const { keys } = getPublicJwks(env);
@@ -50,8 +40,12 @@ describe("signGatewayToken", () => {
     const token = await signGatewayToken(env, {
       audience: AUD,
       issuer: PUBLIC_URL,
-      identity: toRemoteIdentity(user, 7),
-      agentKind: "custom"
+      identity: {
+        key: "custom:7:analytics",
+        name: "analytics",
+        kind: "custom",
+        workspaceId: 7
+      }
     });
 
     // The protected header must carry jku pointing at our JWKS (RFC 7515 §4.1.2).
@@ -69,26 +63,27 @@ describe("signGatewayToken", () => {
     });
     expect(payload.iss).toBe(PUBLIC_URL);
     expect(payload.aud).toBe(AUD);
-    expect(payload.sub).toBe("U123");
+    expect(payload.sub).toBe("custom:7:analytics");
     expect(payload.jti).toBeTruthy();
     const identity = payload[IDENTITY_CLAIM] as Record<string, unknown>;
     expect(identity).toMatchObject({
-      slackUserId: "U123",
-      displayName: "Ada",
-      workspaceId: 7,
-      agentKind: "custom"
+      key: "custom:7:analytics",
+      name: "analytics",
+      kind: "custom",
+      workspaceId: 7
     });
   });
 
-  it("carries no permission flags across the trust boundary", async () => {
+  it("carries gateway-agent identity only, not user auth fields", async () => {
     const token = await signGatewayToken(env, {
       audience: AUD,
       issuer: PUBLIC_URL,
-      identity: toRemoteIdentity(
-        { ...user, isOrgAdmin: true, adminWorkspaces: [1, 2] },
-        null
-      ),
-      agentKind: "custom"
+      identity: {
+        key: "custom:0:shared-endpoint",
+        name: "shared-endpoint",
+        kind: "custom",
+        workspaceId: 0
+      }
     });
     const { payload } = await jwtVerify(token, await publicKey(), {
       issuer: PUBLIC_URL,
@@ -96,17 +91,21 @@ describe("signGatewayToken", () => {
       algorithms: ["EdDSA"]
     });
     const identity = payload[IDENTITY_CLAIM] as Record<string, unknown>;
-    expect(identity).not.toHaveProperty("isOrgAdmin");
-    expect(identity).not.toHaveProperty("adminWorkspaces");
-    expect(identity.workspaceId).toBeNull();
+    expect(identity).not.toHaveProperty("slackUserId");
+    expect(identity).not.toHaveProperty("displayName");
+    expect(identity.workspaceId).toBe(0);
   });
 
   it("rejects a token presented to the wrong audience", async () => {
     const token = await signGatewayToken(env, {
       audience: AUD,
       issuer: PUBLIC_URL,
-      identity: toRemoteIdentity(user, null),
-      agentKind: "custom"
+      identity: {
+        key: "custom:0:demo",
+        name: "demo",
+        kind: "custom",
+        workspaceId: 0
+      }
     });
     await expect(
       jwtVerify(token, await publicKey(), {
@@ -121,8 +120,12 @@ describe("signGatewayToken", () => {
     const token = await signGatewayToken(env, {
       audience: AUD,
       issuer: PUBLIC_URL,
-      identity: toRemoteIdentity(user, null),
-      agentKind: "custom"
+      identity: {
+        key: "custom:0:demo",
+        name: "demo",
+        kind: "custom",
+        workspaceId: 0
+      }
     });
     const [h, p, s] = token.split(".");
     const flipped = s[0] === "A" ? "B" : "A";
@@ -142,8 +145,12 @@ describe("signGatewayToken", () => {
     const token = await signGatewayToken(env, {
       audience: AUD,
       issuer: PUBLIC_URL,
-      identity: toRemoteIdentity(user, null),
-      agentKind: "custom"
+      identity: {
+        key: "custom:0:demo",
+        name: "demo",
+        kind: "custom",
+        workspaceId: 0
+      }
     });
     // Advance past the 120s TTL.
     vi.setSystemTime(new Date("2025-01-01T00:05:00Z"));

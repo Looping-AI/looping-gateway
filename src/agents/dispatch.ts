@@ -1,6 +1,6 @@
 import type { Message } from "@a2a-js/sdk";
 import type { UserAuthContext } from "@/auth";
-import { signGatewayToken, toRemoteIdentity } from "@/auth/agent-jwt";
+import { signGatewayToken, type RemoteIdentity } from "@/auth/agent-jwt";
 import type { AgentRow } from "@/db/models/agents";
 import { buildAgentCard } from "@/a2a/card";
 import { sendA2AMessage } from "@/a2a/client";
@@ -10,12 +10,14 @@ import {
   getAllowedRemoteAgentDomains,
   getPublicUrl
 } from "@/db/models/workspace-configs";
+import { renderTurn, turnContextFromPayload } from "@/agents/shared/messages";
 
 /** The subset of an agent registry row the dispatcher needs (Rpc-serializable). */
 export interface DispatchAgentRef {
   name: string;
   kind: AgentRow["kind"];
   a2aEndpoint: string;
+  workspaceId: number;
 }
 
 /**
@@ -29,7 +31,12 @@ export type DispatchMetadata =
   | { agentKind: "onboarding" }
   | { agentKind: "custom"; workspaceId: number | null };
 
-/** What rides on the A2A `message.metadata` and what the executor reads back. */
+/**
+ * What rides on the A2A `message.metadata` and what the executor reads back.
+ * Who/where/when is carried in the turn *text* (the Gateway-applied `<turn>`
+ * wrapper), not here — this is only the caller (`user`, for authorization) plus
+ * the per-kind routing extras.
+ */
 export type AgentTurnMetadata = { user: UserAuthContext } & DispatchMetadata;
 
 export interface DispatchPayload {
@@ -37,8 +44,12 @@ export interface DispatchPayload {
   text: string;
   /** Slack channel id — combined with `threadTs` into the A2A `contextId`. */
   channelId: string;
+  /** Resolved human channel name (`general`), or null when unresolved / a DM. */
+  channelName: string | null;
   /** Thread timestamp (or message `ts` for top-level) — the thread key. */
   threadTs: string;
+  /** Slack message timestamp of the originating user turn. */
+  messageTs: string;
   /** The caller — ALWAYS present (the classifier boundary guarantees it). */
   user: UserAuthContext;
   /** Only the per-kind extras; merged with `user` onto the wire metadata. */
@@ -70,15 +81,42 @@ async function resolveIssuer(env: Env): Promise<string | null> {
 export const buildContextId = (channelId: string, threadTs: string): string =>
   `${channelId}:${threadTs}`;
 
-/** Inverse of {@link buildContextId}; splits on the first `:` only. */
-export function parseContextId(id: string): {
-  channelId: string;
-  threadTs: string;
-} {
-  const sep = id.indexOf(":");
-  return sep === -1
-    ? { channelId: id, threadTs: "" }
-    : { channelId: id.slice(0, sep), threadTs: id.slice(sep + 1) };
+/**
+ * Stable remote caller key derived from the registered agent row. The endpoint
+ * is intentionally excluded so multiple logical agents can safely share it.
+ */
+export function buildAgentInstanceKey(
+  agent: Pick<DispatchAgentRef, "kind" | "workspaceId" | "name">
+): string {
+  return `${agent.kind}:${agent.workspaceId}:${agent.name}`;
+}
+
+/** Canonical signed identity of the gateway-agent instance calling remotely. */
+export function buildRemoteIdentity(
+  agent: Pick<DispatchAgentRef, "kind" | "workspaceId" | "name">
+): RemoteIdentity {
+  return {
+    key: buildAgentInstanceKey(agent),
+    name: agent.name,
+    kind: agent.kind,
+    workspaceId: agent.workspaceId
+  };
+}
+
+/**
+ * Remote context id namespaces channel/thread history by the calling agent
+ * instance so sibling agents sharing one endpoint never collide.
+ */
+export function buildRemoteContextId(
+  identity: Pick<RemoteIdentity, "key">,
+  channelId: string,
+  threadTs: string
+): string {
+  return (
+    `agent=${encodeURIComponent(identity.key)}` +
+    `&channel=${encodeURIComponent(channelId)}` +
+    `&thread=${encodeURIComponent(threadTs)}`
+  );
 }
 
 // Built-in local agents map their `kind` to a Durable Object namespace binding.
@@ -119,8 +157,14 @@ export async function dispatchToAgent(
   agent: DispatchAgentRef,
   payload: DispatchPayload
 ): Promise<string> {
-  const contextId = buildContextId(payload.channelId, payload.threadTs);
+  const localContextId = buildContextId(payload.channelId, payload.threadTs);
   const bindingName = LOCAL_BINDINGS[agent.kind];
+
+  // The Gateway owns provenance: who/where/when is inlined into the turn text via
+  // the `<turn>` wrapper, once, identically for local and remote agents. Nothing
+  // structured rides alongside — downstream agents (and the recall archiver) read
+  // it back from the text. See renderTurn / parseTurn in shared/messages.
+  const text = renderTurn(payload.text, turnContextFromPayload(payload));
 
   if (!bindingName) {
     // Custom agent → real HTTP. The caller's identity travels in a short-lived,
@@ -130,10 +174,7 @@ export async function dispatchToAgent(
     const allowedDomains = await getAllowedRemoteAgentDomains(getDb(env));
     validateRemoteEndpoint(agent.a2aEndpoint, allowedDomains); // SSRF + approved-domain defense-in-depth
 
-    const workspaceId =
-      payload.metadata.agentKind === "custom"
-        ? payload.metadata.workspaceId
-        : null;
+    const identity = buildRemoteIdentity(agent);
     const issuer = await resolveIssuer(env);
     if (!issuer) {
       throw new Error(
@@ -144,17 +185,23 @@ export async function dispatchToAgent(
     const token = await signGatewayToken(env, {
       audience: originOf(agent.a2aEndpoint),
       issuer,
-      identity: toRemoteIdentity(payload.user, workspaceId),
-      agentKind: payload.metadata.agentKind
+      identity
     });
 
     const remoteMessage: Message = {
       kind: "message",
       messageId: crypto.randomUUID(),
       role: "user",
-      parts: [{ kind: "text", text: payload.text }],
-      contextId,
-      // Per-kind extras only — no user/auth context crosses the trust boundary.
+      parts: [{ kind: "text", text }],
+      contextId: buildRemoteContextId(
+        identity,
+        payload.channelId,
+        payload.threadTs
+      ),
+      // The signed token is the only authority — it names the calling
+      // gateway-agent instance, not any Slack user. The turn's who/where/when
+      // lives in the `<turn>` text; no gateway authorization or permission
+      // context ever crosses this boundary.
       metadata: { ...payload.metadata }
     };
     return sendA2AMessage(
@@ -164,7 +211,8 @@ export async function dispatchToAgent(
   }
 
   // Local agent → in-process via DO stub.fetch. Trusted same-worker dispatch, so
-  // the full caller context rides on the message metadata.
+  // the full caller context rides on the message metadata (for authorization);
+  // provenance still travels in the `<turn>` text like every other agent.
   const metadata: AgentTurnMetadata = {
     user: payload.user,
     ...payload.metadata
@@ -173,8 +221,8 @@ export async function dispatchToAgent(
     kind: "message",
     messageId: crypto.randomUUID(),
     role: "user",
-    parts: [{ kind: "text", text: payload.text }],
-    contextId,
+    parts: [{ kind: "text", text }],
+    contextId: localContextId,
     metadata: { ...metadata }
   };
 

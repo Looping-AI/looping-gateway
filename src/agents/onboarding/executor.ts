@@ -45,7 +45,7 @@ export class OnboardingAgentExecutor implements AgentExecutor {
   }
 
   /** Lazily build the one Session for this DO (one per user). */
-  private getSession(namespace: string | null): SessionLike {
+  private getSession(namespace: string): SessionLike {
     if (!this.session) {
       this.session = this.options.createSession
         ? this.options.createSession()
@@ -55,9 +55,7 @@ export class OnboardingAgentExecutor implements AgentExecutor {
               "Durable facts about this user — their name, role, and what they're trying to set up. Keep it concise.",
             memoryMaxTokens: 1000,
             compactAfterTokens: COMPACT_AFTER_TOKENS,
-            onArchive: namespace
-              ? (msgs) => archiveMessages(this.env, namespace, msgs)
-              : undefined
+            onArchive: (msgs) => archiveMessages(this.env, namespace, msgs)
           });
     }
     return this.session;
@@ -72,17 +70,20 @@ export class OnboardingAgentExecutor implements AgentExecutor {
       unexpectedReply:
         "Sorry, I hit an unexpected error. Please try again in a moment.",
       prepare: async (_text, metadata) => {
-        // Validate the deserialized wire metadata at this boundary.
-        if (metadata.agentKind !== "onboarding") {
-          throw new Error("[onboarding-executor] expected onboarding metadata");
+        // Validate the deserialized wire metadata at this boundary. The Slack
+        // user is a guaranteed precondition (sender-less events are dropped by
+        // the classifier), so treat it as required — the same contract the
+        // admin agent applies to its workspace id.
+        if (metadata.agentKind !== "onboarding" || metadata.user == null) {
+          throw new Error(
+            "[onboarding-executor] expected onboarding metadata with a user"
+          );
         }
-        const ctx = metadata.user ?? null;
+        const ctx = metadata.user;
         // Must match `instanceNameFor` in dispatch.ts (the DO instance key).
-        const namespace = ctx ? `onboarding:${ctx.slackUserId}` : null;
+        const namespace = `onboarding:${ctx.slackUserId}`;
         const session = this.getSession(namespace);
-        const hasArchive = namespace
-          ? (await session.getCompactions()).length > 0
-          : false;
+        const hasArchive = (await session.getCompactions()).length > 0;
         return {
           session,
           systemSuffix: callerContext(ctx),
@@ -92,7 +93,7 @@ export class OnboardingAgentExecutor implements AgentExecutor {
               ctx,
               reconcileWorkflow: this.env.RECONCILE_WORKFLOW
             }),
-            ...(namespace ? recallTools(this.env, namespace, hasArchive) : {})
+            ...recallTools(this.env, namespace, hasArchive)
           }
         };
       }

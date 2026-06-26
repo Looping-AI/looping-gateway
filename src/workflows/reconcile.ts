@@ -20,9 +20,13 @@ import {
 } from "@/db/models/workspace-admins";
 import { getSlackTeamId, setSlackTeamId } from "@/db/models/workspace-configs";
 import {
+  upsertSlackChannel,
+  getSlackChannelIdByName
+} from "@/db/models/channels";
+import {
   iterateSlackUsers,
+  iterateSlackChannels,
   fetchChannelMemberIds,
-  findChannelIdByName,
   getBotUserId,
   getBotInfo
 } from "@/wrappers/slack";
@@ -30,6 +34,7 @@ import {
 type ReconcileEnv = Pick<Env, "DB" | "SLACK_BOT_TOKEN">;
 
 export interface ReconcileResult {
+  channelsUpserted: number;
   usersUpserted: number;
   usersDeactivated: number;
   adminsAdded: number;
@@ -41,6 +46,10 @@ export interface ReconcileResult {
 export interface TeamIdAnchorResult {
   teamIdBootstrapped: boolean;
   drifted: boolean;
+}
+
+export interface ChannelSyncResult {
+  channelsUpserted: number;
 }
 
 export interface OrgChannelResult {
@@ -100,13 +109,26 @@ export async function anchorTeamId(
   return result;
 }
 
-/** Resolve org admin channel (writes only on change). */
-export async function resolveOrgChannel(
+/** Upsert every named Slack channel into D1 from a single conversations.list pass. */
+export async function syncChannels(
   env: ReconcileEnv,
   db: Db
-): Promise<OrgChannelResult> {
+): Promise<ChannelSyncResult> {
+  let channelsUpserted = 0;
+  for await (const c of iterateSlackChannels(env)) {
+    await upsertSlackChannel(db, { channelId: c.id, name: c.name });
+    channelsUpserted++;
+  }
+  return { channelsUpserted };
+}
+
+/**
+ * Resolve org admin channel from the D1 channel registry (populated by
+ * syncChannels in the prior step). Writes only on change.
+ */
+export async function resolveOrgChannel(db: Db): Promise<OrgChannelResult> {
   const org = await getWorkspace(db, ORG_WORKSPACE_ID);
-  const channelId = await findChannelIdByName(env, ORG_ADMIN_CHANNEL_NAME);
+  const channelId = await getSlackChannelIdByName(db, ORG_ADMIN_CHANNEL_NAME);
   if (channelId && channelId !== org?.adminChannelId) {
     await setWorkspaceAdminChannel(db, ORG_WORKSPACE_ID, channelId);
   }
@@ -197,6 +219,7 @@ export class ReconcileWorkflow extends WorkflowEntrypoint<
   ) {
     const db = getDb(this.env);
     const result: ReconcileResult = {
+      channelsUpserted: 0,
       usersUpserted: 0,
       usersDeactivated: 0,
       adminsAdded: 0,
@@ -217,8 +240,13 @@ export class ReconcileWorkflow extends WorkflowEntrypoint<
       result.teamIdBootstrapped = anchor.teamIdBootstrapped;
       if (anchor.drifted) return result;
 
+      const channels = await step.do("sync-channels", () =>
+        syncChannels(this.env, db)
+      );
+      result.channelsUpserted = channels.channelsUpserted;
+
       const org = await step.do("resolve-org-channel", () =>
-        resolveOrgChannel(this.env, db)
+        resolveOrgChannel(db)
       );
       const users = await step.do("sync-users", () =>
         syncUsers(this.env, db, org.channelId)

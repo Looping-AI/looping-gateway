@@ -11,6 +11,7 @@ import {
 } from "@/agents/dispatch";
 import { InvalidEndpointError } from "@/a2a/endpoint";
 import { postReply } from "@/wrappers/slack";
+import { getSlackChannelName } from "@/db/models/channels";
 
 export const NO_AGENT_HINT =
   "I'm not set up to help in this channel yet. Ask a workspace admin to allow an agent here and ::agent-name reference it.";
@@ -58,7 +59,8 @@ export async function resolveMessage(
     agent: {
       name: target.agent.name,
       kind: target.agent.kind,
-      a2aEndpoint: target.agent.a2aEndpoint
+      a2aEndpoint: target.agent.a2aEndpoint,
+      workspaceId: target.agent.workspaceId
     },
     workspaceId: target.workspaceId,
     text: target.text,
@@ -88,7 +90,9 @@ export async function dispatchMessage(
     return await dispatchToAgent(env, plan.agent, {
       text: plan.text,
       channelId: p.channelId,
+      channelName: await getSlackChannelName(getDb(env), p.channelId),
       threadTs: p.threadTs || p.ts,
+      messageTs: p.ts,
       user: plan.user,
       metadata
     });

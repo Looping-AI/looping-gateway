@@ -91,6 +91,8 @@ export async function executeAgentTurn(
       tools: extraTools
     } = await cfg.prepare(text, metadata);
 
+    // `text` already carries its `<turn>` provenance wrapper (applied by the
+    // Gateway in dispatch); persist it verbatim.
     await session.appendMessage(userSessionMessage(text));
     const history = await session.getHistory();
     const system = (await session.refreshSystemPrompt()) + systemSuffix;

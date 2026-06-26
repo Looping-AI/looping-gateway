@@ -94,11 +94,15 @@ export async function fetchChannelMemberIds(
   return ids;
 }
 
-/** Resolve a channel id by exact name (public or private). null if not found. */
-export async function findChannelIdByName(
-  env: SlackEnv,
-  name: string
-): Promise<string | null> {
+/**
+ * Iterate every named channel (public/private, unarchived) via paginated
+ * `conversations.list`. Channels without a name (shouldn't happen for these
+ * types) are skipped. Reconcile upserts these into D1 so the message hot path
+ * resolves channel names without a Slack call.
+ */
+export async function* iterateSlackChannels(
+  env: SlackEnv
+): AsyncGenerator<{ id: string; name: string }> {
   let cursor: string | undefined;
   do {
     const res = await callSlackApi<ConversationsListResponse>(
@@ -112,11 +116,11 @@ export async function findChannelIdByName(
       { token: env.SLACK_BOT_TOKEN }
     );
     assertSlackOk("conversations.list", res);
-    const match = (res.channels ?? []).find((c) => c.name === name);
-    if (match) return match.id;
+    for (const c of res.channels ?? []) {
+      if (c.name) yield { id: c.id, name: c.name };
+    }
     cursor = res.response_metadata?.next_cursor || undefined;
   } while (cursor);
-  return null;
 }
 
 /** The bot's own Slack user id and team id from `auth.test`. */

@@ -48,6 +48,24 @@ export const slackUsers = sqliteTable("slack_users", {
 });
 
 /**
+ * Slack channel registry, keyed by the stable Slack channel id (`C…`). Kept
+ * upserted by reconcile from the `conversations.list` traversal it already does,
+ * so the message hot path resolves a channel name with a single D1 read instead
+ * of a Slack call. Only named conversations (public/private channels) land here;
+ * DMs/MPIMs miss and the hot path falls back to the raw id.
+ */
+export const slackChannels = sqliteTable(
+  "slack_channels",
+  {
+    channelId: text("channel_id").primaryKey(),
+    name: text("name").notNull(),
+    createdAt: timestamp("created_at"),
+    updatedAt: timestamp("updated_at")
+  },
+  (t) => [index("idx_slack_channels_name").on(t.name)]
+);
+
+/**
  * Workspace admins — one row per (workspace, user). This join table IS the
  * source of `adminWorkspaces`; being a member of a workspace's admin channel
  * lands a row here. FK is declared for intent/tests; cascades are done
@@ -92,7 +110,9 @@ export const agents = sqliteTable(
     cardSigningJku: text("card_signing_jku"),
     cardSigningKid: text("card_signing_kid"),
     enabled: integer("enabled", { mode: "boolean" }).notNull().default(true),
-    workspaceId: integer("workspace_id").references(() => workspaces.id),
+    workspaceId: integer("workspace_id")
+      .notNull()
+      .references(() => workspaces.id),
     createdAt: timestamp("created_at"),
     updatedAt: timestamp("updated_at")
   },

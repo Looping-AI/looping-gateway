@@ -11,7 +11,7 @@ export interface RegisterAgentInput {
   displayName?: string | null;
   /** Required: custom agents are remote and addressed by this HTTP endpoint. */
   a2aEndpoint: string;
-  workspaceId: number | null;
+  workspaceId: number;
   /** Pinned AgentCard signing identity (custom agents; verified at registration). */
   cardSigningJku?: string | null;
   cardSigningKid?: string | null;

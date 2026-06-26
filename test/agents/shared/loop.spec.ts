@@ -72,15 +72,18 @@ function fakeEventBus() {
   return { eventBus, published, publish, finished };
 }
 
-function fakeRequestContext(text = "hello") {
+function fakeRequestContext(
+  text = "hello",
+  opts: { contextId?: string; metadata?: Record<string, unknown> } = {}
+) {
   return {
-    contextId: "ctx-1",
+    contextId: opts.contextId ?? "ctx-1",
     userMessage: {
       kind: "message",
       messageId: "m1",
       role: "user",
       parts: [{ kind: "text", text }],
-      metadata: {}
+      metadata: opts.metadata ?? {}
     }
   } as never;
 }
@@ -178,6 +181,29 @@ describe("executeAgentTurn", () => {
     expect(bus.published[0].parts[0]).toMatchObject({ text: "Hello!" });
     // User turn then assistant turn persisted
     expect(session.messages.map((m) => m.role)).toEqual(["user", "assistant"]);
+  });
+
+  it("persists the incoming turn text verbatim (Gateway owns wrapping)", async () => {
+    const session = new FakeSession();
+    const model = new MockLanguageModelV3({
+      doGenerate: async () => okResult("ok") as never
+    });
+    const bus = fakeEventBus();
+
+    // In production this arrives already wrapped by the Gateway; the loop must
+    // store it untouched, not re-wrap it.
+    const wrapped =
+      '<turn from="Grace" id="U2" channel="general" ' +
+      'at="2026-06-25T14:30:00.000Z">register a bot</turn>';
+
+    await executeAgentTurn(
+      fakeRequestContext(wrapped),
+      bus.eventBus,
+      makeCfg(session, fakeModels(model))
+    );
+
+    const userTurn = session.messages.find((m) => m.role === "user");
+    expect(userTurn?.parts[0]).toMatchObject({ type: "text", text: wrapped });
   });
 
   it("falls back to the fallback model when the primary throws", async () => {
