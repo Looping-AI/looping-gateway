@@ -67,7 +67,15 @@ export async function archiveMessages(
       console.warn(`[recall] skipping message ${m.id}: missing createdAt`);
       return [];
     }
-    return [{ id: m.id, role: m.role, text, createdAt, turn: parseTurn(text) }];
+    return [
+      {
+        id: m.id,
+        role: m.role,
+        text,
+        createdAt,
+        turn: m.role === "user" ? parseTurn(text) : null
+      }
+    ];
   });
   if (entries.length === 0) return;
 
