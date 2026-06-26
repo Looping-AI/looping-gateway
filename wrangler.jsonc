@@ -50,14 +50,6 @@
       "migrations_dir": "migrations"
     }
   ],
-  // TTL cache for Slack channel id → human name (conversations.info), so per-turn
-  // provenance can render `#channel` without a Slack call on the hot path.
-  "kv_namespaces": [
-    {
-      "binding": "GATEWAY_CACHE",
-      "id": "fc76d2df89be49e4ad8f2362f8115d73"
-    }
-  ],
   "triggers": {
     // Reconciliation backstop: sync Slack reality → registry every 24h.
     "crons": ["0 0 * * *"]

@@ -2,8 +2,8 @@ import { describe, it, expect, afterEach, vi } from "vitest";
 import { stubSlack } from "./slack-stub";
 import {
   iterateSlackUsers,
+  iterateSlackChannels,
   fetchChannelMemberIds,
-  findChannelIdByName,
   getBotUserId,
   postReply
 } from "@/wrappers/slack";
@@ -83,8 +83,8 @@ describe("fetchChannelMemberIds", () => {
   });
 });
 
-describe("findChannelIdByName", () => {
-  it("resolves a channel id by name across pages", async () => {
+describe("iterateSlackChannels", () => {
+  it("follows the cursor and yields named channels across pages", async () => {
     stubSlack((method, body) => {
       if (method !== "conversations.list") return { ok: true };
       return body.get("cursor")
@@ -98,18 +98,23 @@ describe("findChannelIdByName", () => {
             response_metadata: { next_cursor: "c2" }
           };
     });
-    expect(await findChannelIdByName(slackEnv, "looping-org-admin")).toBe(
-      "C_TARGET"
-    );
+    const channels: { id: string; name: string }[] = [];
+    for await (const c of iterateSlackChannels(slackEnv)) channels.push(c);
+    expect(channels).toEqual([
+      { id: "C_OTHER", name: "general" },
+      { id: "C_TARGET", name: "looping-org-admin" }
+    ]);
   });
 
-  it("returns null when nothing matches", async () => {
+  it("skips channels without a name", async () => {
     stubSlack((method) =>
       method === "conversations.list"
-        ? { ok: true, channels: [] }
+        ? { ok: true, channels: [{ id: "C1", name: "ok" }, { id: "C2" }] }
         : { ok: true }
     );
-    expect(await findChannelIdByName(slackEnv, "nope")).toBeNull();
+    const ids: string[] = [];
+    for await (const c of iterateSlackChannels(slackEnv)) ids.push(c.id);
+    expect(ids).toEqual(["C1"]);
   });
 });
 

@@ -50,6 +50,13 @@
       "when": 1782059233189,
       "tag": "0006_phase7_agent_card_signing_pin",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "6",
+      "when": 1782467927669,
+      "tag": "0007_elite_barracuda",
+      "breakpoints": true
     }
   ]
 }

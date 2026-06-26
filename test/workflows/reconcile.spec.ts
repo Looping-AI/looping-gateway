@@ -3,12 +3,14 @@ import { env } from "cloudflare:workers";
 import { stubSlack } from "../wrappers/slack-stub";
 import {
   anchorTeamId,
+  syncChannels,
   resolveOrgChannel,
   syncUsers,
   syncAdminMemberships
 } from "@/workflows/reconcile";
 import { getDb } from "@/db/client";
 import { getSlackUser, upsertSlackUser } from "@/db/models/users";
+import { getSlackChannelName, upsertSlackChannel } from "@/db/models/channels";
 import { upsertWorkspace, ORG_WORKSPACE_ID } from "@/db/models/workspaces";
 import {
   addWorkspaceAdmin,
@@ -122,29 +124,55 @@ describe("anchorTeamId", () => {
 });
 
 // ---------------------------------------------------------------------------
-// resolveOrgChannel
+// syncChannels
+// ---------------------------------------------------------------------------
+
+describe("syncChannels", () => {
+  it("upserts every named channel from conversations.list", async () => {
+    stubSlack((method, body) => {
+      if (method !== "conversations.list") return { ok: true };
+      return body.get("cursor")
+        ? { ok: true, channels: [{ id: "C2", name: "random" }] }
+        : {
+            ok: true,
+            channels: [{ id: "C1", name: "general" }],
+            response_metadata: { next_cursor: "c2" }
+          };
+    });
+    const r = await syncChannels(env, db);
+    expect(r.channelsUpserted).toBe(2);
+    expect(await getSlackChannelName(db, "C1")).toBe("general");
+    expect(await getSlackChannelName(db, "C2")).toBe("random");
+  });
+
+  it("refreshes the name on a rename", async () => {
+    await upsertSlackChannel(db, { channelId: "C_re", name: "old" });
+    stubSlack((method) =>
+      method === "conversations.list"
+        ? { ok: true, channels: [{ id: "C_re", name: "new" }] }
+        : { ok: true }
+    );
+    await syncChannels(env, db);
+    expect(await getSlackChannelName(db, "C_re")).toBe("new");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// resolveOrgChannel (reads from the D1 channel registry)
 // ---------------------------------------------------------------------------
 
 describe("resolveOrgChannel", () => {
   it("returns null when looping-org-admin channel is absent", async () => {
-    stubSlack((method) => {
-      if (method === "conversations.list") return { ok: true, channels: [] };
-      return { ok: true };
-    });
-    const result = await resolveOrgChannel(env, db);
+    const result = await resolveOrgChannel(db);
     expect(result.channelId).toBeNull();
   });
 
-  it("returns the channel id when found", async () => {
-    stubSlack((method) => {
-      if (method === "conversations.list")
-        return {
-          ok: true,
-          channels: [{ id: "CORG", name: "looping-org-admin" }]
-        };
-      return { ok: true };
+  it("returns the channel id when present in D1", async () => {
+    await upsertSlackChannel(db, {
+      channelId: "CORG",
+      name: "looping-org-admin"
     });
-    const result = await resolveOrgChannel(env, db);
+    const result = await resolveOrgChannel(db);
     expect(result.channelId).toBe("CORG");
   });
 });

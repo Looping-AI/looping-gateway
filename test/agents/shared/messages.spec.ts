@@ -14,7 +14,7 @@ import {
 } from "@/agents/shared/messages";
 
 const ctx: TurnContext = {
-  author: { id: "slack:U2", label: "Grace" },
+  author: { id: "U2", label: "Grace" },
   channel: "#general",
   at: "2026-06-25T14:30:00.000Z"
 };
@@ -42,23 +42,23 @@ describe("userSessionMessage", () => {
 });
 
 describe("authorFromUser", () => {
-  it("derives a source-qualified id and uses displayName as the label", () => {
+  it("uses the raw slack user id and uses displayName as the label", () => {
     expect(authorFromUser({ slackUserId: "U7", displayName: "Ada" })).toEqual({
-      id: "slack:U7",
+      id: "U7",
       label: "Ada"
     });
   });
 
   it("falls back to the slack user id when displayName is null", () => {
     expect(authorFromUser({ slackUserId: "U9", displayName: null })).toEqual({
-      id: "slack:U9",
+      id: "U9",
       label: "U9"
     });
   });
 });
 
 describe("renderTurn", () => {
-  it("emits a closed <turn> element, dropping the slack: source from id", () => {
+  it("emits a closed <turn> element with the raw user id", () => {
     expect(renderTurn("hi", ctx)).toBe(
       '<turn from="Grace" id="U2" channel="#general" ' +
         'at="2026-06-25T14:30:00.000Z">hi</turn>'
@@ -67,7 +67,7 @@ describe("renderTurn", () => {
 
   it("escapes attribute values but leaves the body raw", () => {
     const out = renderTurn('use <Foo> & "bar"', {
-      author: { id: "slack:U1", label: 'A&B <"x">' },
+      author: { id: "U1", label: 'A&B <"x">' },
       channel: "#dev",
       at: "2026-06-25T00:00:00.000Z"
     });
@@ -88,7 +88,7 @@ describe("turnContextFromPayload", () => {
         messageTs: "1750861800.123456"
       })
     ).toEqual({
-      author: { id: "slack:U2", label: "Grace" },
+      author: { id: "U2", label: "Grace" },
       channel: "#general",
       at: new Date(1750861800123).toISOString()
     });
@@ -120,7 +120,7 @@ describe("parseTurn", () => {
 
   it("un-escapes attribute values", () => {
     const wrapped = renderTurn("hi", {
-      author: { id: "slack:U1", label: 'A&B <"x">' },
+      author: { id: "U1", label: 'A&B <"x">' },
       channel: "#dev",
       at: "2026-06-25T00:00:00.000Z"
     });
