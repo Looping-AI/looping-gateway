@@ -33,7 +33,7 @@ describe("agents", () => {
   it("resolves an agent for a mapped channel", async () => {
     // Insert a custom agent directly, then map it to a channel.
     await env.DB.prepare(
-      "INSERT OR IGNORE INTO agents (name, kind, enabled, a2a_endpoint) VALUES ('custom-x', 'custom', 1, 'https://example.com/custom-x')"
+      "INSERT OR IGNORE INTO agents (name, kind, enabled, a2a_endpoint, workspace_id) VALUES ('custom-x', 'custom', 1, 'https://example.com/custom-x', 0)"
     ).run();
     await env.DB.prepare(
       "INSERT INTO agent_channels (channel_id, agent_name) VALUES ('C_MAP', 'custom-x')"

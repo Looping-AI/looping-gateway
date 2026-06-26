@@ -110,7 +110,9 @@ export const agents = sqliteTable(
     cardSigningJku: text("card_signing_jku"),
     cardSigningKid: text("card_signing_kid"),
     enabled: integer("enabled", { mode: "boolean" }).notNull().default(true),
-    workspaceId: integer("workspace_id").references(() => workspaces.id),
+    workspaceId: integer("workspace_id")
+      .notNull()
+      .references(() => workspaces.id),
     createdAt: timestamp("created_at"),
     updatedAt: timestamp("updated_at")
   },

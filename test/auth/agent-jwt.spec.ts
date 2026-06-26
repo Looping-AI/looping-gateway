@@ -79,10 +79,10 @@ describe("signGatewayToken", () => {
       audience: AUD,
       issuer: PUBLIC_URL,
       identity: {
-        key: "custom:org:shared-endpoint",
+        key: "custom:0:shared-endpoint",
         name: "shared-endpoint",
         kind: "custom",
-        workspaceId: null
+        workspaceId: 0
       }
     });
     const { payload } = await jwtVerify(token, await publicKey(), {
@@ -93,7 +93,7 @@ describe("signGatewayToken", () => {
     const identity = payload[IDENTITY_CLAIM] as Record<string, unknown>;
     expect(identity).not.toHaveProperty("slackUserId");
     expect(identity).not.toHaveProperty("displayName");
-    expect(identity.workspaceId).toBeNull();
+    expect(identity.workspaceId).toBe(0);
   });
 
   it("rejects a token presented to the wrong audience", async () => {
@@ -101,10 +101,10 @@ describe("signGatewayToken", () => {
       audience: AUD,
       issuer: PUBLIC_URL,
       identity: {
-        key: "custom:org:demo",
+        key: "custom:0:demo",
         name: "demo",
         kind: "custom",
-        workspaceId: null
+        workspaceId: 0
       }
     });
     await expect(
@@ -121,10 +121,10 @@ describe("signGatewayToken", () => {
       audience: AUD,
       issuer: PUBLIC_URL,
       identity: {
-        key: "custom:org:demo",
+        key: "custom:0:demo",
         name: "demo",
         kind: "custom",
-        workspaceId: null
+        workspaceId: 0
       }
     });
     const [h, p, s] = token.split(".");
@@ -146,10 +146,10 @@ describe("signGatewayToken", () => {
       audience: AUD,
       issuer: PUBLIC_URL,
       identity: {
-        key: "custom:org:demo",
+        key: "custom:0:demo",
         name: "demo",
         kind: "custom",
-        workspaceId: null
+        workspaceId: 0
       }
     });
     // Advance past the 120s TTL.

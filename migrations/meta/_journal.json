@@ -57,6 +57,20 @@
       "when": 1782467927669,
       "tag": "0007_elite_barracuda",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "6",
+      "when": 1782640000000,
+      "tag": "0008_agents_workspace_id_notnull",
+      "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "6",
+      "when": 1782650000000,
+      "tag": "0009_agents_workspace_id_notnull",
+      "breakpoints": true
     }
   ]
 }

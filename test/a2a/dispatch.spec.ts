@@ -95,7 +95,7 @@ describe("dispatchToAgent (local Durable Object)", () => {
         name: "admin",
         kind: "admin",
         a2aEndpoint: "http://admin.local",
-        workspaceId: null
+        workspaceId: 0
       },
       {
         text: "ping",
@@ -120,7 +120,7 @@ describe("dispatchToAgent (local Durable Object)", () => {
         name: "onboarding",
         kind: "onboarding",
         a2aEndpoint: "http://onboarding.local",
-        workspaceId: null
+        workspaceId: 0
       },
       {
         text: "hi",

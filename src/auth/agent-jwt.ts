@@ -39,8 +39,8 @@ export interface RemoteIdentity {
   name: string;
   /** Dispatch kind of the caller (today always `"custom"` for remote agents). */
   kind: string;
-  /** Workspace the registered agent belongs to (org-wide custom agents may be null). */
-  workspaceId: number | null;
+  /** Workspace the registered agent belongs to. */
+  workspaceId: number;
 }
 
 interface SignGatewayTokenArgs {
