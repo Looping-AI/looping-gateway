@@ -1,6 +1,6 @@
 import type { SessionMessage } from "agents/experimental/memory/session";
 import { EMBED_MODEL_ID } from "@/config";
-import { sessionText } from "@/agents/shared/messages";
+import { parseTurn, sessionText } from "@/agents/shared/messages";
 
 /**
  * Episodic recall store. Isolates the embedding model + Vectorize I/O (mirrors
@@ -44,6 +44,10 @@ async function embed(env: Env, texts: string[]): Promise<number[][]> {
  * overlapping range is idempotent (an upsert overwrites the same vector). The
  * **full** text is stored in metadata even though the embedding truncates at the
  * model's token limit — recall returns the exact quote, not a truncation.
+ *
+ * User turns carry a Gateway-authored `<turn>` wrapper; we parse it back out
+ * (the single source of who/where/when) into structured `channel`/`author`/`at`
+ * metadata so future recall can filter a channel's history by speaker or origin.
  */
 export async function archiveMessages(
   env: Env,
@@ -63,7 +67,7 @@ export async function archiveMessages(
       console.warn(`[recall] skipping message ${m.id}: missing createdAt`);
       return [];
     }
-    return [{ id: m.id, role: m.role, text, createdAt }];
+    return [{ id: m.id, role: m.role, text, createdAt, turn: parseTurn(text) }];
   });
   if (entries.length === 0) return;
 
@@ -76,7 +80,16 @@ export async function archiveMessages(
       id: e.id,
       values: values[i],
       namespace,
-      metadata: { role: e.role, text: e.text, createdAt: e.createdAt }
+      metadata: {
+        role: e.role,
+        text: e.text,
+        createdAt: e.createdAt,
+        ...(e.turn && {
+          channel: e.turn.channel,
+          author: e.turn.id,
+          at: e.turn.at
+        })
+      }
     }))
   );
 }

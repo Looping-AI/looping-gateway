@@ -11,7 +11,6 @@ import {
   type SessionLike
 } from "@/agents/shared/session";
 import { executeAgentTurn } from "@/agents/shared/loop";
-import { authorFromUser } from "@/agents/shared/messages";
 import { callerContext } from "@/agents/shared/prompt";
 import { archiveMessages } from "@/agents/shared/recall";
 import { recallTools } from "@/agents/shared/recall-tool";
@@ -88,9 +87,6 @@ export class OnboardingAgentExecutor implements AgentExecutor {
         return {
           session,
           systemSuffix: callerContext(ctx),
-          // Single-actor DM, but attribute the turn for a uniform provenance
-          // contract with the multi-actor admin channel.
-          author: authorFromUser(ctx),
           tools: {
             ...buildOnboardingTools({
               db: getDb(this.env),

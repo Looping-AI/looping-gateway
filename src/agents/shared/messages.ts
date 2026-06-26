@@ -9,10 +9,9 @@ import type { SessionMessage } from "agents/experimental/memory/session";
  */
 
 /**
- * Who authored a stored user turn. Mirrors the wire-level
- * `RemoteProvenance.author` so local session history and remote dispatch share
- * one notion of an actor. Used to attribute "who said what" in multi-actor
- * channels (e.g. the admin channel) where a flat `role: "user"` is ambiguous.
+ * Who authored a turn — the WHO the Gateway renders into the `<turn>` wrapper.
+ * Used to attribute "who said what" in multi-actor channels (e.g. the admin
+ * channel) where a flat `role: "user"` is ambiguous.
  */
 export interface TurnAuthor {
   /** Stable, source-qualified actor key (e.g. `slack:U123`). */
@@ -64,14 +63,15 @@ export function slackTsToIso(ts: string): string {
 }
 
 /**
- * Project a {@link TurnContext} into the authoritative `<turn>` wrapper persisted
- * as the user turn's text, so who/where/when survive in history (and recall
- * embeddings) for multi-actor channels. The element and its attributes are
- * gateway-applied and authoritative; the body is the user's raw words, kept
- * unescaped so code/markdown read naturally for the model. Attribution is
- * advisory — the real authorization boundary lives in each tool, not the prompt —
- * so a body containing a lookalike `</turn>` is cosmetic, not a spoof. The `slack:`
- * source prefix is dropped from the `id` attribute since every turn is from Slack.
+ * Project a {@link TurnContext} into the authoritative `<turn>` wrapper the
+ * Gateway inlines into the outbound message text — the single source of
+ * who/where/when read by the model, by remote agents, and (via {@link parseTurn})
+ * by the recall archiver. The element and its attributes are gateway-applied and
+ * authoritative; the body is the user's raw words, kept unescaped so code/markdown
+ * read naturally for the model. Attribution is advisory — the real authorization
+ * boundary lives in each tool, not the prompt — so a body containing a lookalike
+ * `</turn>` is cosmetic, not a spoof. The `slack:` source prefix is dropped from
+ * the `id` attribute since every turn is from Slack.
  */
 export function renderTurn(text: string, ctx: TurnContext): string {
   const id = ctx.author.id.replace(/^slack:/, "");
@@ -84,15 +84,69 @@ export function renderTurn(text: string, ctx: TurnContext): string {
   );
 }
 
-export function userSessionMessage(
-  text: string,
-  ctx?: TurnContext
-): SessionMessage {
+/** Build the {@link TurnContext} the Gateway wraps each outbound turn with. */
+export function turnContextFromPayload(p: {
+  user: { slackUserId: string; displayName: string | null };
+  channelId: string;
+  channelName: string | null;
+  messageTs: string;
+}): TurnContext {
+  return {
+    author: authorFromUser(p.user),
+    channel: p.channelName ? `#${p.channelName}` : p.channelId,
+    at: slackTsToIso(p.messageTs)
+  };
+}
+
+const ATTR_UNESCAPES: Record<string, string> = {
+  amp: "&",
+  lt: "<",
+  gt: ">",
+  quot: '"'
+};
+
+/** Inverse of {@link escAttr} — single-pass so escaped `&amp;` round-trips. */
+function unescAttr(value: string): string {
+  return value.replace(/&(amp|lt|gt|quot);/g, (_, e) => ATTR_UNESCAPES[e]);
+}
+
+/** The fields recovered from a rendered `<turn>` wrapper. */
+export interface ParsedTurn {
+  from: string;
+  /** Bare Slack user id (no `slack:` prefix), as rendered. */
+  id: string;
+  channel: string;
+  at: string;
+  /** The raw inner words. */
+  body: string;
+}
+
+const TURN_RE =
+  /^<turn from="([^"]*)" id="([^"]*)" channel="([^"]*)" at="([^"]*)">([\s\S]*)<\/turn>$/;
+
+/**
+ * Inverse of {@link renderTurn}: recover the structured provenance from a
+ * Gateway-authored turn. Returns null for any text that isn't a `<turn>` wrapper
+ * (assistant replies, plain text), so callers can treat the fields as optional.
+ */
+export function parseTurn(text: string): ParsedTurn | null {
+  const m = TURN_RE.exec(text);
+  if (!m) return null;
+  return {
+    from: unescAttr(m[1]),
+    id: unescAttr(m[2]),
+    channel: unescAttr(m[3]),
+    at: unescAttr(m[4]),
+    body: m[5]
+  };
+}
+
+export function userSessionMessage(text: string): SessionMessage {
   return {
     id: crypto.randomUUID(),
     role: "user",
     createdAt: new Date(),
-    parts: [{ type: "text", text: ctx ? renderTurn(text, ctx) : text }]
+    parts: [{ type: "text", text }]
   };
 }
 

@@ -3,6 +3,7 @@ import { env } from "cloudflare:workers";
 import type { Message } from "@a2a-js/sdk";
 import { importJWK, jwtVerify } from "jose";
 import { _resetIssuerCacheForTest, dispatchToAgent } from "@/agents/dispatch";
+import { slackTsToIso } from "@/agents/shared/messages";
 import type { UserAuthContext } from "@/auth";
 import { getPublicJwks, IDENTITY_CLAIM } from "@/auth/agent-jwt";
 import { buildAgentCard } from "@/a2a/card";
@@ -189,23 +190,25 @@ describe("dispatchToAgent (local Durable Object)", () => {
     expect(posts[1].message.contextId).toContain(
       encodeURIComponent("custom:7:beta")
     );
+    // No structured provenance on the wire — who/where/when is inlined into the
+    // turn text by the Gateway. Metadata carries only routing extras.
     expect(posts[0].message.metadata).toMatchObject({
       agentKind: "custom",
-      workspaceId: 7,
-      provenance: {
-        source: "slack",
-        author: { id: "slack:U1", slackUserId: "U1", displayName: null },
-        channelId: "C_SHARED",
-        channelName: "general",
-        threadTs: "171813.100",
-        messageTs: "171813.100"
-      }
+      workspaceId: 7
     });
-    expect(posts[1].message.metadata).toMatchObject({
-      provenance: {
-        author: { id: "slack:U2", slackUserId: "U2", displayName: "Grace" },
-        messageTs: "171813.200"
-      }
+    expect(posts[0].message.metadata).not.toHaveProperty("provenance");
+    expect(posts[0].message.parts[0]).toMatchObject({
+      kind: "text",
+      text:
+        `<turn from="U1" id="U1" channel="#general" ` +
+        `at="${slackTsToIso("171813.100")}">first</turn>`
+    });
+    // Beta's caller has a display name and no resolved channel → id fallback.
+    expect(posts[1].message.parts[0]).toMatchObject({
+      kind: "text",
+      text:
+        `<turn from="Grace" id="U2" channel="C_SHARED" ` +
+        `at="${slackTsToIso("171813.200")}">second</turn>`
     });
 
     const tokenA = posts[0].authorization?.split(" ")[1] ?? "";

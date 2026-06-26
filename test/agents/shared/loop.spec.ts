@@ -9,7 +9,6 @@ import {
   executeAgentTurn,
   type AgentTurnConfig
 } from "@/agents/shared/loop";
-import { slackTsToIso } from "@/agents/shared/messages";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -184,68 +183,27 @@ describe("executeAgentTurn", () => {
     expect(session.messages.map((m) => m.role)).toEqual(["user", "assistant"]);
   });
 
-  it("wraps the persisted user turn with who/where/when from prepare + metadata", async () => {
+  it("persists the incoming turn text verbatim (Gateway owns wrapping)", async () => {
     const session = new FakeSession();
     const model = new MockLanguageModelV3({
       doGenerate: async () => okResult("ok") as never
     });
     const bus = fakeEventBus();
 
+    // In production this arrives already wrapped by the Gateway; the loop must
+    // store it untouched, not re-wrap it.
+    const wrapped =
+      '<turn from="Grace" id="U2" channel="#general" ' +
+      'at="2026-06-25T14:30:00.000Z">register a bot</turn>';
+
     await executeAgentTurn(
-      fakeRequestContext("register a bot", {
-        contextId: "C42:1700000000.000100",
-        metadata: { messageTs: "1700000000.000100", channelName: "general" }
-      }),
+      fakeRequestContext(wrapped),
       bus.eventBus,
-      makeCfg(session, fakeModels(model), {
-        prepare: async () => ({
-          session,
-          systemSuffix: "",
-          tools: {},
-          author: { id: "slack:U2", label: "Grace" }
-        })
-      })
+      makeCfg(session, fakeModels(model))
     );
 
     const userTurn = session.messages.find((m) => m.role === "user");
-    expect(userTurn?.parts[0]).toMatchObject({
-      type: "text",
-      text:
-        `<turn from="Grace" id="U2" channel="#general" ` +
-        `at="${slackTsToIso("1700000000.000100")}">register a bot</turn>`
-    });
-  });
-
-  it("falls back to the channel id from the contextId when no channel name", async () => {
-    const session = new FakeSession();
-    const model = new MockLanguageModelV3({
-      doGenerate: async () => okResult("ok") as never
-    });
-    const bus = fakeEventBus();
-
-    await executeAgentTurn(
-      fakeRequestContext("hi there", {
-        contextId: "C99:1700000000.000200",
-        metadata: { messageTs: "1700000000.000200", channelName: null }
-      }),
-      bus.eventBus,
-      makeCfg(session, fakeModels(model), {
-        prepare: async () => ({
-          session,
-          systemSuffix: "",
-          tools: {},
-          author: { id: "slack:U7", label: "Ada" }
-        })
-      })
-    );
-
-    const userTurn = session.messages.find((m) => m.role === "user");
-    expect(userTurn?.parts[0]).toMatchObject({
-      type: "text",
-      text:
-        `<turn from="Ada" id="U7" channel="C99" ` +
-        `at="${slackTsToIso("1700000000.000200")}">hi there</turn>`
-    });
+    expect(userTurn?.parts[0]).toMatchObject({ type: "text", text: wrapped });
   });
 
   it("falls back to the fallback model when the primary throws", async () => {

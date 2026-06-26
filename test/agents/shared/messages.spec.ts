@@ -5,6 +5,8 @@ import {
   assistantSessionMessage,
   authorFromUser,
   renderTurn,
+  parseTurn,
+  turnContextFromPayload,
   slackTsToIso,
   sessionText,
   toModelMessages,
@@ -18,7 +20,8 @@ const ctx: TurnContext = {
 };
 
 describe("userSessionMessage", () => {
-  it("produces a user-role message with the given text", () => {
+  it("produces a user-role message storing the text verbatim", () => {
+    // The Gateway already applied any <turn> wrapper; the loop stores as-is.
     const m = userSessionMessage("hello");
     expect(m.role).toBe("user");
     expect(m.parts).toHaveLength(1);
@@ -35,19 +38,6 @@ describe("userSessionMessage", () => {
     const a = userSessionMessage("x");
     const b = userSessionMessage("x");
     expect(a.id).not.toBe(b.id);
-  });
-
-  it("wraps the text in a <turn> element when a context is given", () => {
-    const m = userSessionMessage("register the bot", ctx);
-    expect(sessionText(m)).toBe(
-      '<turn from="Grace" id="U2" channel="#general" ' +
-        'at="2026-06-25T14:30:00.000Z">register the bot</turn>'
-    );
-  });
-
-  it("leaves text unwrapped when no context is given (single-shot)", () => {
-    const m = userSessionMessage("just me");
-    expect(sessionText(m)).toBe("just me");
   });
 });
 
@@ -85,6 +75,60 @@ describe("renderTurn", () => {
       '<turn from="A&amp;B &lt;&quot;x&quot;&gt;" id="U1" channel="#dev" ' +
         'at="2026-06-25T00:00:00.000Z">use <Foo> & "bar"</turn>'
     );
+  });
+});
+
+describe("turnContextFromPayload", () => {
+  it("builds author + #channel + at from a dispatch payload", () => {
+    expect(
+      turnContextFromPayload({
+        user: { slackUserId: "U2", displayName: "Grace" },
+        channelId: "C1",
+        channelName: "general",
+        messageTs: "1750861800.123456"
+      })
+    ).toEqual({
+      author: { id: "slack:U2", label: "Grace" },
+      channel: "#general",
+      at: new Date(1750861800123).toISOString()
+    });
+  });
+
+  it("falls back to the channel id when no resolved name (DM)", () => {
+    expect(
+      turnContextFromPayload({
+        user: { slackUserId: "U2", displayName: null },
+        channelId: "D9",
+        channelName: null,
+        messageTs: "1750861800.000000"
+      }).channel
+    ).toBe("D9");
+  });
+});
+
+describe("parseTurn", () => {
+  it("round-trips renderTurn, recovering structured fields + raw body", () => {
+    const parsed = parseTurn(renderTurn('use <Foo> & "bar"', ctx));
+    expect(parsed).toEqual({
+      from: "Grace",
+      id: "U2",
+      channel: "#general",
+      at: "2026-06-25T14:30:00.000Z",
+      body: 'use <Foo> & "bar"'
+    });
+  });
+
+  it("un-escapes attribute values", () => {
+    const wrapped = renderTurn("hi", {
+      author: { id: "slack:U1", label: 'A&B <"x">' },
+      channel: "#dev",
+      at: "2026-06-25T00:00:00.000Z"
+    });
+    expect(parseTurn(wrapped)?.from).toBe('A&B <"x">');
+  });
+
+  it("returns null for plain / assistant text (no wrapper)", () => {
+    expect(parseTurn("just a reply")).toBeNull();
   });
 });
 

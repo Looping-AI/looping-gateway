@@ -80,6 +80,28 @@ describe("archiveMessages", () => {
     expect(vectors[0].values.length).toBeGreaterThan(0);
   });
 
+  it("enriches metadata with channel/author/at parsed from a wrapped turn", async () => {
+    const { env, upsert } = fakeEnv();
+    const wrapped =
+      '<turn from="Grace" id="U2" channel="#general" ' +
+      'at="2026-06-25T14:30:00.000Z">deploy the bot</turn>';
+    await archiveMessages(env, "admin:0", [msg("w", "user", wrapped)]);
+
+    const vectors = upsert.mock.calls[0][0] as Array<{
+      metadata: Record<string, unknown>;
+    }>;
+    // The embedded text stays the full wrapper; the structured fields are
+    // extracted for future channel/author-filtered recall.
+    expect(vectors[0].metadata).toEqual({
+      role: "user",
+      text: wrapped,
+      createdAt: "2025-01-15T10:00:00.000Z",
+      channel: "#general",
+      author: "U2",
+      at: "2026-06-25T14:30:00.000Z"
+    });
+  });
+
   it("no-ops on an empty / all-skipped batch (no AI or Vectorize calls)", async () => {
     const { env, upsert, run } = fakeEnv();
     await archiveMessages(env, "admin:0", [toolOnly, msg("x", "user", "   ")]);

@@ -5,14 +5,11 @@ import { generateText, stepCountIs } from "ai";
 import type { createModelPair } from "@/agents/model";
 import { textOf } from "@/a2a/parts";
 import type { AgentTurnMetadata } from "@/agents/dispatch";
-import { parseContextId } from "@/agents/dispatch";
 import type { SessionLike } from "./session";
 import {
   assistantSessionMessage,
-  slackTsToIso,
   toModelMessages,
-  userSessionMessage,
-  type TurnAuthor
+  userSessionMessage
 } from "./messages";
 
 const MAX_STEPS = 8;
@@ -38,11 +35,6 @@ export interface PreparedTurn {
   systemSuffix: string;
   /** Agent-specific tools merged over the session's own `set_context` tool. */
   tools: ToolSet;
-  /**
-   * Author of this user turn, persisted into history so multi-actor channels
-   * keep "who said what". Omit for single-actor sessions (e.g. onboarding DMs).
-   */
-  author?: TurnAuthor;
 }
 
 export interface AgentTurnConfig {
@@ -96,25 +88,12 @@ export async function executeAgentTurn(
     const {
       session,
       systemSuffix,
-      tools: extraTools,
-      author
+      tools: extraTools
     } = await cfg.prepare(text, metadata);
 
-    // Project who/where/when into the persisted turn. `channelName` falls back
-    // to the channel id parsed from the contextId; the guard keeps callers
-    // without turn metadata (e.g. unit tests) on the plain-text path.
-    const turnContext =
-      author && metadata.messageTs
-        ? {
-            author,
-            channel: metadata.channelName
-              ? `#${metadata.channelName}`
-              : parseContextId(requestContext.contextId).channelId,
-            at: slackTsToIso(metadata.messageTs)
-          }
-        : undefined;
-
-    await session.appendMessage(userSessionMessage(text, turnContext));
+    // `text` already carries its `<turn>` provenance wrapper (applied by the
+    // Gateway in dispatch); persist it verbatim.
+    await session.appendMessage(userSessionMessage(text));
     const history = await session.getHistory();
     const system = (await session.refreshSystemPrompt()) + systemSuffix;
     const tools = { ...(await session.tools()), ...extraTools };

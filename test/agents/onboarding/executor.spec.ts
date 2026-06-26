@@ -3,7 +3,6 @@ import { env } from "cloudflare:workers";
 import { MockLanguageModelV3 } from "ai/test";
 import type { SessionMessage } from "agents/experimental/memory/session";
 import { OnboardingAgentExecutor } from "@/agents/onboarding/executor";
-import { slackTsToIso } from "@/agents/shared/messages";
 import type { SessionHost, SessionLike } from "@/agents/shared/session";
 import type { UserAuthContext } from "@/auth";
 
@@ -89,9 +88,7 @@ function makeRequest() {
       parts: [{ kind: "text", text: "how does Looping work?" }],
       metadata: {
         user: caller,
-        agentKind: "onboarding",
-        messageTs: "1700000000.000300",
-        channelName: null
+        agentKind: "onboarding"
       }
     }
   };
@@ -140,30 +137,6 @@ describe("OnboardingAgentExecutor", () => {
     );
     // user turn + assistant turn persisted
     expect(session.messages.map((m) => m.role)).toEqual(["user", "assistant"]);
-  });
-
-  it("attributes the user turn with who/where/when (uniform with admin)", async () => {
-    const session = new FakeSession();
-    const model = new MockLanguageModelV3({
-      doGenerate: async () => okResult("ok") as never
-    });
-    const exec = new OnboardingAgentExecutor(sqlHost, env, {
-      model,
-      createSession: () => session
-    });
-
-    const t = makeRequest();
-    await exec.execute(t.requestContext, t.eventBus);
-
-    const userTurn = session.messages.find((m) => m.role === "user");
-    // Single-actor DM: author present; channel falls back to the contextId's
-    // channel id since a DM has no resolved name.
-    expect(userTurn?.parts[0]).toMatchObject({
-      type: "text",
-      text:
-        `<turn from="Newbie" id="U_onb" channel="D_ONB" ` +
-        `at="${slackTsToIso("1700000000.000300")}">how does Looping work?</turn>`
-    });
   });
 
   it("publishes a friendly error and still finishes when the loop throws", async () => {
