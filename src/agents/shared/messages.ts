@@ -28,7 +28,7 @@ export interface TurnAuthor {
 export interface TurnContext {
   /** WHO authored the turn. */
   author: TurnAuthor;
-  /** WHERE — resolved channel name (`#general`), or the channel id as a fallback. Never null. */
+  /** WHERE — resolved channel name (e.g. `general`), or the channel id as a fallback. Never null. */
   channel: string;
   /** WHEN — the turn instant as ISO-8601 (see {@link slackTsToIso}). */
   at: string;
@@ -97,7 +97,7 @@ export function turnContextFromPayload(p: {
 }): TurnContext {
   return {
     author: authorFromUser(p.user),
-    channel: p.channelName ? `#${p.channelName}` : p.channelId,
+    channel: p.channelName ?? p.channelId,
     at: slackTsToIso(p.messageTs)
   };
 }

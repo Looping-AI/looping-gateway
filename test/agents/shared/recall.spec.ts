@@ -83,7 +83,7 @@ describe("archiveMessages", () => {
   it("enriches metadata with channel/author/at parsed from a wrapped turn", async () => {
     const { env, upsert } = fakeEnv();
     const wrapped =
-      '<turn from="Grace" id="U2" channel="#general" ' +
+      '<turn from="Grace" id="U2" channel="general" ' +
       'at="2026-06-25T14:30:00.000Z">deploy the bot</turn>';
     await archiveMessages(env, "admin:0", [msg("w", "user", wrapped)]);
 
@@ -96,7 +96,7 @@ describe("archiveMessages", () => {
       role: "user",
       text: wrapped,
       createdAt: "2025-01-15T10:00:00.000Z",
-      channel: "#general",
+      channel: "general",
       author: "U2",
       at: "2026-06-25T14:30:00.000Z"
     });

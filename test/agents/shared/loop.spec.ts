@@ -193,7 +193,7 @@ describe("executeAgentTurn", () => {
     // In production this arrives already wrapped by the Gateway; the loop must
     // store it untouched, not re-wrap it.
     const wrapped =
-      '<turn from="Grace" id="U2" channel="#general" ' +
+      '<turn from="Grace" id="U2" channel="general" ' +
       'at="2026-06-25T14:30:00.000Z">register a bot</turn>';
 
     await executeAgentTurn(

@@ -200,7 +200,7 @@ describe("dispatchToAgent (local Durable Object)", () => {
     expect(posts[0].message.parts[0]).toMatchObject({
       kind: "text",
       text:
-        `<turn from="U1" id="U1" channel="#general" ` +
+        `<turn from="U1" id="U1" channel="general" ` +
         `at="${slackTsToIso("171813.100")}">first</turn>`
     });
     // Beta's caller has a display name and no resolved channel → id fallback.
