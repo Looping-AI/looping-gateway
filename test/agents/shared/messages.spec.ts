@@ -147,6 +147,35 @@ describe("parseTurn", () => {
   it("returns null for plain / assistant text (no wrapper)", () => {
     expect(parseTurn("just a reply")).toBeNull();
   });
+
+  it("parses a turn that has an extra unknown attribute (forward compat)", () => {
+    const future =
+      '<turn from="Grace" id="U2" channel="general" workspace="W123" at="2026-06-25T14:30:00.000Z">hello</turn>';
+    expect(parseTurn(future)).toEqual({
+      from: "Grace",
+      id: "U2",
+      channel: "general",
+      at: "2026-06-25T14:30:00.000Z",
+      body: "hello"
+    });
+  });
+
+  it("parses a turn whose attributes are in a different order", () => {
+    const reordered =
+      '<turn at="2026-06-25T14:30:00.000Z" channel="general" from="Grace" id="U2">hello</turn>';
+    expect(parseTurn(reordered)).toEqual({
+      from: "Grace",
+      id: "U2",
+      channel: "general",
+      at: "2026-06-25T14:30:00.000Z",
+      body: "hello"
+    });
+  });
+
+  it("returns null when a required attribute is missing", () => {
+    const missing = '<turn from="Grace" id="U2" channel="general">no-at</turn>';
+    expect(parseTurn(missing)).toBeNull();
+  });
 });
 
 describe("slackTsToIso", () => {

@@ -125,8 +125,16 @@ export interface ParsedTurn {
   body: string;
 }
 
-const TURN_RE =
-  /^<turn from="([^"]*)" id="([^"]*)" channel="([^"]*)" at="([^"]*)">([\s\S]*)<\/turn>$/;
+const TURN_TAG_RE = /^<turn\b([^>]*)>([\s\S]*)<\/turn>$/;
+const ATTR_RE = /(\w+)="([^"]*)"/g;
+
+function parseAttrs(raw: string): Record<string, string> {
+  const out: Record<string, string> = {};
+  let m: RegExpExecArray | null;
+  ATTR_RE.lastIndex = 0;
+  while ((m = ATTR_RE.exec(raw)) !== null) out[m[1]] = m[2];
+  return out;
+}
 
 /**
  * Inverse of {@link renderTurn}: recover the structured provenance from a
@@ -134,14 +142,16 @@ const TURN_RE =
  * (assistant replies, plain text), so callers can treat the fields as optional.
  */
 export function parseTurn(text: string): ParsedTurn | null {
-  const m = TURN_RE.exec(text);
+  const m = TURN_TAG_RE.exec(text);
   if (!m) return null;
+  const attrs = parseAttrs(m[1]);
+  if (!attrs.from || !attrs.id || !attrs.channel || !attrs.at) return null;
   return {
-    from: unescAttr(m[1]),
-    id: unescAttr(m[2]),
-    channel: unescAttr(m[3]),
-    at: unescAttr(m[4]),
-    body: m[5]
+    from: unescAttr(attrs.from),
+    id: unescAttr(attrs.id),
+    channel: unescAttr(attrs.channel),
+    at: unescAttr(attrs.at),
+    body: m[2]
   };
 }
 
