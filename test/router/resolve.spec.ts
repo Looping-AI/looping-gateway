@@ -192,3 +192,54 @@ describe("resolveTarget — name mentions (channel guard)", () => {
     expect(t.userMessage).toMatch(/Multiple agents/);
   });
 });
+
+describe("resolveTarget — display name mentions", () => {
+  beforeEach(async () => {
+    // Give 'weather' a display name that doesn't contain its machine name as a
+    // whole token, so the two-pass logic is exercised cleanly.
+    await env.DB.prepare(
+      "UPDATE agents SET display_name = 'Forecast Service' WHERE name = 'weather'"
+    ).run();
+  });
+
+  it("routes via display name when the agent is allowed in the channel", async () => {
+    const t = await resolveTarget(db, {
+      channelId: "C_WEATHER",
+      text: "Forecast Service what is the forecast?"
+    });
+    expect(t.kind).toBe("agent");
+    if (t.kind !== "agent") return;
+    expect(t.agent.name).toBe("weather");
+  });
+
+  it("display name of an agent not allowed in the channel does not route", async () => {
+    const t = await resolveTarget(db, {
+      channelId: "C_RANDOM",
+      text: "Forecast Service help"
+    });
+    expect(t.kind).toBe("none");
+    if (t.kind !== "none") return;
+    expect(t.userMessage).toBeUndefined();
+  });
+
+  it("machine name takes priority over display name", async () => {
+    const t = await resolveTarget(db, {
+      channelId: "C_WEATHER",
+      text: "weather help"
+    });
+    expect(t.kind).toBe("agent");
+    if (t.kind !== "agent") return;
+    expect(t.agent.name).toBe("weather");
+  });
+
+  it("collision: same display name → none when no machine name appears", async () => {
+    await env.DB.prepare(
+      "UPDATE agents SET display_name = 'Forecast Service' WHERE name = 'sales'"
+    ).run();
+    const t = await resolveTarget(db, {
+      channelId: "C_MULTI",
+      text: "Forecast Service help"
+    });
+    expect(t.kind).toBe("none");
+  });
+});

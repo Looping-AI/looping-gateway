@@ -48,11 +48,13 @@ export function isDmChannel(channelId: string): boolean {
  *   - DMs            → `onboarding` built-in
  *   - Any channel    → agents with an agent_channels row for that channel
  *
- * A whole-token agent name mention selects which agent; if the named agent is
- * not permitted in the channel, `none` is returned with a user-visible
- * `userMessage`.
- * Without an agent name mention, defaults to the single configured agent (or
- * prompts the user to specify when multiple agents are available).
+ * Matching is two-pass:
+ *   1. Machine name — whole-token, case-insensitive, unambiguous.
+ *   2. Display name — same token rules; if two channel agents share a display
+ *      name, the collision is unresolvable and routing falls through to context
+ *      defaults (Pass 1 already handles any machine-name disambiguation).
+ * Without any mention, defaults to the single configured agent (or prompts the
+ * user to specify when multiple agents are available).
  */
 export async function resolveTarget(
   db: Db,
@@ -60,51 +62,72 @@ export async function resolveTarget(
 ): Promise<Target> {
   const text = input.text;
   const channelEntries = await getAgentsForChannel(db, input.channelId);
-  const channelEntriesByName = new Map<string, AgentChannelEntry>(
-    channelEntries.map((entry) => [entry.agent.name, entry])
-  );
-
-  const mentionCandidates = channelEntries.map((entry) => entry.agent.name);
   const ws = await getWorkspaceByAdminChannel(db, input.channelId);
   const isDm = isDmChannel(input.channelId);
 
+  // Build all scoped candidate entries: channel-allowed agents + context-valid built-ins.
   let admin: AgentRow | null = null;
+  let onboarding: AgentRow | null = null;
+  const allEntries: AgentChannelEntry[] = [...channelEntries];
+
   if (ws) {
     admin = await getAgent(db, "admin");
-    if (admin?.enabled) mentionCandidates.push(admin.name);
+    if (admin?.enabled) allEntries.push({ agent: admin, workspaceId: ws.id });
   }
-
-  let onboarding: AgentRow | null = null;
   if (isDm) {
     onboarding = await getAgent(db, "onboarding");
-    if (onboarding?.enabled) mentionCandidates.push(onboarding.name);
+    if (onboarding?.enabled)
+      allEntries.push({ agent: onboarding, workspaceId: null });
   }
 
-  const mention = findAgentNameMention(text, mentionCandidates);
+  const allEntriesByName = new Map<string, AgentChannelEntry>(
+    allEntries.map((e) => [e.agent.name, e])
+  );
 
+  // Pass 1: machine name mention — unique, no ambiguity possible.
+  const mention = findAgentNameMention(
+    text,
+    allEntries.map((e) => e.agent.name)
+  );
   if (mention) {
-    const channelEntry = channelEntriesByName.get(mention.name);
-    if (channelEntry) {
+    const entry = allEntriesByName.get(mention.name);
+    if (entry)
       return {
         kind: "agent",
-        agent: channelEntry.agent,
-        workspaceId: channelEntry.workspaceId,
+        agent: entry.agent,
+        workspaceId: entry.workspaceId,
         text
       };
-    }
-
-    if (mention.name === "admin" && ws && admin?.enabled) {
-      return { kind: "agent", agent: admin, workspaceId: ws.id, text };
-    }
-
-    if (mention.name === "onboarding" && isDm && onboarding?.enabled) {
-      return { kind: "agent", agent: onboarding, workspaceId: null, text };
-    }
-
     return { kind: "none", reason: "mentioned agent unavailable" };
   }
 
-  // No agent name mention — use context defaults.
+  // Pass 2: display name mention — nullable, not guaranteed unique.
+  const displayNameToEntries = new Map<string, AgentChannelEntry[]>();
+  for (const entry of allEntries) {
+    if (!entry.agent.displayName) continue;
+    const key = entry.agent.displayName.toLowerCase();
+    const existing = displayNameToEntries.get(key);
+    if (existing) existing.push(entry);
+    else displayNameToEntries.set(key, [entry]);
+  }
+
+  if (displayNameToEntries.size > 0) {
+    const displayMention = findAgentNameMention(text, [
+      ...displayNameToEntries.keys()
+    ]);
+    if (displayMention) {
+      const candidates = displayNameToEntries.get(displayMention.name)!;
+      if (candidates.length === 1) {
+        const { agent, workspaceId } = candidates[0];
+        return { kind: "agent", agent, workspaceId, text };
+      }
+      // Collision — Pass 1 already handles any machine-name disambiguation,
+      // so treat multiple display-name matches as unresolvable.
+      return { kind: "none", reason: "ambiguous display name" };
+    }
+  }
+
+  // No mention matched — use context defaults.
 
   // Admin channel → admin built-in.
   if (ws) {
