@@ -1,11 +1,13 @@
 import { WorkflowEntrypoint } from "cloudflare:workers";
 import type { WorkflowEvent, WorkflowStep } from "cloudflare:workers";
 import type { ReactionWorkflowParams } from "@/slack/types";
-import { addReaction, removeReaction } from "@/wrappers/slack";
+import { removeReaction } from "@/wrappers/slack";
 
 /**
  * Emoji reaction used to signal "the agent is working on this message". Slack's
- * animated hourglass; configurable here in one place.
+ * animated hourglass; configurable here in one place. The reaction is *added*
+ * inline by the webhook handler (so it shows immediately); this workflow only
+ * owns its removal.
  */
 export const PENDING_REACTION = "hourglass_flowing_sand";
 
@@ -29,10 +31,12 @@ export function reactionInstanceId(eventId: string): string {
 }
 
 /**
- * Parallel, durable owner of the ⏳ reaction lifecycle for a single Slack
- * trigger message. Runs alongside (never wraps) the MessageWorkflow:
+ * Parallel, durable owner of the ⏳ reaction *removal* for a single Slack
+ * trigger message. The webhook handler adds the reaction inline (so it appears
+ * immediately, without waiting for a workflow cold start); this workflow runs
+ * alongside (never wraps) the MessageWorkflow and only removes it:
  *
- *   add-reaction → waitForEvent(collect | timeout) → remove-reaction
+ *   waitForEvent(collect | timeout) → remove-reaction
  *
  * The reply path of the MessageWorkflow sends the `reply_posted` event to collect
  * the reaction promptly. If that signal never arrives (hard crash, exhausted
@@ -46,10 +50,6 @@ export class ReactionWorkflow extends WorkflowEntrypoint<
   async run(event: WorkflowEvent<ReactionWorkflowParams>, step: WorkflowStep) {
     const p = event.payload;
     try {
-      await step.do("add-reaction", () =>
-        addReaction(this.env, p.channelId, p.ts, PENDING_REACTION)
-      );
-
       // Wait for the reply to be posted, or fall through on timeout. waitForEvent
       // throws on timeout, so the catch is the backstop that still removes below.
       try {

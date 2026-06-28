@@ -8,7 +8,8 @@ import { isRecord, str } from "@/util/json";
 import { pickDisplayName } from "@/util/display-name";
 import { getDb } from "@/db/client";
 import { getSlackTeamId, setPublicUrl } from "@/db/models/workspace-configs";
-import { reactionInstanceId } from "@/workflows/reaction";
+import { PENDING_REACTION, reactionInstanceId } from "@/workflows/reaction";
+import { addReaction } from "@/wrappers/slack";
 import type {
   MessageWorkflowParams,
   LifecycleWorkflowParams,
@@ -192,11 +193,31 @@ async function triggerWorkflow(
 }
 
 /**
- * Kick off the parallel ReactionWorkflow that adds the ⏳ reaction to the trigger
- * message and removes it once a reply is posted (or on its timeout backstop).
- * Best-effort and cosmetic: any failure here is logged but never affects the
- * Slack ack — the MessageWorkflow remains authoritative. Duplicate Slack
- * deliveries are deduped by the deterministic instance id.
+ * Add the ⏳ pending reaction to the trigger message inline, so it appears
+ * immediately rather than after a workflow cold start. Best-effort and cosmetic:
+ * any failure here is logged but never affects the Slack ack. The matching
+ * ReactionWorkflow is responsible for removing it.
+ */
+async function addPendingReaction(
+  env: Pick<Env, "SLACK_BOT_TOKEN">,
+  params: MessageWorkflowParams
+): Promise<void> {
+  try {
+    await addReaction(env, params.channelId, params.ts, PENDING_REACTION);
+  } catch (err) {
+    console.error("[gateway] failed to add pending reaction", {
+      eventId: params.eventId,
+      err: String(err)
+    });
+  }
+}
+
+/**
+ * Kick off the parallel ReactionWorkflow that removes the ⏳ reaction once a
+ * reply is posted (or on its timeout backstop). Best-effort and cosmetic: any
+ * failure here is logged but never affects the Slack ack — the MessageWorkflow
+ * remains authoritative. Duplicate Slack deliveries are deduped by the
+ * deterministic instance id.
  */
 async function triggerReactionWorkflow(
   workflow: Workflow,
@@ -329,6 +350,7 @@ export async function handleSlackEvent(
     Env,
     | "DB"
     | "SLACK_SIGNING_SECRET"
+    | "SLACK_BOT_TOKEN"
     | "MESSAGE_WORKFLOW"
     | "LIFECYCLE_WORKFLOW"
     | "REACTION_WORKFLOW"
@@ -361,8 +383,11 @@ export async function handleSlackEvent(
       const db = getDb(env);
       const guardResponse = await guardTeamId(classification.params.teamId, db);
       if (guardResponse) return guardResponse;
-      // Start the ⏳ reaction in parallel before the message workflow so it shows
-      // promptly; best-effort, so it never blocks or fails the ack below.
+      // Add the ⏳ reaction inline so it shows immediately (avoids the multi-second
+      // workflow cold-start latency), then start the ReactionWorkflow whose sole
+      // job is to remove it once a reply is posted (or on its backstop timeout).
+      // Both are best-effort, so neither blocks nor fails the ack below.
+      await addPendingReaction(env, classification.params);
       await triggerReactionWorkflow(
         env.REACTION_WORKFLOW,
         classification.params

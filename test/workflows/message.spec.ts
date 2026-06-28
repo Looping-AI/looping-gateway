@@ -207,7 +207,8 @@ describe("parallel ReactionWorkflow (via webhook handler)", () => {
       const res = await trigger(body);
       expect(res.status).toBe(200);
 
-      // The handler creates the reaction workflow in parallel with the message one.
+      // The handler adds the ⏳ reaction inline and creates the removal workflow
+      // in parallel with the message one.
       const [reaction] = reactionIntrospector.get();
       expect(reaction).toBeDefined();
 

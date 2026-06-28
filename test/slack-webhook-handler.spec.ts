@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, afterEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { env } from "cloudflare:workers";
 import {
   handleSlackEvent,
@@ -13,11 +13,20 @@ import {
   SystemConfigKeys
 } from "@/db/models/workspace-configs";
 import { ORG_WORKSPACE_ID } from "@/db/models/workspaces";
+import { PENDING_REACTION } from "@/workflows/reaction";
+import { stubSlack } from "./wrappers/slack-stub";
+
+// The handler adds the ⏳ reaction inline via a real Slack API call, so every
+// test needs global fetch stubbed. Tests that assert on the reaction re-stub
+// with a capturing handler; this default keeps the rest benign.
+beforeEach(() => stubSlack(() => ({ ok: true })));
+afterEach(() => vi.unstubAllGlobals());
 
 type FakeEnv = Pick<
   Env,
   | "DB"
   | "SLACK_SIGNING_SECRET"
+  | "SLACK_BOT_TOKEN"
   | "MESSAGE_WORKFLOW"
   | "LIFECYCLE_WORKFLOW"
   | "REACTION_WORKFLOW"
@@ -27,6 +36,7 @@ function makeEnv(overrides: Partial<FakeEnv> = {}): FakeEnv {
   return {
     DB: env.DB,
     SLACK_SIGNING_SECRET: env.SLACK_SIGNING_SECRET,
+    SLACK_BOT_TOKEN: env.SLACK_BOT_TOKEN,
     MESSAGE_WORKFLOW: { create: vi.fn() } as unknown as Workflow,
     LIFECYCLE_WORKFLOW: { create: vi.fn() } as unknown as Workflow,
     REACTION_WORKFLOW: { create: vi.fn() } as unknown as Workflow,
@@ -175,9 +185,37 @@ describe("message events", () => {
 // Parallel Reaction Workflow — ⏳ on the trigger message
 // ---------------------------------------------------------------------------
 
+interface ReactionAddCall {
+  channel: string;
+  timestamp: string;
+  name: string;
+}
+
+/**
+ * Capture reactions.add calls. By default all Slack calls resolve ok; pass a
+ * `respond` to simulate failures (e.g. missing_scope).
+ */
+function captureAddReactions(
+  respond: () => unknown = () => ({ ok: true })
+): ReactionAddCall[] {
+  const calls: ReactionAddCall[] = [];
+  stubSlack((method, body) => {
+    if (method === "reactions.add") {
+      calls.push({
+        channel: body.get("channel") ?? "",
+        timestamp: body.get("timestamp") ?? "",
+        name: body.get("name") ?? ""
+      });
+    }
+    return respond();
+  });
+  return calls;
+}
+
 describe("reaction workflow", () => {
-  it("starts a reaction workflow for an app_mention, keyed by the trigger message", async () => {
+  it("adds the ⏳ reaction inline and starts the removal workflow", async () => {
     const reactionCreate = vi.fn();
+    const adds = captureAddReactions();
     const body = JSON.stringify({
       type: "event_callback",
       event_id: "EvReact",
@@ -197,6 +235,17 @@ describe("reaction workflow", () => {
       })
     );
     expect(res.status).toBe(200);
+
+    // The ⏳ reaction is added inline on the trigger message (not by the workflow).
+    expect(adds).toEqual([
+      {
+        channel: "C1",
+        timestamp: "1700000000.000100",
+        name: PENDING_REACTION
+      }
+    ]);
+
+    // The removal workflow is started, keyed by the trigger message.
     expect(reactionCreate).toHaveBeenCalledOnce();
     expect(reactionCreate).toHaveBeenCalledWith({
       id: "react-EvReact",
@@ -208,7 +257,33 @@ describe("reaction workflow", () => {
     });
   });
 
-  it("still acks 200 when starting the reaction workflow fails (best-effort)", async () => {
+  it("still acks 200 when adding the reaction fails (best-effort)", async () => {
+    const messageCreate = vi.fn();
+    captureAddReactions(() => ({ ok: false, error: "missing_scope" }));
+    const body = JSON.stringify({
+      type: "event_callback",
+      event_id: "EvReactAddFail",
+      team_id: "T1",
+      event: {
+        type: "app_mention",
+        user: "U1",
+        text: "<@UBOT> hi",
+        ts: "1700000000.000100",
+        channel: "C1"
+      }
+    });
+    const res = await post(
+      body,
+      makeEnv({
+        MESSAGE_WORKFLOW: { create: messageCreate } as unknown as Workflow
+      })
+    );
+    expect(res.status).toBe(200);
+    // The message workflow is authoritative and still runs.
+    expect(messageCreate).toHaveBeenCalledOnce();
+  });
+
+  it("still acks 200 when starting the removal workflow fails (best-effort)", async () => {
     const messageCreate = vi.fn();
     const reactionCreate = vi.fn(() => {
       throw new Error("reaction boom");
@@ -237,8 +312,9 @@ describe("reaction workflow", () => {
     expect(messageCreate).toHaveBeenCalledOnce();
   });
 
-  it("does not start a reaction workflow for lifecycle events", async () => {
+  it("does not react or start a removal workflow for lifecycle events", async () => {
     const reactionCreate = vi.fn();
+    const adds = captureAddReactions();
     const body = JSON.stringify({
       type: "event_callback",
       event_id: "EvJoinNoReact",
@@ -252,6 +328,7 @@ describe("reaction workflow", () => {
       })
     );
     expect(res.status).toBe(200);
+    expect(adds).toEqual([]);
     expect(reactionCreate).not.toHaveBeenCalled();
   });
 });

@@ -41,7 +41,7 @@ function makeParams(): ReactionWorkflowParams {
 }
 
 describe("ReactionWorkflow", () => {
-  it("adds the pending reaction, then collects it when the signal arrives", async () => {
+  it("removes the pending reaction when the collect signal arrives", async () => {
     const calls = captureReactions();
     const introspector = await introspectWorkflow(env.REACTION_WORKFLOW);
     try {
@@ -59,16 +59,10 @@ describe("ReactionWorkflow", () => {
       const [instance] = introspector.get();
       await instance.waitForStatus("complete");
 
-      expect(calls.map((c) => c.method)).toEqual([
-        "reactions.add",
-        "reactions.remove"
-      ]);
+      // The reaction is *added* inline by the webhook handler, not here — this
+      // workflow only removes it.
+      expect(calls.map((c) => c.method)).toEqual(["reactions.remove"]);
       expect(calls[0]).toMatchObject({
-        channel: "C1",
-        timestamp: "1700.1",
-        name: PENDING_REACTION
-      });
-      expect(calls[1]).toMatchObject({
         channel: "C1",
         timestamp: "1700.1",
         name: PENDING_REACTION
@@ -97,10 +91,7 @@ describe("ReactionWorkflow", () => {
       const [instance] = introspector.get();
       await instance.waitForStatus("complete");
 
-      expect(calls.map((c) => c.method)).toEqual([
-        "reactions.add",
-        "reactions.remove"
-      ]);
+      expect(calls.map((c) => c.method)).toEqual(["reactions.remove"]);
     } finally {
       await introspector.dispose();
     }
