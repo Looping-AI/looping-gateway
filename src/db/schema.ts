@@ -119,7 +119,7 @@ export const agents = sqliteTable(
   (t) => [index("idx_agents_workspace_id").on(t.workspaceId)]
 );
 
-/** Channel → agent allowlist. Multiple agents can share a channel; ::name disambiguates. */
+/** Channel → agent allowlist. Multiple agents can share a channel; agent names disambiguate. */
 export const agentChannels = sqliteTable(
   "agent_channels",
   {

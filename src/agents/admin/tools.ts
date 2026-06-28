@@ -442,7 +442,7 @@ export function buildAdminTools(deps: AdminToolDeps): ToolSet {
       inputSchema: z.discriminatedUnion("operation", [
         z.object({
           operation: z.literal("register"),
-          name: z.string().describe("Unique agent name (the ::reference)"),
+          name: z.string().describe("Unique agent name"),
           displayName: z.string().optional(),
           a2aEndpoint: z
             .string()

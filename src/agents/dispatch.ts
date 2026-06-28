@@ -40,7 +40,7 @@ export type DispatchMetadata =
 export type AgentTurnMetadata = { user: UserAuthContext } & DispatchMetadata;
 
 export interface DispatchPayload {
-  /** Cleaned user text (bot mention + `::ref` stripped). */
+  /** Original user text. */
   text: string;
   /** Slack channel id — combined with `threadTs` into the A2A `contextId`. */
   channelId: string;

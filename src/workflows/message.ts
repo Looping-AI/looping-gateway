@@ -14,7 +14,7 @@ import { postReply } from "@/wrappers/slack";
 import { getSlackChannelName } from "@/db/models/channels";
 
 export const NO_AGENT_HINT =
-  "I'm not set up to help in this channel yet. Ask a workspace admin to allow an agent here and ::agent-name reference it.";
+  "I'm not set up to help in this channel yet. Ask a workspace admin to allow an agent here and mention it by name.";
 
 // What the resolve step hands to the later steps (must be Rpc.Serializable).
 export type MessagePlan =

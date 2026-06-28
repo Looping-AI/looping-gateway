@@ -65,9 +65,9 @@ function shapeWorkspace(ws: WorkspaceRow): ToolResult {
 
 /**
  * Every enabled agent — built-ins + custom — surfaced to any caller. Agent names
- * and the channels they live in are routing info, not secrets: a `::ref` only
- * works in a channel an admin already allowed, so showing the directory is what
- * lets the concierge route members to the right place.
+ * and the channels they live in are routing info, not secrets: a name mention
+ * only routes in a channel an admin already allowed, so showing the directory is
+ * what lets the concierge route members to the right place.
  */
 export async function directoryAgents(
   deps: OnboardingToolDeps
