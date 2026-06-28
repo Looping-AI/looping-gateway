@@ -8,6 +8,7 @@ import { isRecord, str } from "@/util/json";
 import { pickDisplayName } from "@/util/display-name";
 import { getDb } from "@/db/client";
 import { getSlackTeamId, setPublicUrl } from "@/db/models/workspace-configs";
+import { reactionInstanceId } from "@/workflows/reaction";
 import type {
   MessageWorkflowParams,
   LifecycleWorkflowParams,
@@ -190,6 +191,35 @@ async function triggerWorkflow(
   return OK();
 }
 
+/**
+ * Kick off the parallel ReactionWorkflow that adds the ⏳ reaction to the trigger
+ * message and removes it once a reply is posted (or on its timeout backstop).
+ * Best-effort and cosmetic: any failure here is logged but never affects the
+ * Slack ack — the MessageWorkflow remains authoritative. Duplicate Slack
+ * deliveries are deduped by the deterministic instance id.
+ */
+async function triggerReactionWorkflow(
+  workflow: Workflow,
+  params: MessageWorkflowParams
+): Promise<void> {
+  try {
+    await workflow.create({
+      id: reactionInstanceId(params.eventId),
+      params: {
+        eventId: params.eventId,
+        channelId: params.channelId,
+        ts: params.ts
+      }
+    });
+  } catch (err) {
+    if (isInstanceExistsError(err)) return; // duplicate delivery — already running
+    console.error("[gateway] failed to start reaction workflow", {
+      eventId: params.eventId,
+      err: String(err)
+    });
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Team-id guard — D1 anchor check with isolate-level memoization
 // ---------------------------------------------------------------------------
@@ -297,7 +327,11 @@ export async function handleSlackEvent(
   request: Request,
   env: Pick<
     Env,
-    "DB" | "SLACK_SIGNING_SECRET" | "MESSAGE_WORKFLOW" | "LIFECYCLE_WORKFLOW"
+    | "DB"
+    | "SLACK_SIGNING_SECRET"
+    | "MESSAGE_WORKFLOW"
+    | "LIFECYCLE_WORKFLOW"
+    | "REACTION_WORKFLOW"
   >
 ): Promise<Response> {
   let rawBody: string;
@@ -327,6 +361,12 @@ export async function handleSlackEvent(
       const db = getDb(env);
       const guardResponse = await guardTeamId(classification.params.teamId, db);
       if (guardResponse) return guardResponse;
+      // Start the ⏳ reaction in parallel before the message workflow so it shows
+      // promptly; best-effort, so it never blocks or fails the ack below.
+      await triggerReactionWorkflow(
+        env.REACTION_WORKFLOW,
+        classification.params
+      );
       return triggerWorkflow(env.MESSAGE_WORKFLOW, classification.params);
     }
 

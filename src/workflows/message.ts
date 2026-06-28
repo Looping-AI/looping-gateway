@@ -12,6 +12,10 @@ import {
 import { InvalidEndpointError } from "@/a2a/endpoint";
 import { postReply } from "@/wrappers/slack";
 import { getSlackChannelName } from "@/db/models/channels";
+import {
+  REACTION_COLLECT_EVENT,
+  reactionInstanceId
+} from "@/workflows/reaction";
 
 export const NO_AGENT_HINT =
   "I'm not set up to help in this channel yet. Ask a workspace admin to allow an agent here and mention it by name.";
@@ -109,6 +113,29 @@ export async function dispatchMessage(
   }
 }
 
+/**
+ * Tell the parallel ReactionWorkflow that a reply was posted so it collects
+ * (removes) the pending ⏳ reaction immediately. Best-effort: any failure is
+ * logged, not thrown — the reaction is cosmetic and the ReactionWorkflow's
+ * timeout backstop removes it regardless.
+ */
+export async function signalReactionCollect(
+  env: Env,
+  eventId: string
+): Promise<void> {
+  try {
+    const instance = await env.REACTION_WORKFLOW.get(
+      reactionInstanceId(eventId)
+    );
+    await instance.sendEvent({ type: REACTION_COLLECT_EVENT, payload: {} });
+  } catch (err) {
+    console.warn("[message] reaction collect signal failed (non-fatal)", {
+      eventId,
+      err: String(err)
+    });
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Workflow — durable orchestration over the steps above.
 // ---------------------------------------------------------------------------
@@ -147,6 +174,9 @@ export class MessageWorkflow extends WorkflowEntrypoint<
             plan.userMessage ?? NO_AGENT_HINT
           )
         );
+        await step.do("collect-reaction", () =>
+          signalReactionCollect(this.env, p.eventId)
+        );
         return;
       }
 
@@ -156,6 +186,10 @@ export class MessageWorkflow extends WorkflowEntrypoint<
 
       await step.do("reply", () =>
         postReply(this.env, p.channelId, threadTs, reply)
+      );
+
+      await step.do("collect-reaction", () =>
+        signalReactionCollect(this.env, p.eventId)
       );
     } catch (err) {
       console.error("[message] workflow run failed", {

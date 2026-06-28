@@ -204,3 +204,52 @@ export async function postReply(
     throw err;
   }
 }
+
+// Benign reaction errors that mean the desired end-state already holds, so we
+// treat them as success to keep the reaction steps idempotent under retries.
+const BENIGN_ADD_REACTION_ERRORS = new Set(["already_reacted"]);
+const BENIGN_REMOVE_REACTION_ERRORS = new Set([
+  "no_reaction",
+  "message_not_found"
+]);
+
+/**
+ * Add an emoji reaction to a message via `reactions.add`. Idempotent: an
+ * `already_reacted` error is treated as success so step retries don't throw.
+ * Requires the `reactions:write` scope on the bot token.
+ */
+export async function addReaction(
+  env: SlackEnv,
+  channelId: string,
+  timestamp: string,
+  name: string
+): Promise<void> {
+  const res = await callSlackApi<SlackApiResponse>(
+    "reactions.add",
+    { channel: channelId, timestamp, name },
+    { token: env.SLACK_BOT_TOKEN }
+  );
+  if (!res.ok && BENIGN_ADD_REACTION_ERRORS.has(res.error ?? "")) return;
+  assertSlackOk("reactions.add", res);
+}
+
+/**
+ * Remove an emoji reaction from a message via `reactions.remove`. Idempotent: a
+ * `no_reaction`/`message_not_found` error is treated as success so the backstop
+ * cleanup never throws when the reaction was already collected or the message is
+ * gone. Requires the `reactions:write` scope on the bot token.
+ */
+export async function removeReaction(
+  env: SlackEnv,
+  channelId: string,
+  timestamp: string,
+  name: string
+): Promise<void> {
+  const res = await callSlackApi<SlackApiResponse>(
+    "reactions.remove",
+    { channel: channelId, timestamp, name },
+    { token: env.SLACK_BOT_TOKEN }
+  );
+  if (!res.ok && BENIGN_REMOVE_REACTION_ERRORS.has(res.error ?? "")) return;
+  assertSlackOk("reactions.remove", res);
+}

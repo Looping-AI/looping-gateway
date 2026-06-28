@@ -69,6 +69,11 @@
       "name": "reconcile-workflow",
       "binding": "RECONCILE_WORKFLOW",
       "class_name": "ReconcileWorkflow"
+    },
+    {
+      "name": "reaction-workflow",
+      "binding": "REACTION_WORKFLOW",
+      "class_name": "ReactionWorkflow"
     }
   ],
   "observability": {

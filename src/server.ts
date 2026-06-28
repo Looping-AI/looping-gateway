@@ -6,6 +6,7 @@ import { getPublicJwks } from "@/auth/agent-jwt";
 export { MessageWorkflow } from "./workflows/message";
 export { LifecycleWorkflow } from "./workflows/lifecycle";
 export { ReconcileWorkflow } from "./workflows/reconcile";
+export { ReactionWorkflow } from "./workflows/reaction";
 
 // In-repo agents — each is its own A2A server. The Message Workflow reaches them
 // in-process via their DO `stub.fetch` (see src/agents/dispatch.ts); they need no

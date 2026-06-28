@@ -16,7 +16,11 @@ import { ORG_WORKSPACE_ID } from "@/db/models/workspaces";
 
 type FakeEnv = Pick<
   Env,
-  "DB" | "SLACK_SIGNING_SECRET" | "MESSAGE_WORKFLOW" | "LIFECYCLE_WORKFLOW"
+  | "DB"
+  | "SLACK_SIGNING_SECRET"
+  | "MESSAGE_WORKFLOW"
+  | "LIFECYCLE_WORKFLOW"
+  | "REACTION_WORKFLOW"
 >;
 
 function makeEnv(overrides: Partial<FakeEnv> = {}): FakeEnv {
@@ -25,6 +29,7 @@ function makeEnv(overrides: Partial<FakeEnv> = {}): FakeEnv {
     SLACK_SIGNING_SECRET: env.SLACK_SIGNING_SECRET,
     MESSAGE_WORKFLOW: { create: vi.fn() } as unknown as Workflow,
     LIFECYCLE_WORKFLOW: { create: vi.fn() } as unknown as Workflow,
+    REACTION_WORKFLOW: { create: vi.fn() } as unknown as Workflow,
     ...overrides
   };
 }
@@ -163,6 +168,91 @@ describe("message events", () => {
     );
     expect(res.status).toBe(200);
     expect(create).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Parallel Reaction Workflow — ⏳ on the trigger message
+// ---------------------------------------------------------------------------
+
+describe("reaction workflow", () => {
+  it("starts a reaction workflow for an app_mention, keyed by the trigger message", async () => {
+    const reactionCreate = vi.fn();
+    const body = JSON.stringify({
+      type: "event_callback",
+      event_id: "EvReact",
+      team_id: "T1",
+      event: {
+        type: "app_mention",
+        user: "U1",
+        text: "<@UBOT> hi",
+        ts: "1700000000.000100",
+        channel: "C1"
+      }
+    });
+    const res = await post(
+      body,
+      makeEnv({
+        REACTION_WORKFLOW: { create: reactionCreate } as unknown as Workflow
+      })
+    );
+    expect(res.status).toBe(200);
+    expect(reactionCreate).toHaveBeenCalledOnce();
+    expect(reactionCreate).toHaveBeenCalledWith({
+      id: "react-EvReact",
+      params: {
+        eventId: "EvReact",
+        channelId: "C1",
+        ts: "1700000000.000100"
+      }
+    });
+  });
+
+  it("still acks 200 when starting the reaction workflow fails (best-effort)", async () => {
+    const messageCreate = vi.fn();
+    const reactionCreate = vi.fn(() => {
+      throw new Error("reaction boom");
+    });
+    const body = JSON.stringify({
+      type: "event_callback",
+      event_id: "EvReactFail",
+      team_id: "T1",
+      event: {
+        type: "app_mention",
+        user: "U1",
+        text: "<@UBOT> hi",
+        ts: "1700000000.000100",
+        channel: "C1"
+      }
+    });
+    const res = await post(
+      body,
+      makeEnv({
+        MESSAGE_WORKFLOW: { create: messageCreate } as unknown as Workflow,
+        REACTION_WORKFLOW: { create: reactionCreate } as unknown as Workflow
+      })
+    );
+    expect(res.status).toBe(200);
+    // The message workflow is authoritative and still runs.
+    expect(messageCreate).toHaveBeenCalledOnce();
+  });
+
+  it("does not start a reaction workflow for lifecycle events", async () => {
+    const reactionCreate = vi.fn();
+    const body = JSON.stringify({
+      type: "event_callback",
+      event_id: "EvJoinNoReact",
+      team_id: "T1",
+      event: { type: "member_joined_channel", user: "U2", channel: "C1" }
+    });
+    const res = await post(
+      body,
+      makeEnv({
+        REACTION_WORKFLOW: { create: reactionCreate } as unknown as Workflow
+      })
+    );
+    expect(res.status).toBe(200);
+    expect(reactionCreate).not.toHaveBeenCalled();
   });
 });
 

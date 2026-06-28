@@ -5,7 +5,9 @@ import {
   iterateSlackChannels,
   fetchChannelMemberIds,
   getBotUserId,
-  postReply
+  postReply,
+  addReaction,
+  removeReaction
 } from "@/wrappers/slack";
 import type { SlackUserInfo } from "@/wrappers/slack";
 
@@ -163,6 +165,78 @@ describe("postReply", () => {
     stubSlack(() => ({ ok: false, error: "channel_not_found" }));
     await expect(postReply(slackEnv, "C1", null, "x")).rejects.toThrow(
       /channel_not_found/
+    );
+  });
+});
+
+describe("addReaction", () => {
+  it("calls reactions.add with channel, timestamp, and name", async () => {
+    let captured: URLSearchParams | undefined;
+    stubSlack((method, body) => {
+      if (method === "reactions.add") captured = body;
+      return { ok: true };
+    });
+    await addReaction(slackEnv, "C1", "1700.1", "hourglass_flowing_sand");
+    expect(captured?.get("channel")).toBe("C1");
+    expect(captured?.get("timestamp")).toBe("1700.1");
+    expect(captured?.get("name")).toBe("hourglass_flowing_sand");
+  });
+
+  it("treats already_reacted as success (idempotent)", async () => {
+    stubSlack((method) =>
+      method === "reactions.add"
+        ? { ok: false, error: "already_reacted" }
+        : { ok: true }
+    );
+    await expect(
+      addReaction(slackEnv, "C1", "1700.1", "x")
+    ).resolves.toBeUndefined();
+  });
+
+  it("throws on other Slack errors", async () => {
+    stubSlack((method) =>
+      method === "reactions.add"
+        ? { ok: false, error: "missing_scope" }
+        : { ok: true }
+    );
+    await expect(addReaction(slackEnv, "C1", "1700.1", "x")).rejects.toThrow(
+      /missing_scope/
+    );
+  });
+});
+
+describe("removeReaction", () => {
+  it("calls reactions.remove with channel, timestamp, and name", async () => {
+    let captured: URLSearchParams | undefined;
+    stubSlack((method, body) => {
+      if (method === "reactions.remove") captured = body;
+      return { ok: true };
+    });
+    await removeReaction(slackEnv, "C1", "1700.1", "hourglass_flowing_sand");
+    expect(captured?.get("channel")).toBe("C1");
+    expect(captured?.get("timestamp")).toBe("1700.1");
+    expect(captured?.get("name")).toBe("hourglass_flowing_sand");
+  });
+
+  it("treats no_reaction and message_not_found as success (idempotent)", async () => {
+    for (const error of ["no_reaction", "message_not_found"]) {
+      stubSlack((method) =>
+        method === "reactions.remove" ? { ok: false, error } : { ok: true }
+      );
+      await expect(
+        removeReaction(slackEnv, "C1", "1700.1", "x")
+      ).resolves.toBeUndefined();
+    }
+  });
+
+  it("throws on other Slack errors", async () => {
+    stubSlack((method) =>
+      method === "reactions.remove"
+        ? { ok: false, error: "missing_scope" }
+        : { ok: true }
+    );
+    await expect(removeReaction(slackEnv, "C1", "1700.1", "x")).rejects.toThrow(
+      /missing_scope/
     );
   });
 });
