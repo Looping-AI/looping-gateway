@@ -8,6 +8,8 @@ import { isRecord, str } from "@/util/json";
 import { pickDisplayName } from "@/util/display-name";
 import { getDb } from "@/db/client";
 import { getSlackTeamId, setPublicUrl } from "@/db/models/workspace-configs";
+import { PENDING_REACTION, reactionInstanceId } from "@/workflows/reaction";
+import { addReaction } from "@/wrappers/slack";
 import type {
   MessageWorkflowParams,
   LifecycleWorkflowParams,
@@ -172,22 +174,69 @@ function isInstanceExistsError(err: unknown): boolean {
 async function triggerWorkflow(
   workflow: Workflow,
   params: MessageWorkflowParams | LifecycleWorkflowParams
-): Promise<Response> {
+): Promise<void> {
   const id = params.eventId;
   try {
     await workflow.create({ id, params });
   } catch (err) {
     if (isInstanceExistsError(err)) {
       console.log("[gateway] duplicate event — skipping", { eventId: id });
-      return OK();
+      return;
     }
     console.error("[gateway] failed to create workflow instance", {
       eventId: id,
       err: String(err)
     });
-    return new Response("error", { status: 500 });
   }
-  return OK();
+}
+
+/**
+ * Add the ⏳ pending reaction to the trigger message inline, so it appears
+ * immediately rather than after a workflow cold start. Best-effort and cosmetic:
+ * any failure here is logged but never affects the Slack ack. The matching
+ * ReactionWorkflow is responsible for removing it.
+ */
+async function addPendingReaction(
+  env: Pick<Env, "SLACK_BOT_TOKEN">,
+  params: MessageWorkflowParams
+): Promise<void> {
+  try {
+    await addReaction(env, params.channelId, params.ts, PENDING_REACTION);
+  } catch (err) {
+    console.error("[gateway] failed to add pending reaction", {
+      eventId: params.eventId,
+      err: String(err)
+    });
+  }
+}
+
+/**
+ * Kick off the parallel ReactionWorkflow that removes the ⏳ reaction once a
+ * reply is posted (or on its timeout backstop). Best-effort and cosmetic: any
+ * failure here is logged but never affects the Slack ack — the MessageWorkflow
+ * remains authoritative. Duplicate Slack deliveries are deduped by the
+ * deterministic instance id.
+ */
+async function triggerReactionWorkflow(
+  workflow: Workflow,
+  params: MessageWorkflowParams
+): Promise<void> {
+  try {
+    await workflow.create({
+      id: reactionInstanceId(params.eventId),
+      params: {
+        eventId: params.eventId,
+        channelId: params.channelId,
+        ts: params.ts
+      }
+    });
+  } catch (err) {
+    if (isInstanceExistsError(err)) return; // duplicate delivery — already running
+    console.error("[gateway] failed to start reaction workflow", {
+      eventId: params.eventId,
+      err: String(err)
+    });
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -289,16 +338,23 @@ async function guardTeamId(
  * Verify the Slack signature, classify the event, run the team-id guard,
  * trigger the matching Workflow, and return 200 before any agent work runs.
  *
- * Returns 401 on bad signature, 403 on team_id mismatch, 500 on unexpected
- * Workflow failure (so Slack retries), and 200 for everything else — including
- * ignored events and duplicate event_ids (native dedupe via instance id).
+ * Returns 401 on bad signature, 403 on team_id mismatch, and 200 for
+ * everything else — including ignored events, duplicate event_ids (native
+ * dedupe via instance id), and Workflow create failures (logged but not
+ * surfaced, since all three tasks run in ctx.waitUntil after the ack).
  */
 export async function handleSlackEvent(
   request: Request,
   env: Pick<
     Env,
-    "DB" | "SLACK_SIGNING_SECRET" | "MESSAGE_WORKFLOW" | "LIFECYCLE_WORKFLOW"
-  >
+    | "DB"
+    | "SLACK_SIGNING_SECRET"
+    | "SLACK_BOT_TOKEN"
+    | "MESSAGE_WORKFLOW"
+    | "LIFECYCLE_WORKFLOW"
+    | "REACTION_WORKFLOW"
+  >,
+  ctx: ExecutionContext
 ): Promise<Response> {
   let rawBody: string;
   try {
@@ -327,14 +383,27 @@ export async function handleSlackEvent(
       const db = getDb(env);
       const guardResponse = await guardTeamId(classification.params.teamId, db);
       if (guardResponse) return guardResponse;
-      return triggerWorkflow(env.MESSAGE_WORKFLOW, classification.params);
+      // Fire all three off-path tasks and return 200 immediately, well within
+      // Slack's 3 s ack budget. waitUntil keeps the isolate alive until they
+      // all settle. All three already swallow/log their own errors.
+      ctx.waitUntil(
+        Promise.allSettled([
+          addPendingReaction(env, classification.params),
+          triggerReactionWorkflow(env.REACTION_WORKFLOW, classification.params),
+          triggerWorkflow(env.MESSAGE_WORKFLOW, classification.params)
+        ])
+      );
+      return OK();
     }
 
     case "lifecycle": {
       const db = getDb(env);
       const guardResponse = await guardTeamId(classification.params.teamId, db);
       if (guardResponse) return guardResponse;
-      return triggerWorkflow(env.LIFECYCLE_WORKFLOW, classification.params);
+      ctx.waitUntil(
+        triggerWorkflow(env.LIFECYCLE_WORKFLOW, classification.params)
+      );
+      return OK();
     }
 
     case "ignore":

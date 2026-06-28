@@ -1,26 +1,47 @@
-// `::name` agent reference: lowercase letters, digits, `_` and `-`.
-const AGENT_REF = /::([a-z0-9_-]+)/i;
-const AGENT_REF_GLOBAL = /::[a-z0-9_-]+/gi;
-// Slack mention token, e.g. `<@U123ABC>` (optionally `<@U123|label>`).
-const MENTION_GLOBAL = /<@[A-Z0-9]+(?:\|[^>]+)?>/gi;
+const AGENT_NAME_CHAR = /[A-Za-z0-9_-]/;
 
-/**
- * The first `::name` agent reference in the text, lowercased, or null. This is
- * the explicit routing target ("`::admin reset the registry`").
- */
-export function parseAgentRef(text: string): string | null {
-  const match = text.match(AGENT_REF);
-  return match ? match[1].toLowerCase() : null;
+export interface AgentNameMention {
+  name: string;
+  index: number;
+}
+
+function isAgentNameBoundary(text: string, index: number): boolean {
+  return (
+    index < 0 || index >= text.length || !AGENT_NAME_CHAR.test(text[index])
+  );
 }
 
 /**
- * Strip Slack bot mentions and `::name` references, collapse whitespace — the
- * clean prompt to hand the agent. The chat SDK used to do this; we bypass it now.
+ * The first whole-token agent name mention in the text, case-insensitive, or
+ * null. The returned name keeps the canonical casing from `agentNames`.
  */
-export function cleanText(text: string): string {
-  return text
-    .replace(MENTION_GLOBAL, "")
-    .replace(AGENT_REF_GLOBAL, "")
-    .replace(/\s+/g, " ")
-    .trim();
+export function findAgentNameMention(
+  text: string,
+  agentNames: readonly string[]
+): AgentNameMention | null {
+  const lowerText = text.toLowerCase();
+  let best: AgentNameMention | null = null;
+
+  for (const name of agentNames) {
+    if (!name) continue;
+    const lowerName = name.toLowerCase();
+    let index = lowerText.indexOf(lowerName);
+
+    while (index !== -1) {
+      const before = index - 1;
+      const after = index + lowerName.length;
+      if (
+        isAgentNameBoundary(text, before) &&
+        isAgentNameBoundary(text, after) &&
+        (!best ||
+          index < best.index ||
+          (index === best.index && name.length > best.name.length))
+      ) {
+        best = { name, index };
+      }
+      index = lowerText.indexOf(lowerName, index + 1);
+    }
+  }
+
+  return best;
 }

@@ -8,7 +8,7 @@ import { OnboardingAgentExecutor } from "./executor";
  * Onboarding (DM) concierge. One Durable Object instance per user
  * (`onboarding:{slackUserId}`), each with isolated Sessions + memory. Runs a
  * read-only Workers-AI tool loop that explains how Looping works, routes users to
- * the right channel/`::agent`, and surfaces registry health — all over direct
+ * the right channel/agent name, and surfaces registry health — all over direct
  * message.
  */
 export class OnboardingAgent extends A2AAgent {

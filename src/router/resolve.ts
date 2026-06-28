@@ -3,10 +3,10 @@ import type { AgentRow } from "@/db/models/agents";
 import {
   getAgent,
   getAgentsForChannel,
-  getAgentInChannel
+  type AgentChannelEntry
 } from "@/db/models/agents";
 import { getWorkspaceByAdminChannel } from "@/db/models/workspaces";
-import { cleanText, parseAgentRef } from "./parse";
+import { findAgentNameMention } from "./parse";
 
 /** A resolved agent target plus the cleaned prompt and workspace scope. */
 export interface ResolvedTarget {
@@ -14,7 +14,7 @@ export interface ResolvedTarget {
   agent: AgentRow;
   /** Workspace scope for the agent. */
   workspaceId: number | null;
-  /** User text with bot mention + `::ref` stripped. */
+  /** Original user text. */
   text: string;
 }
 
@@ -48,108 +48,131 @@ export function isDmChannel(channelId: string): boolean {
  *   - DMs            → `onboarding` built-in
  *   - Any channel    → agents with an agent_channels row for that channel
  *
- * `::name` selects which agent; if the named agent is not permitted in the
- * channel, `none` is returned with a user-visible `userMessage`.
- * Without `::name`, defaults to the single configured agent (or prompts the
+ * Matching is two-pass:
+ *   1. Machine name — whole-token, case-insensitive, unambiguous.
+ *   2. Display name — same token rules; if two channel agents share a display
+ *      name, a user-visible message lists their machine names so the user can
+ *      disambiguate (Pass 1 already handles machine-name mentions directly).
+ * Without any mention, defaults to the single configured agent (or prompts the
  * user to specify when multiple agents are available).
  */
 export async function resolveTarget(
   db: Db,
   input: ResolveInput
 ): Promise<Target> {
-  const text = cleanText(input.text);
-  const ref = parseAgentRef(input.text);
+  const text = input.text;
+  const channelEntries = await getAgentsForChannel(db, input.channelId);
+  const ws = await getWorkspaceByAdminChannel(db, input.channelId);
+  const isDm = isDmChannel(input.channelId);
 
-  if (ref) {
-    // ::name ref given — look up the agent, then validate channel permission.
-    const agent = await getAgent(db, ref);
-    if (!agent?.enabled) {
-      const result = {
-        kind: "none" as const,
-        reason: `unknown or disabled agent ::${ref}`
-      };
-      return result;
-    }
+  // Build all scoped candidate entries: channel-allowed agents + context-valid built-ins.
+  let admin: AgentRow | null = null;
+  let onboarding: AgentRow | null = null;
+  const allEntries: AgentChannelEntry[] = [...channelEntries];
 
-    if (agent.kind === "admin") {
-      const ws = await getWorkspaceByAdminChannel(db, input.channelId);
-      if (!ws) {
-        return {
-          kind: "none",
-          reason: `::${ref} not in admin channel`,
-          userMessage: `\`::${ref}\` can only be used from a configured admin channel.`
-        };
-      }
-      return { kind: "agent", agent, workspaceId: ws.id, text };
-    }
-
-    if (agent.kind === "onboarding") {
-      if (!isDmChannel(input.channelId)) {
-        return {
-          kind: "none",
-          reason: `::${ref} not in DM`,
-          userMessage: `\`::${ref}\` is only available in direct messages.`
-        };
-      }
-      return { kind: "agent", agent, workspaceId: null, text };
-    }
-
-    // Custom agent — must have an agent_channels row for this channel.
-    const entry = await getAgentInChannel(db, input.channelId, ref);
-    if (!entry) {
-      return {
-        kind: "none",
-        reason: `::${ref} not configured for channel ${input.channelId}`,
-        userMessage: `\`::${ref}\` is not configured for this channel.`
-      };
-    }
-    return {
-      kind: "agent",
-      agent: entry.agent,
-      workspaceId: entry.workspaceId,
-      text
-    };
+  if (ws) {
+    admin = await getAgent(db, "admin");
+    if (admin?.enabled) allEntries.push({ agent: admin, workspaceId: ws.id });
+  }
+  if (isDm) {
+    onboarding = await getAgent(db, "onboarding");
+    if (onboarding?.enabled)
+      allEntries.push({ agent: onboarding, workspaceId: null });
   }
 
-  // No ::name — use context defaults.
+  const allEntriesByName = new Map<string, AgentChannelEntry>(
+    allEntries.map((e) => [e.agent.name, e])
+  );
+
+  // Pass 1: machine name mention — unique, no ambiguity possible.
+  const mention = findAgentNameMention(
+    text,
+    allEntries.map((e) => e.agent.name)
+  );
+  if (mention) {
+    const entry = allEntriesByName.get(mention.name);
+    if (entry)
+      return {
+        kind: "agent",
+        agent: entry.agent,
+        workspaceId: entry.workspaceId,
+        text
+      };
+    return { kind: "none", reason: "mentioned agent unavailable" };
+  }
+
+  // Pass 2: display name mention — nullable, not guaranteed unique.
+  const displayNameToEntries = new Map<string, AgentChannelEntry[]>();
+  for (const entry of allEntries) {
+    if (!entry.agent.displayName) continue;
+    const key = entry.agent.displayName.toLowerCase();
+    const existing = displayNameToEntries.get(key);
+    if (existing) existing.push(entry);
+    else displayNameToEntries.set(key, [entry]);
+  }
+
+  if (displayNameToEntries.size > 0) {
+    const displayMention = findAgentNameMention(text, [
+      ...displayNameToEntries.keys()
+    ]);
+    if (displayMention) {
+      const candidates = displayNameToEntries.get(displayMention.name)!;
+      if (candidates.length === 1) {
+        const { agent, workspaceId } = candidates[0];
+        return { kind: "agent", agent, workspaceId, text };
+      }
+      // Collision — ask the user to use a machine name instead.
+      const names = candidates.map((c) => `\`${c.agent.name}\``).join(", ");
+      return {
+        kind: "none",
+        reason: "ambiguous display name",
+        userMessage: `Multiple agents match that name: ${names}. Mention one by machine name to address it directly.`
+      };
+    }
+  }
+
+  // No mention matched — use context defaults.
 
   // Admin channel → admin built-in.
-  const ws = await getWorkspaceByAdminChannel(db, input.channelId);
   if (ws) {
-    const admin = await getAgent(db, "admin");
-    if (admin?.enabled) {
-      return { kind: "agent", agent: admin, workspaceId: ws.id, text };
+    const adminAgent = admin ?? (await getAgent(db, "admin"));
+    if (adminAgent?.enabled) {
+      return { kind: "agent", agent: adminAgent, workspaceId: ws.id, text };
     }
     return { kind: "none", reason: "admin agent unavailable" };
   }
 
   // DM → onboarding built-in.
-  if (isDmChannel(input.channelId)) {
-    const onboarding = await getAgent(db, "onboarding");
-    if (onboarding?.enabled) {
-      return { kind: "agent", agent: onboarding, workspaceId: null, text };
+  if (isDm) {
+    const onboardingAgent = onboarding ?? (await getAgent(db, "onboarding"));
+    if (onboardingAgent?.enabled) {
+      return {
+        kind: "agent",
+        agent: onboardingAgent,
+        workspaceId: null,
+        text
+      };
     }
     return { kind: "none", reason: "onboarding agent unavailable" };
   }
 
   // Regular channel — check agent_channels.
-  const entries = await getAgentsForChannel(db, input.channelId);
-  if (entries.length === 0) {
+  if (channelEntries.length === 0) {
     return { kind: "none", reason: "no agent configured for this context" };
   }
-  if (entries.length === 1) {
+  if (channelEntries.length === 1) {
     return {
       kind: "agent",
-      agent: entries[0].agent,
-      workspaceId: entries[0].workspaceId,
+      agent: channelEntries[0].agent,
+      workspaceId: channelEntries[0].workspaceId,
       text
     };
   }
   // Multiple agents — ask the user to specify.
-  const names = entries.map((e) => `\`::${e.agent.name}\``).join(", ");
+  const names = channelEntries.map((e) => `\`${e.agent.name}\``).join(", ");
   return {
     kind: "none",
-    reason: "multiple agents configured, no ::name given",
-    userMessage: `Multiple agents are available here: ${names}. Use \`::agent-name\` to address one directly.`
+    reason: "multiple agents configured, no agent name mentioned",
+    userMessage: `Multiple agents are available here: ${names}. Mention one by name to address it directly.`
   };
 }

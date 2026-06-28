@@ -27,6 +27,18 @@ export interface LifecycleWorkflowParams {
   raw: Record<string, unknown>;
 }
 
+/**
+ * Params for the parallel ReactionWorkflow that owns the ⏳ "thinking" reaction
+ * on a trigger message: add on receipt, remove once the reply is posted (or on a
+ * timeout backstop). Keyed off the same Slack `eventId` as the MessageWorkflow.
+ */
+export interface ReactionWorkflowParams {
+  eventId: string;
+  channelId: string;
+  /** Timestamp of the trigger message to react to. */
+  ts: string;
+}
+
 // ---------------------------------------------------------------------------
 // Classification — the routing verdict produced by classifyEvent()
 // ---------------------------------------------------------------------------
