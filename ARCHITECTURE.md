@@ -50,7 +50,7 @@ Handles all direct messages (DMs) sent to the Slack app. This is the first point
 
 **Status: planned**
 
-Any message posted in a channel that is not `#org_admin` and not a DM is considered to be addressed to an external **Agent-to-Agent (A2A)** agent. The gateway resolves which registered agent owns that channel using [A2A name routing](#a2a-name-routing) and forwards the message to it. The response is posted back to the original Slack thread.
+Any message posted in a channel that is not `#org_admin` and not a DM is considered to be addressed to an external **Agent-to-Agent (A2A)** agent. The gateway resolves which registered agent owns that channel using [A2A name routing](#a2a-name-routing) and forwards the message to it. The response is posted back at channel level by default, and only goes into a thread when the incoming Slack event carries a real thread_ts different from the message ts.
 
 This design lets teams deploy domain-specific agents independently and register them with the gateway to make them accessible through Slack — without touching this codebase.
 

@@ -77,14 +77,24 @@ function makeDmRequest(channelId: string, text: string) {
 }
 
 async function trigger(body: string) {
-  return handleSlackEvent(
+  const waitUntilPromises: Promise<unknown>[] = [];
+  const ctx = {
+    waitUntil: (p: Promise<unknown>) => {
+      waitUntilPromises.push(p);
+    },
+    passThroughOnException: () => {}
+  } as unknown as ExecutionContext;
+  const res = await handleSlackEvent(
     new Request("https://example.com/slack/events", {
       method: "POST",
       headers: await slackHeaders(body),
       body
     }),
-    env
+    env,
+    ctx
   );
+  await Promise.allSettled(waitUntilPromises);
+  return res;
 }
 
 describe("MessageWorkflow (introspectWorkflow)", () => {

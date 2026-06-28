@@ -49,14 +49,24 @@ async function post(
   fakeEnv: FakeEnv,
   headers?: Record<string, string>
 ) {
-  return handleSlackEvent(
+  const waitUntilPromises: Promise<unknown>[] = [];
+  const ctx = {
+    waitUntil: (p: Promise<unknown>) => {
+      waitUntilPromises.push(p);
+    },
+    passThroughOnException: () => {}
+  } as unknown as ExecutionContext;
+  const res = await handleSlackEvent(
     new Request("https://example.com/slack/events", {
       method: "POST",
       headers: headers ?? (await slackHeaders(body)),
       body
     }),
-    fakeEnv
+    fakeEnv,
+    ctx
   );
+  await Promise.allSettled(waitUntilPromises);
+  return res;
 }
 
 // ---------------------------------------------------------------------------
@@ -493,7 +503,7 @@ describe("error handling", () => {
     expect(res.status).toBe(200);
   });
 
-  it("returns 500 on an unexpected Workflow failure so Slack retries", async () => {
+  it("still returns 200 on an unexpected Workflow failure (error is logged, Slack does not retry)", async () => {
     const create = vi
       .fn()
       .mockRejectedValue(new Error("transient network error"));
@@ -512,7 +522,7 @@ describe("error handling", () => {
       body,
       makeEnv({ MESSAGE_WORKFLOW: { create } as unknown as Workflow })
     );
-    expect(res.status).toBe(500);
+    expect(res.status).toBe(200);
   });
 });
 

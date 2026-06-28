@@ -9,7 +9,7 @@ import worker from "../src/server";
 describe("Worker routing", () => {
   it("returns 404 for GET /", async () => {
     const ctx = createExecutionContext();
-    const res = await worker.fetch(new Request("http://localhost/"), env);
+    const res = await worker.fetch(new Request("http://localhost/"), env, ctx);
     await waitOnExecutionContext(ctx);
     expect(res.status).toBe(404);
   });
@@ -18,7 +18,8 @@ describe("Worker routing", () => {
     const ctx = createExecutionContext();
     const res = await worker.fetch(
       new Request("http://localhost/some-unknown-path"),
-      env
+      env,
+      ctx
     );
     await waitOnExecutionContext(ctx);
     expect(res.status).toBe(404);
@@ -34,7 +35,8 @@ describe("Worker routing", () => {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ type: "url_verification", challenge: "x" })
       }),
-      env
+      env,
+      ctx
     );
     await waitOnExecutionContext(ctx);
     // No signature headers → 401 from the handler (proves routing reached it)
@@ -45,7 +47,8 @@ describe("Worker routing", () => {
     const ctx = createExecutionContext();
     const res = await worker.fetch(
       new Request("http://localhost/.well-known/jwks.json"),
-      env
+      env,
+      ctx
     );
     await waitOnExecutionContext(ctx);
     expect(res.status).toBe(200);

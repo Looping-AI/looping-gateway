@@ -15,7 +15,7 @@ export { AdminAgent } from "./agents/admin";
 export { OnboardingAgent } from "./agents/onboarding";
 
 export default {
-  async fetch(request: Request, env: Env) {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext) {
     const url = new URL(request.url);
 
     // Public JWKS — the gateway's Ed25519 signing public key(s). Remote (custom)
@@ -33,7 +33,7 @@ export default {
     // gateway's public origin (JWT issuer/jku anchor) is discovered inside
     // handleSlackEvent, only after the Slack signature has been verified.
     if (request.method === "POST" && url.pathname === "/slack/events") {
-      return handleSlackEvent(request, env);
+      return handleSlackEvent(request, env, ctx);
     }
 
     return new Response("Not found", { status: 404 });
