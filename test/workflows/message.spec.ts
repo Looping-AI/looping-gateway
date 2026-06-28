@@ -87,7 +87,7 @@ async function trigger(body: string) {
 }
 
 describe("MessageWorkflow (introspectWorkflow)", () => {
-  it("admin-channel mention: resolve → dispatch → reply steps complete, threaded reply posted", async () => {
+  it("admin-channel mention: resolve → dispatch → reply steps complete, channel-level reply posted", async () => {
     const calls = captureSlack();
     const introspector = await introspectWorkflow(env.MESSAGE_WORKFLOW);
     try {
@@ -101,20 +101,18 @@ describe("MessageWorkflow (introspectWorkflow)", () => {
       // The admin agent now runs the real AI loop (Workers AI). That binding is
       // unavailable offline, so the executor's graceful fallback posts instead —
       // either way this asserts the plumbing: Workflow → A2A → AdminAgent DO
-      // (Session over SQLite) → threaded reply. The AI text itself is covered by
-      // the executor unit test and the manual e2e.
+      // (Session over SQLite) → channel-level reply. The AI text itself is covered
+      // by the executor unit test and the manual e2e.
       expect(calls).toHaveLength(1);
-      expect(calls[0]).toMatchObject({
-        channel: "C_ORGADMIN",
-        thread_ts: "1700.1"
-      });
+      expect(calls[0]).toMatchObject({ channel: "C_ORGADMIN" });
+      expect(calls[0].thread_ts).toBeUndefined();
       expect(calls[0].text.length).toBeGreaterThan(0);
     } finally {
       await introspector.dispose();
     }
   });
 
-  it("DM: resolve → dispatch → reply steps complete, threaded reply (thread_ts = ts)", async () => {
+  it("DM: resolve → dispatch → reply steps complete, channel-level reply posted", async () => {
     const calls = captureSlack();
     const introspector = await introspectWorkflow(env.MESSAGE_WORKFLOW);
     try {
@@ -129,12 +127,12 @@ describe("MessageWorkflow (introspectWorkflow)", () => {
       // a per-user DO instance. That binding is unavailable offline, so the
       // executor's graceful fallback posts instead — either way this asserts the
       // plumbing: Workflow → A2A → OnboardingAgent DO (Session over SQLite) →
-      // threaded reply (thread_ts = ts). The AI text is covered by the executor
+      // channel-level reply (no thread). The AI text is covered by the executor
       // unit test and the manual e2e.
       expect(calls).toHaveLength(1);
       expect(calls[0]).toMatchObject({ channel: "D1" });
+      expect(calls[0].thread_ts).toBeUndefined();
       expect(calls[0].text.length).toBeGreaterThan(0);
-      expect(calls[0].thread_ts).toBe("1700.1");
     } finally {
       await introspector.dispose();
     }

@@ -32,9 +32,12 @@ export type MessagePlan =
 // Pure steps — called directly by MessageWorkflow.run() and exported for tests.
 // ---------------------------------------------------------------------------
 
-/** Reply in-thread, anchored to the original message ts. */
+/**
+ * Return the thread_ts to reply into, or null to post at channel level.
+ * A real thread reply has a thread_ts that differs from the message's own ts.
+ */
 export function replyThreadTs(p: MessageWorkflowParams): string | null {
-  return p.threadTs || p.ts;
+  return p.threadTs && p.threadTs !== p.ts ? p.threadTs : null;
 }
 
 /** Resolve the target agent + build the caller's auth context. */
