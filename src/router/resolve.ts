@@ -51,8 +51,8 @@ export function isDmChannel(channelId: string): boolean {
  * Matching is two-pass:
  *   1. Machine name — whole-token, case-insensitive, unambiguous.
  *   2. Display name — same token rules; if two channel agents share a display
- *      name, the collision is unresolvable and routing falls through to context
- *      defaults (Pass 1 already handles any machine-name disambiguation).
+ *      name, a user-visible message lists their machine names so the user can
+ *      disambiguate (Pass 1 already handles machine-name mentions directly).
  * Without any mention, defaults to the single configured agent (or prompts the
  * user to specify when multiple agents are available).
  */
@@ -121,9 +121,13 @@ export async function resolveTarget(
         const { agent, workspaceId } = candidates[0];
         return { kind: "agent", agent, workspaceId, text };
       }
-      // Collision — Pass 1 already handles any machine-name disambiguation,
-      // so treat multiple display-name matches as unresolvable.
-      return { kind: "none", reason: "ambiguous display name" };
+      // Collision — ask the user to use a machine name instead.
+      const names = candidates.map((c) => `\`${c.agent.name}\``).join(", ");
+      return {
+        kind: "none",
+        reason: "ambiguous display name",
+        userMessage: `Multiple agents match that name: ${names}. Mention one by machine name to address it directly.`
+      };
     }
   }
 

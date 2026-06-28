@@ -57,11 +57,12 @@ export class ReactionWorkflow extends WorkflowEntrypoint<
           type: REACTION_COLLECT_EVENT,
           timeout: REACTION_BACKSTOP_TIMEOUT
         });
-      } catch {
+      } catch (err) {
         console.log("[reaction] collect signal timed out — backstop cleanup", {
           instanceId: event.instanceId,
           eventId: p.eventId,
-          channelId: p.channelId
+          channelId: p.channelId,
+          error: err instanceof Error ? err.message : String(err)
         });
       }
 

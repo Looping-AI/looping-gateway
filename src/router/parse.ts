@@ -1,5 +1,4 @@
 const AGENT_NAME_CHAR = /[A-Za-z0-9_-]/;
-const DOUBLE_COLON_PREFIX = ":" + ":";
 
 export interface AgentNameMention {
   name: string;
@@ -32,7 +31,6 @@ export function findAgentNameMention(
       const before = index - 1;
       const after = index + lowerName.length;
       if (
-        text.slice(index - 2, index) !== DOUBLE_COLON_PREFIX &&
         isAgentNameBoundary(text, before) &&
         isAgentNameBoundary(text, after) &&
         (!best ||

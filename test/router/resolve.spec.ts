@@ -232,7 +232,7 @@ describe("resolveTarget — display name mentions", () => {
     expect(t.agent.name).toBe("weather");
   });
 
-  it("collision: same display name → none when no machine name appears", async () => {
+  it("collision: same display name → none with disambiguation userMessage", async () => {
     await env.DB.prepare(
       "UPDATE agents SET display_name = 'Forecast Service' WHERE name = 'sales'"
     ).run();
@@ -241,5 +241,9 @@ describe("resolveTarget — display name mentions", () => {
       text: "Forecast Service help"
     });
     expect(t.kind).toBe("none");
+    if (t.kind !== "none") return;
+    expect(t.userMessage).toMatch(/Multiple agents match/);
+    expect(t.userMessage).toContain("`weather`");
+    expect(t.userMessage).toContain("`sales`");
   });
 });

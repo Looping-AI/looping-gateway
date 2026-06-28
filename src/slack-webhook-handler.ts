@@ -387,7 +387,7 @@ export async function handleSlackEvent(
       // Slack's 3 s ack budget. waitUntil keeps the isolate alive until they
       // all settle. All three already swallow/log their own errors.
       ctx.waitUntil(
-        Promise.all([
+        Promise.allSettled([
           addPendingReaction(env, classification.params),
           triggerReactionWorkflow(env.REACTION_WORKFLOW, classification.params),
           triggerWorkflow(env.MESSAGE_WORKFLOW, classification.params)
