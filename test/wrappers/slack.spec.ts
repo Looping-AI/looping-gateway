@@ -183,6 +183,35 @@ describe("postReply", () => {
     expect(captured?.has("username")).toBe(false);
   });
 
+  it("sets icon_url when iconUrl is provided", async () => {
+    let captured: URLSearchParams | undefined;
+    stubSlack((method, body) => {
+      if (method === "chat.postMessage") captured = body;
+      return { ok: true, ts: "1.2" };
+    });
+    await postReply(
+      slackEnv,
+      "C1",
+      "1700.1",
+      "hello",
+      "Bot",
+      "https://example.com/icon.png"
+    );
+    expect(captured?.get("icon_url")).toBe("https://example.com/icon.png");
+  });
+
+  it("omits icon_url when absent or null", async () => {
+    let captured: URLSearchParams | undefined;
+    stubSlack((method, body) => {
+      if (method === "chat.postMessage") captured = body;
+      return { ok: true, ts: "1.2" };
+    });
+    await postReply(slackEnv, "C1", "1700.1", "hello");
+    expect(captured?.has("icon_url")).toBe(false);
+    await postReply(slackEnv, "C1", "1700.1", "hello", null, null);
+    expect(captured?.has("icon_url")).toBe(false);
+  });
+
   it("throws on a non-ok response", async () => {
     stubSlack(() => ({ ok: false, error: "channel_not_found" }));
     await expect(postReply(slackEnv, "C1", null, "x")).rejects.toThrow(

@@ -29,6 +29,8 @@ export interface AgentPlan {
    * so it's never null.
    */
   displayName: string;
+  /** Icon URL for the agent's avatar in Slack (chat.postMessage `icon_url`). Null = use default bot icon. */
+  iconUrl: string | null;
   user: Awaited<ReturnType<typeof buildUserAuthContext>>;
 }
 
@@ -83,6 +85,7 @@ export async function resolveMessage(
     text: feedText(p),
     channelName: t.channelName,
     displayName: t.agent.displayName ?? t.agent.name,
+    iconUrl: t.agent.iconUrl ?? null,
     user
   }));
 }
@@ -200,7 +203,8 @@ export class MessageWorkflow extends WorkflowEntrypoint<
                 p.channelId,
                 threadTs,
                 reply,
-                plan.displayName
+                plan.displayName,
+                plan.iconUrl
               )
             );
           }

@@ -179,7 +179,8 @@ export async function postReply(
   channelId: string,
   threadTs: string | null,
   text: string,
-  username?: string | null
+  username?: string | null,
+  iconUrl?: string | null
 ): Promise<void> {
   let mrkdwn: string;
   try {
@@ -195,7 +196,8 @@ export async function postReply(
         channel: channelId,
         text: mrkdwn,
         ...(threadTs ? { thread_ts: threadTs } : {}),
-        ...(username ? { username } : {})
+        ...(username ? { username } : {}),
+        ...(iconUrl ? { icon_url: iconUrl } : {})
       },
       { token: env.SLACK_BOT_TOKEN }
     );
