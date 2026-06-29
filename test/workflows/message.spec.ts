@@ -4,7 +4,6 @@ import { env } from "cloudflare:workers";
 import { getDb } from "@/db/client";
 import { setWorkspaceAdminChannel } from "@/db/models/workspaces";
 import { handleSlackEvent } from "@/slack-webhook-handler";
-import { NO_AGENT_HINT } from "@/workflows/message";
 import { PENDING_REACTION } from "@/workflows/reaction";
 import { stubSlack } from "../wrappers/slack-stub";
 import { slackHeaders } from "../helpers/slack";
@@ -149,7 +148,7 @@ describe("MessageWorkflow (introspectWorkflow)", () => {
     }
   });
 
-  it("no-match channel: resolve → hint steps complete, hint text posted", async () => {
+  it("no-match channel: resolve completes with no agents, nothing posted", async () => {
     const calls = captureSlack();
     const introspector = await introspectWorkflow(env.MESSAGE_WORKFLOW);
     try {
@@ -163,8 +162,7 @@ describe("MessageWorkflow (introspectWorkflow)", () => {
       const [instance] = introspector.get();
       await instance.waitForStatus("complete");
 
-      expect(calls).toHaveLength(1);
-      expect(calls[0].text).toBe(NO_AGENT_HINT);
+      expect(calls).toHaveLength(0);
     } finally {
       await introspector.dispose();
     }

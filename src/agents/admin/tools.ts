@@ -74,6 +74,7 @@ function shape(a: AgentRow, channels: string[]): ToolResult {
     kind: a.kind,
     displayName: a.displayName,
     enabled: a.enabled,
+    notifyOn: a.notifyOn,
     a2aEndpoint: a.a2aEndpoint,
     workspaceId: a.workspaceId,
     channels
@@ -144,6 +145,7 @@ export type AgentsWriteArgs =
       name: string;
       displayName?: string;
       a2aEndpoint: string;
+      notifyOn: "mention" | "channel_messages";
     }
   | {
       operation: "update";
@@ -151,6 +153,7 @@ export type AgentsWriteArgs =
       displayName?: string;
       enabled?: boolean;
       a2aEndpoint?: string;
+      notifyOn?: "mention" | "channel_messages";
     }
   | { operation: "add_channel"; name: string; channelId: string }
   | { operation: "remove_channel"; name: string; channelId: string }
@@ -185,6 +188,7 @@ export async function agentsWrite(
         kind: "custom",
         displayName: args.displayName ?? null,
         a2aEndpoint: args.a2aEndpoint,
+        notifyOn: args.notifyOn,
         workspaceId: deps.wsId,
         cardSigningJku: pin.cardSigningJku,
         cardSigningKid: pin.cardSigningKid
@@ -225,6 +229,7 @@ export async function agentsWrite(
         displayName: args.displayName,
         enabled: args.enabled,
         a2aEndpoint: args.a2aEndpoint,
+        notifyOn: args.notifyOn,
         ...(pin
           ? {
               cardSigningJku: pin.cardSigningJku,
@@ -446,7 +451,14 @@ export function buildAdminTools(deps: AdminToolDeps): ToolSet {
           displayName: z.string().optional(),
           a2aEndpoint: z
             .string()
-            .describe("Remote A2A endpoint URL for the custom agent (required)")
+            .describe(
+              "Remote A2A endpoint URL for the custom agent (required)"
+            ),
+          notifyOn: z
+            .enum(["mention", "channel_messages"])
+            .describe(
+              "When the agent is woken (required): `mention` = only on a name mention; `channel_messages` = every channel message"
+            )
         }),
         z.object({
           operation: z.literal("update"),
@@ -458,7 +470,13 @@ export function buildAdminTools(deps: AdminToolDeps): ToolSet {
             .describe(
               "Set false to disable — disabled agents receive no messages and won't be routed to"
             ),
-          a2aEndpoint: z.string().optional()
+          a2aEndpoint: z.string().optional(),
+          notifyOn: z
+            .enum(["mention", "channel_messages"])
+            .optional()
+            .describe(
+              "Change when the agent is woken: mention vs channel_messages"
+            )
         }),
         z.object({
           operation: z.literal("add_channel"),

@@ -45,3 +45,34 @@ export function findAgentNameMention(
 
   return best;
 }
+
+/**
+ * Every name from `agentNames` that appears as a whole token in the text,
+ * case-insensitive. Canonical casing is preserved; each name is returned at
+ * most once. Used to fan a message out to all explicitly mentioned agents.
+ */
+export function findAllAgentNameMentions(
+  text: string,
+  agentNames: readonly string[]
+): string[] {
+  const lowerText = text.toLowerCase();
+  const hit: string[] = [];
+
+  for (const name of agentNames) {
+    if (!name || hit.includes(name)) continue;
+    const lowerName = name.toLowerCase();
+    let index = lowerText.indexOf(lowerName);
+    while (index !== -1) {
+      if (
+        isAgentNameBoundary(text, index - 1) &&
+        isAgentNameBoundary(text, index + lowerName.length)
+      ) {
+        hit.push(name);
+        break;
+      }
+      index = lowerText.indexOf(lowerName, index + 1);
+    }
+  }
+
+  return hit;
+}

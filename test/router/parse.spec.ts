@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { findAgentNameMention } from "@/router/parse";
+import { findAgentNameMention, findAllAgentNameMentions } from "@/router/parse";
 
 describe("findAgentNameMention", () => {
   it("finds the first case-insensitive whole-token agent name", () => {
@@ -35,5 +35,25 @@ describe("findAgentNameMention", () => {
   it("returns null when there is no agent name", () => {
     expect(findAgentNameMention("<@UBOT> hello", ["admin"])).toBeNull();
     expect(findAgentNameMention("just text", ["admin"])).toBeNull();
+  });
+});
+
+describe("findAllAgentNameMentions", () => {
+  it("returns every whole-token name, deduped, canonical casing", () => {
+    expect(
+      findAllAgentNameMentions("Admin and ana-bot, hi admin", [
+        "admin",
+        "ana-bot",
+        "onboarding"
+      ])
+    ).toEqual(["admin", "ana-bot"]);
+  });
+
+  it("ignores partial-token matches", () => {
+    expect(findAllAgentNameMentions("banana ana-bot", ["ana"])).toEqual([]);
+  });
+
+  it("returns empty when nobody is named", () => {
+    expect(findAllAgentNameMentions("just text", ["admin", "ana"])).toEqual([]);
   });
 });

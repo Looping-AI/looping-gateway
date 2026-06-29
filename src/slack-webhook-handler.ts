@@ -31,6 +31,51 @@ function userIdOf(value: unknown): string | undefined {
   return undefined;
 }
 
+/** Extracted fields for a message edit/delete, normalized from the inner event. */
+interface MessageEdit {
+  editKind: "edited" | "deleted";
+  ts?: string;
+  threadTs?: string;
+  userId?: string;
+  /** New text after edit (empty for deletes). */
+  text: string;
+  /** Prior text — the transcript on delete, the before-image on edit. */
+  prevText?: string;
+}
+
+/**
+ * Pull the edit/delete shape out of a Slack `message` event. `message_changed`
+ * carries the new body in `event.message` and the old in `event.previous_message`;
+ * `message_deleted` carries only `previous_message` plus `deleted_ts`. Returns the
+ * authored ts/user (not the edit's own ts) so the feed turn attributes the origin.
+ */
+function messageEditFromEvent(raw: unknown, subtype: string): MessageEdit {
+  const event = isRecord(raw) ? (isRecord(raw.event) ? raw.event : raw) : {};
+  const inner = isRecord(event.message) ? event.message : undefined;
+  const prev = isRecord(event.previous_message)
+    ? event.previous_message
+    : undefined;
+  const prevText = str(prev?.text);
+  if (subtype === "message_deleted") {
+    return {
+      editKind: "deleted",
+      ts: str(event.deleted_ts) ?? str(prev?.ts),
+      threadTs: str(prev?.thread_ts),
+      userId: userIdOf(prev?.user),
+      text: "",
+      prevText
+    };
+  }
+  return {
+    editKind: "edited",
+    ts: str(inner?.ts) ?? str(event.ts),
+    threadTs: str(inner?.thread_ts) ?? str(prev?.thread_ts),
+    userId: userIdOf(inner?.user) ?? userIdOf(prev?.user),
+    text: str(inner?.text) ?? "",
+    prevText
+  };
+}
+
 /**
  * Map a parsed Slack webhook payload to the Workflow it should drive.
  *
@@ -68,15 +113,22 @@ export function classifyEvent(payload: SlackWebhookPayload): Classification {
 
     case "direct_message": {
       if (payload.subtype && MESSAGE_EDIT_SUBTYPES.has(payload.subtype)) {
+        // DM edit/delete → feed turn for the onboarding agent (DMs are an
+        // implicit mention, so the agent is always woken). raw is the inner event.
+        const edit = messageEditFromEvent(payload.raw, payload.subtype);
         return {
-          kind: "lifecycle",
+          kind: "message",
           params: {
             eventId: payload.eventId ?? crypto.randomUUID(),
-            type: "message",
-            subtype: payload.subtype,
+            eventType: "message",
             channelId: payload.channelId,
-            userId: payload.userId,
+            threadTs: edit.threadTs ?? payload.threadTs,
+            ts: edit.ts ?? payload.ts,
+            userId: edit.userId ?? payload.userId ?? "",
             teamId: payload.teamId,
+            text: edit.text,
+            prevText: edit.prevText,
+            editKind: edit.editKind,
             raw: payload.raw
           }
         };
@@ -110,12 +162,7 @@ export function classifyEvent(payload: SlackWebhookPayload): Classification {
         envelope && isRecord(envelope.event) ? envelope.event : undefined;
       const subtype = event ? str(event.subtype) : undefined;
 
-      const isLifecycle =
-        LIFECYCLE_EVENT_TYPES.has(eventType) ||
-        (eventType === "message" &&
-          !!subtype &&
-          MESSAGE_EDIT_SUBTYPES.has(subtype));
-
+      const isLifecycle = LIFECYCLE_EVENT_TYPES.has(eventType);
       if (isLifecycle) {
         // For team_join, the user field is an object — extract the display name
         // here so the Workflow handler receives it directly on params.displayName
@@ -142,6 +189,67 @@ export function classifyEvent(payload: SlackWebhookPayload): Classification {
             userId: event ? userIdOf(event.user) : undefined,
             teamId: envelope ? str(envelope.team_id) : undefined,
             displayName,
+            raw: envelope ?? {}
+          }
+        };
+      }
+
+      // Plain channel messages (and their edits/deletes) arrive here because the
+      // adapter only types app_mention + DMs. Every one becomes a feed turn so
+      // channel_messages agents see the full channel reality; mention agents are
+      // filtered later by name. Bot/system traffic and senderless events are dropped.
+      if (eventType === "message" && event) {
+        if (str(event.bot_id) || subtype === "bot_message") {
+          return { kind: "ignore", reason: "bot message" };
+        }
+        const channelId = str(event.channel);
+        if (!channelId) {
+          return { kind: "ignore", reason: "message without a channel" };
+        }
+        if (subtype && MESSAGE_EDIT_SUBTYPES.has(subtype)) {
+          const edit = messageEditFromEvent(event, subtype);
+          if (!edit.userId) {
+            return { kind: "ignore", reason: "message edit without a user id" };
+          }
+          return {
+            kind: "message",
+            params: {
+              eventId: str(envelope?.event_id) ?? crypto.randomUUID(),
+              eventType: "message",
+              channelId,
+              threadTs: edit.threadTs ?? edit.ts ?? "",
+              ts: edit.ts ?? "",
+              userId: edit.userId,
+              teamId: envelope ? str(envelope.team_id) : undefined,
+              text: edit.text,
+              prevText: edit.prevText,
+              editKind: edit.editKind,
+              raw: envelope ?? {}
+            }
+          };
+        }
+        if (subtype) {
+          return { kind: "ignore", reason: `message subtype: ${subtype}` };
+        }
+        const userId = userIdOf(event.user);
+        if (!userId) {
+          return {
+            kind: "ignore",
+            reason: "channel message without a user id"
+          };
+        }
+        const ts = str(event.ts) ?? "";
+        return {
+          kind: "message",
+          params: {
+            eventId: str(envelope?.event_id) ?? crypto.randomUUID(),
+            eventType: "message",
+            channelId,
+            threadTs: str(event.thread_ts) ?? ts,
+            ts,
+            userId,
+            teamId: envelope ? str(envelope.team_id) : undefined,
+            text: str(event.text) ?? "",
             raw: envelope ?? {}
           }
         };

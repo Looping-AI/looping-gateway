@@ -110,6 +110,12 @@ export const agents = sqliteTable(
     cardSigningJku: text("card_signing_jku"),
     cardSigningKid: text("card_signing_kid"),
     enabled: integer("enabled", { mode: "boolean" }).notNull().default(true),
+    // When the agent is woken: `mention` = only on a name mention (machine or
+    // display name); `channel_messages` = every channel message. Required (no
+    // default) so a missing value is rejected, not silently coerced.
+    notifyOn: text("notify_on", {
+      enum: ["mention", "channel_messages"]
+    }).notNull(),
     workspaceId: integer("workspace_id")
       .notNull()
       .references(() => workspaces.id),

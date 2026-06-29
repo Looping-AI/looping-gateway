@@ -12,6 +12,10 @@ export interface MessageWorkflowParams {
   userId: string;
   teamId?: string;
   text: string;
+  /** Set for edits/deletes: the message's prior text (transcript on delete). */
+  prevText?: string;
+  /** Marks edit/delete events so the workflow renders a feed turn, not a reply. */
+  editKind?: "edited" | "deleted";
   raw: Record<string, unknown>;
 }
 

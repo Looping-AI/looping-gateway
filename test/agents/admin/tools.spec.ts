@@ -55,7 +55,8 @@ describe("admin tools — agents_write / agents_read", () => {
       operation: "register",
       name: "tool-agent-a",
       displayName: "Tool Agent A",
-      a2aEndpoint: "https://example.com/tool-agent-a"
+      a2aEndpoint: "https://example.com/tool-agent-a",
+      notifyOn: "mention"
     });
     expect(reg).toMatchObject({ ok: true });
 
@@ -77,7 +78,8 @@ describe("admin tools — agents_write / agents_read", () => {
       await agentsWrite(d, {
         operation: "register",
         name: "nope",
-        a2aEndpoint: "https://example.com/nope"
+        a2aEndpoint: "https://example.com/nope",
+        notifyOn: "mention"
       })
     ).toHaveProperty("error");
   });
@@ -93,7 +95,8 @@ describe("admin tools — agents_write / agents_read", () => {
       await agentsWrite(d, {
         operation: "register",
         name: "admin",
-        a2aEndpoint: "https://example.com/admin"
+        a2aEndpoint: "https://example.com/admin",
+        notifyOn: "mention"
       })
     ).toHaveProperty("error");
     // built-in admin row cannot be modified
@@ -106,13 +109,15 @@ describe("admin tools — agents_write / agents_read", () => {
     await agentsWrite(d2, {
       operation: "register",
       name: "dup-agent",
-      a2aEndpoint: "https://example.com/dup-agent"
+      a2aEndpoint: "https://example.com/dup-agent",
+      notifyOn: "mention"
     });
     expect(
       await agentsWrite(d2, {
         operation: "register",
         name: "dup-agent",
-        a2aEndpoint: "https://example.com/dup-agent"
+        a2aEndpoint: "https://example.com/dup-agent",
+        notifyOn: "mention"
       })
     ).toHaveProperty("error");
   });
@@ -123,7 +128,8 @@ describe("admin tools — agents_write / agents_read", () => {
     await agentsWrite(d, {
       operation: "register",
       name: "chan-agent",
-      a2aEndpoint: "https://example.com/chan-agent"
+      a2aEndpoint: "https://example.com/chan-agent",
+      notifyOn: "mention"
     });
     await agentsWrite(d, {
       operation: "update",
@@ -164,7 +170,8 @@ describe("admin tools — agents_write / agents_read", () => {
     await agentsWrite(owner, {
       operation: "register",
       name: "chan-owned",
-      a2aEndpoint: "https://example.com/chan-owned"
+      a2aEndpoint: "https://example.com/chan-owned",
+      notifyOn: "mention"
     });
     const other = deps(wsB, ctx({ adminWorkspaces: [wsB] }));
     expect(
@@ -190,7 +197,8 @@ describe("admin tools — agents_write / agents_read", () => {
     await agentsWrite(owner, {
       operation: "register",
       name: "wsA-agent",
-      a2aEndpoint: "https://example.com/wsA-agent"
+      a2aEndpoint: "https://example.com/wsA-agent",
+      notifyOn: "mention"
     });
     const other = deps(wsB, ctx({ adminWorkspaces: [wsB] }));
     expect(
@@ -218,7 +226,8 @@ describe("admin tools — card-signing verification + pin (TOFU)", () => {
     const reg = await agentsWrite(d, {
       operation: "register",
       name: "pinned-agent",
-      a2aEndpoint: "https://signed.example.com/a2a"
+      a2aEndpoint: "https://signed.example.com/a2a",
+      notifyOn: "mention"
     });
     expect(reg).toMatchObject({ ok: true });
 
@@ -237,7 +246,8 @@ describe("admin tools — card-signing verification + pin (TOFU)", () => {
     const res = await agentsWrite(d, {
       operation: "register",
       name: "unsigned-agent",
-      a2aEndpoint: "https://unsigned.example.com/a2a"
+      a2aEndpoint: "https://unsigned.example.com/a2a",
+      notifyOn: "mention"
     });
     expect(res).toHaveProperty("error");
     expect((res as { error: string }).error).toContain("verification failed");
@@ -257,7 +267,8 @@ describe("admin tools — card-signing verification + pin (TOFU)", () => {
     await agentsWrite(original, {
       operation: "register",
       name: "tofu-agent",
-      a2aEndpoint: "https://a.example.com/a2a"
+      a2aEndpoint: "https://a.example.com/a2a",
+      notifyOn: "mention"
     });
 
     // A new endpoint that verifies — but with a DIFFERENT pinned identity.
@@ -293,7 +304,8 @@ describe("admin tools — card-signing verification + pin (TOFU)", () => {
     await agentsWrite(d, {
       operation: "register",
       name: "tofu-ok-agent",
-      a2aEndpoint: "https://same.example.com/a2a"
+      a2aEndpoint: "https://same.example.com/a2a",
+      notifyOn: "mention"
     });
     const res = await agentsWrite(d, {
       operation: "update",

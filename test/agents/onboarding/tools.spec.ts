@@ -53,12 +53,14 @@ describe("onboarding tools — directory_read agents", () => {
       name: "onb-mine-agent",
       kind: "custom",
       a2aEndpoint: "https://example.com/onb-mine",
+      notifyOn: "mention",
       workspaceId: mine
     });
     await registerAgent(db, {
       name: "onb-other-agent",
       kind: "custom",
       a2aEndpoint: "https://example.com/onb-other",
+      notifyOn: "mention",
       workspaceId: other
     });
 
@@ -80,6 +82,7 @@ describe("onboarding tools — directory_read agents", () => {
       name: "onb-disabled-agent",
       kind: "custom",
       a2aEndpoint: "https://example.com/onb-disabled",
+      notifyOn: "mention",
       workspaceId: wsId
     });
     await updateAgent(db, "onb-disabled-agent", { enabled: false });

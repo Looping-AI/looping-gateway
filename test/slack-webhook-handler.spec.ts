@@ -407,7 +407,7 @@ describe("lifecycle events", () => {
     );
   });
 
-  it("routes message_changed edits to the Lifecycle Workflow", async () => {
+  it("routes message_changed edits to the Message Workflow", async () => {
     const create = vi.fn();
     const body = JSON.stringify({
       type: "event_callback",
@@ -416,17 +416,19 @@ describe("lifecycle events", () => {
         type: "message",
         subtype: "message_changed",
         channel: "C1",
-        channel_type: "channel"
+        channel_type: "channel",
+        message: { ts: "1700000000.1", user: "U1", text: "new" },
+        previous_message: { ts: "1700000000.1", user: "U1", text: "old" }
       }
     });
     const res = await post(
       body,
-      makeEnv({ LIFECYCLE_WORKFLOW: { create } as unknown as Workflow })
+      makeEnv({ MESSAGE_WORKFLOW: { create } as unknown as Workflow })
     );
     expect(res.status).toBe(200);
     expect(create).toHaveBeenCalledWith(
       expect.objectContaining({
-        params: expect.objectContaining({ subtype: "message_changed" })
+        params: expect.objectContaining({ editKind: "edited", text: "new" })
       })
     );
   });
@@ -437,7 +439,7 @@ describe("lifecycle events", () => {
 // ---------------------------------------------------------------------------
 
 describe("ignored events", () => {
-  it("acks 200 and calls no workflow for a bare channel message", async () => {
+  it("routes a bare channel message to the Message Workflow", async () => {
     const message = vi.fn();
     const lifecycle = vi.fn();
     const body = JSON.stringify({
@@ -460,7 +462,7 @@ describe("ignored events", () => {
       })
     );
     expect(res.status).toBe(200);
-    expect(message).not.toHaveBeenCalled();
+    expect(message).toHaveBeenCalledOnce();
     expect(lifecycle).not.toHaveBeenCalled();
   });
 
