@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { DefaultRequestHandler, InMemoryTaskStore } from "@a2a-js/sdk/server";
-import { EchoExecutor } from "@/a2a/echo-executor";
+import { EchoExecutor } from "../echo-executor";
 import { buildAgentCard } from "@/a2a/card";
 import { serveA2A } from "@/a2a/serve";
 

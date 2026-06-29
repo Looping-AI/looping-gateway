@@ -167,14 +167,19 @@ export async function getBotUserId(env: SlackEnv): Promise<string | null> {
 
 /**
  * Post a bot reply via `chat.postMessage`. Pass `threadTs` to reply inside a
- * thread; pass null to post at the top level (e.g. in a DM). The gateway owns
- * the bot token, so all agent replies flow through here.
+ * thread; pass null to post at the top level (e.g. in a DM). Pass `username` to
+ * render the message under a custom name (the agent's display name) — requires
+ * the `chat:write.customize` scope; a null/empty value is omitted so the default
+ * app name is used. Stored agent names/display names are already trimmed at the
+ * model layer, so no trimming happens here. The gateway owns the bot token, so
+ * all agent replies flow through here.
  */
 export async function postReply(
   env: SlackEnv,
   channelId: string,
   threadTs: string | null,
-  text: string
+  text: string,
+  username?: string | null
 ): Promise<void> {
   let mrkdwn: string;
   try {
@@ -189,7 +194,8 @@ export async function postReply(
       {
         channel: channelId,
         text: mrkdwn,
-        ...(threadTs ? { thread_ts: threadTs } : {})
+        ...(threadTs ? { thread_ts: threadTs } : {}),
+        ...(username ? { username } : {})
       },
       { token: env.SLACK_BOT_TOKEN }
     );

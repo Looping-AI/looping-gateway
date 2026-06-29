@@ -161,6 +161,28 @@ describe("postReply", () => {
     expect(captured?.has("thread_ts")).toBe(false);
   });
 
+  it("sets username when a display name is provided", async () => {
+    let captured: URLSearchParams | undefined;
+    stubSlack((method, body) => {
+      if (method === "chat.postMessage") captured = body;
+      return { ok: true, ts: "1.2" };
+    });
+    await postReply(slackEnv, "C1", "1700.1", "hello", "Analytics Bot");
+    expect(captured?.get("username")).toBe("Analytics Bot");
+  });
+
+  it("omits username when absent or empty", async () => {
+    let captured: URLSearchParams | undefined;
+    stubSlack((method, body) => {
+      if (method === "chat.postMessage") captured = body;
+      return { ok: true, ts: "1.2" };
+    });
+    await postReply(slackEnv, "C1", "1700.1", "hello");
+    expect(captured?.has("username")).toBe(false);
+    await postReply(slackEnv, "C1", "1700.1", "hello", "");
+    expect(captured?.has("username")).toBe(false);
+  });
+
   it("throws on a non-ok response", async () => {
     stubSlack(() => ({ ok: false, error: "channel_not_found" }));
     await expect(postReply(slackEnv, "C1", null, "x")).rejects.toThrow(

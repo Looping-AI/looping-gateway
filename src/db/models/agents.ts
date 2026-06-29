@@ -146,9 +146,9 @@ export async function registerAgent(
   const rows = await db
     .insert(schema.agents)
     .values({
-      name: input.name,
+      name: input.name.trim().toLowerCase(),
       kind: input.kind,
-      displayName: input.displayName ?? null,
+      displayName: input.displayName?.trim() || null,
       a2aEndpoint: input.a2aEndpoint,
       notifyOn: input.notifyOn,
       workspaceId: input.workspaceId,
@@ -169,7 +169,7 @@ export async function updateAgent(
     .update(schema.agents)
     .set({
       ...(patch.displayName !== undefined
-        ? { displayName: patch.displayName }
+        ? { displayName: patch.displayName?.trim() || null }
         : {}),
       ...(patch.a2aEndpoint !== undefined
         ? { a2aEndpoint: patch.a2aEndpoint }
