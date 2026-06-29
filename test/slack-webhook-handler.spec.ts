@@ -22,6 +22,17 @@ import { stubSlack } from "./wrappers/slack-stub";
 beforeEach(() => stubSlack(() => ({ ok: true })));
 afterEach(() => vi.unstubAllGlobals());
 
+// A channel_messages agent on C1 so the handler's target gate resolves ≥1 agent
+// and still fires the message/reaction workflows (app_mention, edits, plain msgs).
+beforeEach(async () => {
+  await env.DB.prepare(
+    "INSERT OR IGNORE INTO agents (name, kind, enabled, notify_on, a2a_endpoint, workspace_id) VALUES ('wf-c1', 'custom', 1, 'channel_messages', 'https://example.com/wf-c1', 0)"
+  ).run();
+  await env.DB.prepare(
+    "INSERT OR IGNORE INTO agent_channels (channel_id, agent_name) VALUES ('C1', 'wf-c1')"
+  ).run();
+});
+
 type FakeEnv = Pick<
   Env,
   | "DB"

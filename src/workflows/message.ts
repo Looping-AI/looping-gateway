@@ -3,7 +3,6 @@ import type { WorkflowEvent, WorkflowStep } from "cloudflare:workers";
 import type { MessageWorkflowParams } from "@/slack/types";
 import { getDb } from "@/db/client";
 import { buildUserAuthContext } from "@/auth";
-import { resolveTargets } from "@/router/resolve";
 import {
   dispatchToAgent,
   type DispatchAgentRef,
@@ -11,7 +10,6 @@ import {
 } from "@/agents/dispatch";
 import { InvalidEndpointError } from "@/a2a/endpoint";
 import { postReply } from "@/wrappers/slack";
-import { getSlackChannelName } from "@/db/models/channels";
 import {
   REACTION_COLLECT_EVENT,
   reactionInstanceId
@@ -23,6 +21,8 @@ export interface AgentPlan {
   /** Workspace scope of the agent; null = org-wide (onboarding). */
   workspaceId: number | null;
   text: string;
+  /** Channel display name, resolved once in resolveMessage for the fan-out. */
+  channelName: string | null;
   user: Awaited<ReturnType<typeof buildUserAuthContext>>;
 }
 
@@ -53,16 +53,13 @@ export function feedText(p: MessageWorkflowParams): string {
   return p.text;
 }
 
-/** Resolve every agent woken by the message + build the caller's auth context. */
+/** Build dispatch plans from the targets resolved in the handler + auth context. */
 export async function resolveMessage(
   env: Env,
   p: MessageWorkflowParams
 ): Promise<AgentPlan[]> {
   const db = getDb(env);
-  const targets = await resolveTargets(db, {
-    channelId: p.channelId,
-    text: p.text
-  });
+  const targets = p.targets;
   if (targets.length === 0) return [];
 
   // `userId` is guaranteed by the classifier (message events without a sender
@@ -78,6 +75,7 @@ export async function resolveMessage(
     },
     workspaceId: t.workspaceId,
     text: feedText(p),
+    channelName: t.channelName,
     user
   }));
 }
@@ -104,7 +102,7 @@ export async function dispatchMessage(
     return await dispatchToAgent(env, plan.agent, {
       text: plan.text,
       channelId: p.channelId,
-      channelName: await getSlackChannelName(getDb(env), p.channelId),
+      channelName: plan.channelName,
       threadTs: p.threadTs || p.ts,
       messageTs: p.ts,
       user: plan.user,
@@ -153,15 +151,16 @@ export async function signalReactionCollect(
 
 /**
  * Durable, retriable handler for a Slack message. One instance per Slack
- * `event_id`. The Gateway no longer picks a single agent — it fans the turn out
- * to every agent woken by the event (proactive `channel_messages` + any named
- * `mention` agents); each agent classifies internally and may stay silent.
+ * `event_id`. The Gateway no longer picks a single agent — the woken agents are
+ * resolved up front in the webhook handler and passed in on `params.targets`
+ * (proactive `channel_messages` + any named `mention` agents); each agent
+ * classifies internally and may stay silent.
  *
- * Steps: `resolve` (registry + auth) → one `dispatch:{name}` per agent (A2A) →
- * one `reply:{name}` per non-empty reply (chat.postMessage). Agents run in
- * parallel; allSettled isolates per-agent failures so one agent's exhausted
- * retries never blocks the others or aborts the run, and silence (empty reply)
- * posts nothing.
+ * Steps: `resolve` (build auth + plans from targets) → one `dispatch:{name}` per
+ * agent (A2A) → one `reply:{name}` per non-empty reply (chat.postMessage). Agents
+ * run in parallel; allSettled isolates per-agent failures so one agent's
+ * exhausted retries never blocks the others or aborts the run, and silence
+ * (empty reply) posts nothing.
  */
 export class MessageWorkflow extends WorkflowEntrypoint<
   Env,

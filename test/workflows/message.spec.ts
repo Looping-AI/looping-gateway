@@ -148,7 +148,7 @@ describe("MessageWorkflow (introspectWorkflow)", () => {
     }
   });
 
-  it("no-match channel: resolve completes with no agents, nothing posted", async () => {
+  it("no-match channel: no agent woken, no workflow created, nothing posted", async () => {
     const calls = captureSlack();
     const introspector = await introspectWorkflow(env.MESSAGE_WORKFLOW);
     try {
@@ -159,9 +159,8 @@ describe("MessageWorkflow (introspectWorkflow)", () => {
       const res = await trigger(body);
       expect(res.status).toBe(200);
 
-      const [instance] = introspector.get();
-      await instance.waitForStatus("complete");
-
+      // Gate skips the workflow entirely when no agent resolves — no flicker.
+      expect(introspector.get()).toHaveLength(0);
       expect(calls).toHaveLength(0);
     } finally {
       await introspector.dispose();

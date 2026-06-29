@@ -10,7 +10,9 @@ import { getDb } from "@/db/client";
 import { getSlackTeamId, setPublicUrl } from "@/db/models/workspace-configs";
 import { PENDING_REACTION, reactionInstanceId } from "@/workflows/reaction";
 import { addReaction } from "@/wrappers/slack";
+import { resolveTargets } from "@/router/resolve";
 import type {
+  ClassifiedMessageParams,
   MessageWorkflowParams,
   LifecycleWorkflowParams,
   Classification
@@ -306,7 +308,7 @@ async function triggerWorkflow(
  */
 async function addPendingReaction(
   env: Pick<Env, "SLACK_BOT_TOKEN">,
-  params: MessageWorkflowParams
+  params: ClassifiedMessageParams
 ): Promise<void> {
   try {
     await addReaction(env, params.channelId, params.ts, PENDING_REACTION);
@@ -327,7 +329,7 @@ async function addPendingReaction(
  */
 async function triggerReactionWorkflow(
   workflow: Workflow,
-  params: MessageWorkflowParams
+  params: ClassifiedMessageParams
 ): Promise<void> {
   try {
     await workflow.create({
@@ -491,15 +493,31 @@ export async function handleSlackEvent(
       const db = getDb(env);
       const guardResponse = await guardTeamId(classification.params.teamId, db);
       if (guardResponse) return guardResponse;
-      // Fire all three off-path tasks and return 200 immediately, well within
-      // Slack's 3 s ack budget. waitUntil keeps the isolate alive until they
-      // all settle. All three already swallow/log their own errors.
+      const base = classification.params;
+      // Resolve, react, and fan out off-path so the 200 ack is never delayed.
+      // Resolving here (not in the workflow) lets us skip the ⏳ reaction and
+      // both workflows entirely when no agent is woken — no hourglass flicker on
+      // channels without a channel_messages agent. waitUntil keeps the isolate
+      // alive until all tasks settle; each already swallows/logs its own errors.
       ctx.waitUntil(
-        Promise.allSettled([
-          addPendingReaction(env, classification.params),
-          triggerReactionWorkflow(env.REACTION_WORKFLOW, classification.params),
-          triggerWorkflow(env.MESSAGE_WORKFLOW, classification.params)
-        ])
+        (async () => {
+          const targets = await resolveTargets(db, {
+            channelId: base.channelId,
+            text: base.text
+          });
+          if (targets.length === 0) {
+            console.log("[gateway] no agent woken — staying silent", {
+              eventId: base.eventId,
+              channelId: base.channelId
+            });
+            return;
+          }
+          await Promise.allSettled([
+            addPendingReaction(env, base),
+            triggerReactionWorkflow(env.REACTION_WORKFLOW, base),
+            triggerWorkflow(env.MESSAGE_WORKFLOW, { ...base, targets })
+          ]);
+        })()
       );
       return OK();
     }

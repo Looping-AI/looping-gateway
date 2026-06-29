@@ -5,6 +5,7 @@ import type { CardSigningPin } from "@/a2a/card-verify";
 import type { Db } from "@/db/client";
 import {
   type AgentRow,
+  type NotifyOn,
   getAgent,
   getAgentChannels,
   listAgentsForWorkspace,
@@ -145,7 +146,7 @@ export type AgentsWriteArgs =
       name: string;
       displayName?: string;
       a2aEndpoint: string;
-      notifyOn: "mention" | "channel_messages";
+      notifyOn: NotifyOn;
     }
   | {
       operation: "update";
@@ -153,7 +154,7 @@ export type AgentsWriteArgs =
       displayName?: string;
       enabled?: boolean;
       a2aEndpoint?: string;
-      notifyOn?: "mention" | "channel_messages";
+      notifyOn?: NotifyOn;
     }
   | { operation: "add_channel"; name: string; channelId: string }
   | { operation: "remove_channel"; name: string; channelId: string }

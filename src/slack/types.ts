@@ -2,7 +2,10 @@
 // Params passed into Workflows — must be Rpc.Serializable (plain JSON types).
 // ---------------------------------------------------------------------------
 
-export interface MessageWorkflowParams {
+import type { ResolvedTarget } from "@/router/resolve";
+
+/** Classifier output for a message event — before targets are resolved. */
+export interface ClassifiedMessageParams {
   eventId: string;
   eventType: "app_mention" | "message";
   channelId: string;
@@ -17,6 +20,12 @@ export interface MessageWorkflowParams {
   /** Marks edit/delete events so the workflow renders a feed turn, not a reply. */
   editKind?: "edited" | "deleted";
   raw: Record<string, unknown>;
+}
+
+/** MessageWorkflow input — classifier params plus the agents resolved to wake. */
+export interface MessageWorkflowParams extends ClassifiedMessageParams {
+  /** Agents woken by this message, resolved once in the handler. Always ≥1. */
+  targets: ResolvedTarget[];
 }
 
 export interface LifecycleWorkflowParams {
@@ -49,6 +58,6 @@ export interface ReactionWorkflowParams {
 
 export type Classification =
   | { kind: "challenge"; challenge: string }
-  | { kind: "message"; params: MessageWorkflowParams }
+  | { kind: "message"; params: ClassifiedMessageParams }
   | { kind: "lifecycle"; params: LifecycleWorkflowParams }
   | { kind: "ignore"; reason: string };

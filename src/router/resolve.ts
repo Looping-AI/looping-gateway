@@ -2,6 +2,7 @@ import type { Db } from "@/db/client";
 import type { AgentRow } from "@/db/models/agents";
 import { getAgent, getAgentsForChannel } from "@/db/models/agents";
 import { getWorkspaceByAdminChannel } from "@/db/models/workspaces";
+import { getSlackChannelName } from "@/db/models/channels";
 import { findAllAgentNameMentions } from "./parse";
 
 /** A resolved agent target plus the cleaned prompt and workspace scope. */
@@ -12,6 +13,8 @@ export interface ResolvedTarget {
   workspaceId: number | null;
   /** Original user text. */
   text: string;
+  /** Display name of the channel, resolved once for the whole fan-out. */
+  channelName: string | null;
 }
 
 export interface ResolveInput {
@@ -44,11 +47,18 @@ export async function resolveTargets(
   const channelEntries = await getAgentsForChannel(db, input.channelId);
   const ws = await getWorkspaceByAdminChannel(db, input.channelId);
   const isDm = isDmChannel(input.channelId);
+  const channelName = await getSlackChannelName(db, input.channelId);
 
   const byName = new Map<string, ResolvedTarget>();
   const add = (agent: AgentRow, workspaceId: number | null) => {
     if (!byName.has(agent.name))
-      byName.set(agent.name, { kind: "agent", agent, workspaceId, text });
+      byName.set(agent.name, {
+        kind: "agent",
+        agent,
+        workspaceId,
+        text,
+        channelName
+      });
   };
 
   // Channel agents: proactive always; mention-only when named (machine or display).

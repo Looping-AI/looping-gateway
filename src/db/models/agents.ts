@@ -4,6 +4,7 @@ import * as schema from "../schema";
 
 export type AgentRow = typeof schema.agents.$inferSelect;
 export type AgentKind = AgentRow["kind"];
+export type NotifyOn = AgentRow["notifyOn"];
 
 export interface RegisterAgentInput {
   name: string;
@@ -12,7 +13,7 @@ export interface RegisterAgentInput {
   /** Required: custom agents are remote and addressed by this HTTP endpoint. */
   a2aEndpoint: string;
   /** Required (no default): when the agent is woken — mention vs every message. */
-  notifyOn: AgentRow["notifyOn"];
+  notifyOn: NotifyOn;
   workspaceId: number;
   /** Pinned AgentCard signing identity (custom agents; verified at registration). */
   cardSigningJku?: string | null;
@@ -24,7 +25,7 @@ export interface UpdateAgentPatch {
   displayName?: string | null;
   a2aEndpoint?: string;
   enabled?: boolean;
-  notifyOn?: AgentRow["notifyOn"];
+  notifyOn?: NotifyOn;
   cardSigningJku?: string | null;
   cardSigningKid?: string | null;
 }
