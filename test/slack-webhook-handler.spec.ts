@@ -443,6 +443,134 @@ describe("lifecycle events", () => {
       })
     );
   });
+
+  it("extracts userId from message.edited.user when message.user is absent (channel message_changed)", async () => {
+    const create = vi.fn();
+    const body = JSON.stringify({
+      type: "event_callback",
+      event_id: "EvEditedUser",
+      event: {
+        type: "message",
+        subtype: "message_changed",
+        channel: "C1",
+        channel_type: "channel",
+        message: {
+          ts: "1700000000.1",
+          edited: { user: "U_EDITOR" },
+          text: "new"
+        },
+        previous_message: { ts: "1700000000.1", text: "old" }
+      }
+    });
+    const res = await post(
+      body,
+      makeEnv({ MESSAGE_WORKFLOW: { create } as unknown as Workflow })
+    );
+    expect(res.status).toBe(200);
+    expect(create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        params: expect.objectContaining({
+          userId: "U_EDITOR",
+          editKind: "edited"
+        })
+      })
+    );
+  });
+
+  it("ignores a channel message_deleted when no user id is available", async () => {
+    const create = vi.fn();
+    const body = JSON.stringify({
+      type: "event_callback",
+      event_id: "EvDelNoUser",
+      event: {
+        type: "message",
+        subtype: "message_deleted",
+        channel: "C1",
+        channel_type: "channel",
+        deleted_ts: "1700000000.1",
+        previous_message: { ts: "1700000000.1", text: "gone" }
+        // no user on previous_message
+      }
+    });
+    const res = await post(
+      body,
+      makeEnv({ MESSAGE_WORKFLOW: { create } as unknown as Workflow })
+    );
+    expect(res.status).toBe(200);
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it("ignores a DM message_changed when no user id is available", async () => {
+    const create = vi.fn();
+    const body = JSON.stringify({
+      type: "event_callback",
+      event_id: "EvDmEditNoUser",
+      event: {
+        type: "message",
+        channel_type: "im",
+        subtype: "message_changed",
+        channel: "D1",
+        message: { ts: "1700000000.1", text: "new" },
+        previous_message: { ts: "1700000000.1", text: "old" }
+        // no user anywhere
+      }
+    });
+    const res = await post(
+      body,
+      makeEnv({ MESSAGE_WORKFLOW: { create } as unknown as Workflow })
+    );
+    expect(res.status).toBe(200);
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it("ignores a DM message_deleted when no user id is available", async () => {
+    const create = vi.fn();
+    const body = JSON.stringify({
+      type: "event_callback",
+      event_id: "EvDmDelNoUser",
+      event: {
+        type: "message",
+        channel_type: "im",
+        subtype: "message_deleted",
+        channel: "D1",
+        deleted_ts: "1700000000.1",
+        previous_message: { ts: "1700000000.1", text: "gone" }
+        // no user on previous_message
+      }
+    });
+    const res = await post(
+      body,
+      makeEnv({ MESSAGE_WORKFLOW: { create } as unknown as Workflow })
+    );
+    expect(res.status).toBe(200);
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it("routes a DM message_deleted to the Message Workflow when user id is present", async () => {
+    const create = vi.fn();
+    const body = JSON.stringify({
+      type: "event_callback",
+      event_id: "EvDmDel",
+      event: {
+        type: "message",
+        channel_type: "im",
+        subtype: "message_deleted",
+        channel: "D1",
+        deleted_ts: "1700000000.1",
+        previous_message: { ts: "1700000000.1", user: "U3", text: "gone" }
+      }
+    });
+    const res = await post(
+      body,
+      makeEnv({ MESSAGE_WORKFLOW: { create } as unknown as Workflow })
+    );
+    expect(res.status).toBe(200);
+    expect(create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        params: expect.objectContaining({ userId: "U3", editKind: "deleted" })
+      })
+    );
+  });
 });
 
 // ---------------------------------------------------------------------------

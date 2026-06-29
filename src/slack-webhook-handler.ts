@@ -68,11 +68,13 @@ function messageEditFromEvent(raw: unknown, subtype: string): MessageEdit {
       prevText
     };
   }
+  const edited = isRecord(inner?.edited) ? inner.edited : undefined;
   return {
     editKind: "edited",
     ts: str(inner?.ts) ?? str(event.ts),
     threadTs: str(inner?.thread_ts) ?? str(prev?.thread_ts),
-    userId: userIdOf(inner?.user) ?? userIdOf(prev?.user),
+    userId:
+      userIdOf(inner?.user) ?? userIdOf(edited?.user) ?? userIdOf(prev?.user),
     text: str(inner?.text) ?? "",
     prevText
   };
@@ -118,6 +120,13 @@ export function classifyEvent(payload: SlackWebhookPayload): Classification {
         // DM edit/delete → feed turn for the onboarding agent (DMs are an
         // implicit mention, so the agent is always woken). raw is the inner event.
         const edit = messageEditFromEvent(payload.raw, payload.subtype);
+        const userId = edit.userId ?? payload.userId;
+        if (!userId) {
+          return {
+            kind: "ignore",
+            reason: "DM message edit without a user id"
+          };
+        }
         return {
           kind: "message",
           params: {
@@ -126,7 +135,7 @@ export function classifyEvent(payload: SlackWebhookPayload): Classification {
             channelId: payload.channelId,
             threadTs: edit.threadTs ?? payload.threadTs,
             ts: edit.ts ?? payload.ts,
-            userId: edit.userId ?? payload.userId ?? "",
+            userId,
             teamId: payload.teamId,
             text: edit.text,
             prevText: edit.prevText,
