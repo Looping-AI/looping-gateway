@@ -38,6 +38,15 @@ export interface CardSigningPin {
   cardSigningKid: string;
 }
 
+/** Full result of verifying a remote agent endpoint — pin + card-derived metadata. */
+export interface VerifiedAgentCard {
+  pin: CardSigningPin;
+  /** Display name sourced from `AgentCard.name`. */
+  displayName: string;
+  /** Optional icon URL sourced from `AgentCard.iconUrl`. */
+  iconUrl: string | null;
+}
+
 /** A2A AgentCard JWS signature entry (detached payload). */
 interface AgentCardSignature {
   protected: string;
@@ -195,12 +204,14 @@ export async function verifyAgentCardSignature(
 
 /**
  * One-shot verifier used at agent registration: fetch the card from the
- * endpoint, verify its signature, and return the pin to persist.
+ * endpoint, verify its signature, and return the pin plus card-derived metadata
+ * (displayName, iconUrl) to persist alongside the agent row.
  */
 export async function verifyRemoteAgentEndpoint(
   endpoint: string,
   allowedDomains: string[] = []
-): Promise<CardSigningPin> {
+): Promise<VerifiedAgentCard> {
   const card = await fetchAgentCard(endpoint, allowedDomains);
-  return verifyAgentCardSignature(card, { allowedDomains });
+  const pin = await verifyAgentCardSignature(card, { allowedDomains });
+  return { pin, displayName: card.name, iconUrl: card.iconUrl ?? null };
 }

@@ -1,0 +1,1 @@
+ALTER TABLE `agents` ADD `icon_url` text;

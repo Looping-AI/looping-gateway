@@ -1,7 +1,7 @@
 import { tool, type ToolSet } from "ai";
 import { z } from "zod";
 import { authorize, type UserAuthContext } from "@/auth";
-import type { CardSigningPin } from "@/a2a/card-verify";
+import type { CardSigningPin, VerifiedAgentCard } from "@/a2a/card-verify";
 import type { Db } from "@/db/client";
 import {
   type AgentRow,
@@ -57,8 +57,11 @@ export interface AdminToolDeps {
   verifyEndpoint: EndpointVerifier;
 }
 
-/** Verify a remote agent endpoint + signed card; resolves to the pin to persist. */
-export type EndpointVerifier = (endpoint: string) => Promise<CardSigningPin>;
+/** Verify a remote agent endpoint + signed card; resolves to pin and card-derived metadata. */
+export type EndpointVerifier = (endpoint: string) => Promise<VerifiedAgentCard>;
+
+// CardSigningPin is re-exported so existing imports from this module keep working.
+export type { CardSigningPin };
 
 /** A reserved/built-in agent name that registry CRUD must never touch. */
 const RESERVED_NAMES = new Set(["admin", "onboarding"]);
@@ -74,6 +77,7 @@ function shape(a: AgentRow, channels: string[]): ToolResult {
     name: a.name,
     kind: a.kind,
     displayName: a.displayName,
+    iconUrl: a.iconUrl,
     enabled: a.enabled,
     notifyOn: a.notifyOn,
     a2aEndpoint: a.a2aEndpoint,
@@ -176,9 +180,9 @@ export async function agentsWrite(
         return { error: `"${args.name}" is a reserved built-in agent name.` };
       if (await getAgent(deps.db, args.name))
         return { error: `An agent named "${args.name}" already exists.` };
-      let pin: CardSigningPin;
+      let verified: VerifiedAgentCard;
       try {
-        pin = await deps.verifyEndpoint(args.a2aEndpoint);
+        verified = await deps.verifyEndpoint(args.a2aEndpoint);
       } catch (err) {
         return {
           error: `Endpoint verification failed: ${(err as Error).message}`
@@ -187,12 +191,13 @@ export async function agentsWrite(
       const row = await registerAgent(deps.db, {
         name: args.name,
         kind: "custom",
-        displayName: args.displayName ?? null,
+        displayName: args.displayName ?? verified.displayName,
+        iconUrl: verified.iconUrl,
         a2aEndpoint: args.a2aEndpoint,
         notifyOn: args.notifyOn,
         workspaceId: deps.wsId,
-        cardSigningJku: pin.cardSigningJku,
-        cardSigningKid: pin.cardSigningKid
+        cardSigningJku: verified.pin.cardSigningJku,
+        cardSigningKid: verified.pin.cardSigningKid
       });
       return { ok: true, agent: await present(deps.db, row) };
     }
@@ -201,13 +206,15 @@ export async function agentsWrite(
       if ("error" in target) return target;
       // A re-pointed endpoint is re-verified and must keep the SAME pinned
       // signing identity (Trust-On-First-Use) — a different signer is rejected.
-      let pin: CardSigningPin | undefined;
+      // Derived fields (displayName, iconUrl) are refreshed from the new card
+      // unless the caller explicitly overrides displayName in this call.
+      let verified: VerifiedAgentCard | undefined;
       if (
         args.a2aEndpoint !== undefined &&
         args.a2aEndpoint !== target.a2aEndpoint
       ) {
         try {
-          pin = await deps.verifyEndpoint(args.a2aEndpoint);
+          verified = await deps.verifyEndpoint(args.a2aEndpoint);
         } catch (err) {
           return {
             error: `Endpoint verification failed: ${(err as Error).message}`
@@ -215,8 +222,8 @@ export async function agentsWrite(
         }
         if (
           target.cardSigningKid &&
-          (pin.cardSigningKid !== target.cardSigningKid ||
-            pin.cardSigningJku !== target.cardSigningJku)
+          (verified.pin.cardSigningKid !== target.cardSigningKid ||
+            verified.pin.cardSigningJku !== target.cardSigningJku)
         ) {
           return {
             error:
@@ -227,14 +234,18 @@ export async function agentsWrite(
         }
       }
       await updateAgent(deps.db, args.name, {
-        displayName: args.displayName,
+        displayName:
+          args.displayName !== undefined
+            ? args.displayName
+            : verified?.displayName,
         enabled: args.enabled,
         a2aEndpoint: args.a2aEndpoint,
         notifyOn: args.notifyOn,
-        ...(pin
+        ...(verified
           ? {
-              cardSigningJku: pin.cardSigningJku,
-              cardSigningKid: pin.cardSigningKid
+              iconUrl: verified.iconUrl,
+              cardSigningJku: verified.pin.cardSigningJku,
+              cardSigningKid: verified.pin.cardSigningKid
             }
           : {})
       });

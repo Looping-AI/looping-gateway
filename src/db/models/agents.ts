@@ -18,11 +18,14 @@ export interface RegisterAgentInput {
   /** Pinned AgentCard signing identity (custom agents; verified at registration). */
   cardSigningJku?: string | null;
   cardSigningKid?: string | null;
+  /** Icon URL derived from the agent's published AgentCard. */
+  iconUrl?: string | null;
 }
 
 /** Patch for `updateAgent` — only provided fields are written. */
 export interface UpdateAgentPatch {
   displayName?: string | null;
+  iconUrl?: string | null;
   a2aEndpoint?: string;
   enabled?: boolean;
   notifyOn?: NotifyOn;
@@ -149,6 +152,7 @@ export async function registerAgent(
       name: input.name.trim().toLowerCase(),
       kind: input.kind,
       displayName: input.displayName?.trim() || null,
+      iconUrl: input.iconUrl ?? null,
       a2aEndpoint: input.a2aEndpoint,
       notifyOn: input.notifyOn,
       workspaceId: input.workspaceId,
@@ -171,6 +175,7 @@ export async function updateAgent(
       ...(patch.displayName !== undefined
         ? { displayName: patch.displayName?.trim() || null }
         : {}),
+      ...(patch.iconUrl !== undefined ? { iconUrl: patch.iconUrl } : {}),
       ...(patch.a2aEndpoint !== undefined
         ? { a2aEndpoint: patch.a2aEndpoint }
         : {}),
