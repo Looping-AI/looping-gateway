@@ -571,6 +571,85 @@ describe("lifecycle events", () => {
       })
     );
   });
+
+  it("wakes a mention-only agent when its name appears in prevText of a message_deleted", async () => {
+    // Register a mention-only agent named "del-agent" on channel C1.
+    await env.DB.prepare(
+      "INSERT OR IGNORE INTO agents (name, kind, enabled, notify_on, a2a_endpoint, workspace_id) VALUES ('del-agent', 'custom', 1, 'mention', 'https://example.com/del-agent', 0)"
+    ).run();
+    await env.DB.prepare(
+      "INSERT OR IGNORE INTO agent_channels (channel_id, agent_name) VALUES ('C1', 'del-agent')"
+    ).run();
+
+    const create = vi.fn();
+    const body = JSON.stringify({
+      type: "event_callback",
+      event_id: "EvChDel",
+      event: {
+        type: "message",
+        subtype: "message_deleted",
+        channel: "C1",
+        channel_type: "channel",
+        deleted_ts: "1700000000.1",
+        previous_message: {
+          ts: "1700000000.1",
+          user: "U4",
+          text: "hey @del-agent please check this"
+        }
+      }
+    });
+    const res = await post(
+      body,
+      makeEnv({ MESSAGE_WORKFLOW: { create } as unknown as Workflow })
+    );
+    expect(res.status).toBe(200);
+    // The mention-only agent must be woken even though base.text is empty.
+    expect(create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        params: expect.objectContaining({ editKind: "deleted" })
+      })
+    );
+  });
+
+  it("does not wake a mention-only agent when its name appears in neither text nor prevText of a message_deleted", async () => {
+    // Register a mention-only agent named "quiet-agent" on channel C1.
+    await env.DB.prepare(
+      "INSERT OR IGNORE INTO agents (name, kind, enabled, notify_on, a2a_endpoint, workspace_id) VALUES ('quiet-agent', 'custom', 1, 'mention', 'https://example.com/quiet-agent', 0)"
+    ).run();
+    await env.DB.prepare(
+      "INSERT OR IGNORE INTO agent_channels (channel_id, agent_name) VALUES ('C1', 'quiet-agent')"
+    ).run();
+
+    // Use a separate channel with only the mention-only agent (no channel_messages
+    // agent) so the no-targets path is exercised cleanly.
+    await env.DB.prepare(
+      "INSERT OR IGNORE INTO agent_channels (channel_id, agent_name) VALUES ('C_QUIET', 'quiet-agent')"
+    ).run();
+
+    const create = vi.fn();
+    const body = JSON.stringify({
+      type: "event_callback",
+      event_id: "EvChDelNoMention",
+      event: {
+        type: "message",
+        subtype: "message_deleted",
+        channel: "C_QUIET",
+        channel_type: "channel",
+        deleted_ts: "1700000000.2",
+        previous_message: {
+          ts: "1700000000.2",
+          user: "U4",
+          text: "nothing relevant here"
+        }
+      }
+    });
+    const res = await post(
+      body,
+      makeEnv({ MESSAGE_WORKFLOW: { create } as unknown as Workflow })
+    );
+    expect(res.status).toBe(200);
+    expect(create).not.toHaveBeenCalled();
+  });
 });
 
 // ---------------------------------------------------------------------------

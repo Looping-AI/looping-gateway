@@ -512,7 +512,9 @@ export async function handleSlackEvent(
         (async () => {
           const targets = await resolveTargets(db, {
             channelId: base.channelId,
-            text: base.text
+            text: base.editKind
+              ? `${base.text} ${base.prevText ?? ""}`.trim()
+              : base.text
           });
           if (targets.length === 0) {
             console.log("[gateway] no agent woken — staying silent", {
