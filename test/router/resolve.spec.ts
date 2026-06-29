@@ -1,13 +1,16 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { env } from "cloudflare:workers";
 import { getDb } from "@/db/client";
-import { resolveTarget } from "@/router/resolve";
+import { resolveTargets } from "@/router/resolve";
 import {
   setWorkspaceAdminChannel,
   upsertWorkspace
 } from "@/db/models/workspaces";
 
 const db = getDb(env);
+
+const names = (ts: Awaited<ReturnType<typeof resolveTargets>>) =>
+  ts.map((t) => t.agent.name).sort();
 
 beforeEach(async () => {
   // Org (ws 0) admin channel + a second workspace.
@@ -18,22 +21,21 @@ beforeEach(async () => {
     adminChannelId: "C_WS1ADMIN"
   });
 
-  // Custom agents in agent_channels.
+  // Custom agents: weather is mention-only, sales is a channel_messages co-worker.
   await env.DB.prepare(
-    "INSERT OR IGNORE INTO agents (name, kind, enabled, workspace_id, a2a_endpoint) VALUES ('weather','custom',1,0,'https://example.com/weather')"
+    "INSERT OR IGNORE INTO agents (name, kind, enabled, workspace_id, a2a_endpoint, notify_on) VALUES ('weather','custom',1,0,'https://example.com/weather','mention')"
   ).run();
   await env.DB.prepare(
-    "INSERT OR IGNORE INTO agents (name, kind, enabled, workspace_id, a2a_endpoint) VALUES ('sales','custom',1,0,'https://example.com/sales')"
+    "INSERT OR IGNORE INTO agents (name, kind, enabled, workspace_id, a2a_endpoint, notify_on) VALUES ('sales','custom',1,0,'https://example.com/sales','channel_messages')"
   ).run();
   await env.DB.prepare(
-    "INSERT OR IGNORE INTO agents (name, kind, enabled, workspace_id, a2a_endpoint) VALUES ('off','custom',0,0,'https://example.com/off')"
+    "INSERT OR IGNORE INTO agents (name, kind, enabled, workspace_id, a2a_endpoint, notify_on) VALUES ('off','custom',0,0,'https://example.com/off','channel_messages')"
   ).run();
 
-  // C_WEATHER → weather only.
+  // C_WEATHER → weather (mention) only. C_MULTI → weather + sales.
   await env.DB.prepare(
     "INSERT OR IGNORE INTO agent_channels (channel_id, agent_name) VALUES ('C_WEATHER','weather')"
   ).run();
-  // C_MULTI → weather + sales (two agents).
   await env.DB.prepare(
     "INSERT OR IGNORE INTO agent_channels (channel_id, agent_name) VALUES ('C_MULTI','weather')"
   ).run();
@@ -42,208 +44,75 @@ beforeEach(async () => {
   ).run();
 });
 
-describe("resolveTarget — built-in routing (no agent name mention)", () => {
-  it("routes an org admin channel to the admin agent (workspace 0)", async () => {
-    const t = await resolveTarget(db, {
-      channelId: "C_ORGADMIN",
-      text: "<@UBOT> list agents"
-    });
-    expect(t.kind).toBe("agent");
-    if (t.kind !== "agent") return;
-    expect(t.agent.name).toBe("admin");
-    expect(t.workspaceId).toBe(0);
+describe("resolveTargets — built-in context routing", () => {
+  it("admin channel always includes the admin agent (workspace 0)", async () => {
+    const t = await resolveTargets(db, { channelId: "C_ORGADMIN", text: "hi" });
+    expect(t.map((x) => x.agent.name)).toContain("admin");
+    expect(t.find((x) => x.agent.name === "admin")?.workspaceId).toBe(0);
   });
 
   it("scopes the admin agent to the channel's workspace", async () => {
-    const t = await resolveTarget(db, { channelId: "C_WS1ADMIN", text: "hi" });
-    expect(t.kind).toBe("agent");
-    if (t.kind !== "agent") return;
-    expect(t.agent.name).toBe("admin");
-    expect(t.workspaceId).toBe(1);
+    const t = await resolveTargets(db, { channelId: "C_WS1ADMIN", text: "hi" });
+    expect(t.find((x) => x.agent.name === "admin")?.workspaceId).toBe(1);
   });
 
-  it("routes a DM to the onboarding agent", async () => {
-    const t = await resolveTarget(db, { channelId: "D999", text: "hello" });
-    expect(t.kind).toBe("agent");
-    if (t.kind !== "agent") return;
-    expect(t.agent.name).toBe("onboarding");
-  });
-
-  it("routes an allowlisted channel with one agent to that agent", async () => {
-    const t = await resolveTarget(db, {
-      channelId: "C_WEATHER",
-      text: "forecast"
-    });
-    expect(t.kind).toBe("agent");
-    if (t.kind !== "agent") return;
-    expect(t.agent.name).toBe("weather");
-  });
-
-  it("returns none with userMessage when channel has multiple agents", async () => {
-    const t = await resolveTarget(db, {
-      channelId: "C_MULTI",
-      text: "help"
-    });
-    expect(t.kind).toBe("none");
-    if (t.kind !== "none") return;
-    expect(t.userMessage).toMatch(/`weather`/);
-    expect(t.userMessage).toMatch(/`sales`/);
-    expect(t.userMessage).not.toMatch(/:{2}/);
-  });
-
-  it("returns none for an unconfigured channel", async () => {
-    const t = await resolveTarget(db, {
-      channelId: "C_NOWHERE",
-      text: "anyone?"
-    });
-    expect(t.kind).toBe("none");
+  it("a DM always includes onboarding (DM is an implicit mention)", async () => {
+    const t = await resolveTargets(db, { channelId: "D999", text: "hello" });
+    expect(names(t)).toEqual(["onboarding"]);
   });
 });
 
-describe("resolveTarget — name mentions (channel guard)", () => {
-  it("admin in an admin channel routes to admin", async () => {
-    const t = await resolveTarget(db, {
-      channelId: "C_ORGADMIN",
-      text: "<@UBOT> admin list agents"
-    });
-    expect(t.kind).toBe("agent");
-    if (t.kind !== "agent") return;
-    expect(t.agent.name).toBe("admin");
-    expect(t.text).toBe("<@UBOT> admin list agents");
+describe("resolveTargets — fan-out (mention vs channel_messages)", () => {
+  it("channel_messages agents are always included; mention agents are not", async () => {
+    const t = await resolveTargets(db, { channelId: "C_MULTI", text: "help" });
+    expect(names(t)).toEqual(["sales"]); // weather is mention-only, not named
   });
 
-  it("admin in a non-admin channel does not route by mention", async () => {
-    const t = await resolveTarget(db, {
-      channelId: "C_RANDOM",
-      text: "admin hi"
-    });
-    expect(t.kind).toBe("none");
-    if (t.kind !== "none") return;
-    expect(t.userMessage).toBeUndefined();
-  });
-
-  it("onboarding in a DM routes to onboarding and keeps the name", async () => {
-    const t = await resolveTarget(db, {
-      channelId: "D1",
-      text: "onboarding help me out"
-    });
-    expect(t.kind).toBe("agent");
-    if (t.kind !== "agent") return;
-    expect(t.agent.name).toBe("onboarding");
-    expect(t.text).toBe("onboarding help me out");
-  });
-
-  it("onboarding in a non-DM channel does not route by mention", async () => {
-    const t = await resolveTarget(db, {
-      channelId: "C_RANDOM",
-      text: "<@UBOT> onboarding help"
-    });
-    expect(t.kind).toBe("none");
-    if (t.kind !== "none") return;
-    expect(t.userMessage).toBeUndefined();
-  });
-
-  it("weather in C_WEATHER (allowlisted) routes to weather", async () => {
-    const t = await resolveTarget(db, {
-      channelId: "C_WEATHER",
-      text: "weather what is the forecast?"
-    });
-    expect(t.kind).toBe("agent");
-    if (t.kind !== "agent") return;
-    expect(t.agent.name).toBe("weather");
-    expect(t.text).toBe("weather what is the forecast?");
-  });
-
-  it("weather in C_MULTI (allowlisted) routes to weather", async () => {
-    const t = await resolveTarget(db, {
+  it("a named mention agent is added alongside proactive agents", async () => {
+    const t = await resolveTargets(db, {
       channelId: "C_MULTI",
       text: "weather forecast"
     });
-    expect(t.kind).toBe("agent");
-    if (t.kind !== "agent") return;
-    expect(t.agent.name).toBe("weather");
+    expect(names(t)).toEqual(["sales", "weather"]);
   });
 
-  it("weather in C_RANDOM (not allowlisted) does not route by mention", async () => {
-    const t = await resolveTarget(db, {
-      channelId: "C_RANDOM",
-      text: "weather hi"
+  it("mention-only agent stays silent without a mention", async () => {
+    const t = await resolveTargets(db, {
+      channelId: "C_WEATHER",
+      text: "forecast"
     });
-    expect(t.kind).toBe("none");
-    if (t.kind !== "none") return;
-    expect(t.userMessage).toBeUndefined();
+    expect(t).toHaveLength(0);
   });
 
-  it("returns none for an unknown name in an unconfigured channel", async () => {
-    const t = await resolveTarget(db, {
-      channelId: "C_RANDOM",
-      text: "nope hi"
+  it("mention-only agent fires when named", async () => {
+    const t = await resolveTargets(db, {
+      channelId: "C_WEATHER",
+      text: "weather what is the forecast?"
     });
-    expect(t.kind).toBe("none");
+    expect(names(t)).toEqual(["weather"]);
   });
 
-  it("ignores disabled names when matching explicit mentions", async () => {
-    const t = await resolveTarget(db, {
-      channelId: "C_MULTI",
-      text: "off hi"
-    });
-    expect(t.kind).toBe("none");
-    if (t.kind !== "none") return;
-    expect(t.userMessage).toMatch(/Multiple agents/);
+  it("returns empty for an unconfigured channel", async () => {
+    const t = await resolveTargets(db, { channelId: "C_NOWHERE", text: "?" });
+    expect(t).toHaveLength(0);
   });
-});
 
-describe("resolveTarget — display name mentions", () => {
-  beforeEach(async () => {
-    // Give 'weather' a display name that doesn't contain its machine name as a
-    // whole token, so the two-pass logic is exercised cleanly.
+  it("disabled agents are excluded even when channel_messages", async () => {
+    await env.DB.prepare(
+      "INSERT OR IGNORE INTO agent_channels (channel_id, agent_name) VALUES ('C_OFF','off')"
+    ).run();
+    const t = await resolveTargets(db, { channelId: "C_OFF", text: "hi" });
+    expect(t).toHaveLength(0);
+  });
+
+  it("matches a mention agent by display name", async () => {
     await env.DB.prepare(
       "UPDATE agents SET display_name = 'Forecast Service' WHERE name = 'weather'"
     ).run();
-  });
-
-  it("routes via display name when the agent is allowed in the channel", async () => {
-    const t = await resolveTarget(db, {
-      channelId: "C_WEATHER",
-      text: "Forecast Service what is the forecast?"
-    });
-    expect(t.kind).toBe("agent");
-    if (t.kind !== "agent") return;
-    expect(t.agent.name).toBe("weather");
-  });
-
-  it("display name of an agent not allowed in the channel does not route", async () => {
-    const t = await resolveTarget(db, {
-      channelId: "C_RANDOM",
-      text: "Forecast Service help"
-    });
-    expect(t.kind).toBe("none");
-    if (t.kind !== "none") return;
-    expect(t.userMessage).toBeUndefined();
-  });
-
-  it("machine name takes priority over display name", async () => {
-    const t = await resolveTarget(db, {
-      channelId: "C_WEATHER",
-      text: "weather help"
-    });
-    expect(t.kind).toBe("agent");
-    if (t.kind !== "agent") return;
-    expect(t.agent.name).toBe("weather");
-  });
-
-  it("collision: same display name → none with disambiguation userMessage", async () => {
-    await env.DB.prepare(
-      "UPDATE agents SET display_name = 'Forecast Service' WHERE name = 'sales'"
-    ).run();
-    const t = await resolveTarget(db, {
+    const t = await resolveTargets(db, {
       channelId: "C_MULTI",
-      text: "Forecast Service help"
+      text: "Forecast Service what's up"
     });
-    expect(t.kind).toBe("none");
-    if (t.kind !== "none") return;
-    expect(t.userMessage).toMatch(/Multiple agents match/);
-    expect(t.userMessage).toContain("`weather`");
-    expect(t.userMessage).toContain("`sales`");
+    expect(names(t)).toEqual(["sales", "weather"]);
   });
 });

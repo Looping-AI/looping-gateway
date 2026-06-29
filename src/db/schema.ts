@@ -4,7 +4,8 @@ import {
   text,
   integer,
   primaryKey,
-  index
+  index,
+  check
 } from "drizzle-orm/sqlite-core";
 
 // Unix-seconds timestamp column with a SQLite-side default. Reused across tables.
@@ -110,13 +111,22 @@ export const agents = sqliteTable(
     cardSigningJku: text("card_signing_jku"),
     cardSigningKid: text("card_signing_kid"),
     enabled: integer("enabled", { mode: "boolean" }).notNull().default(true),
+    // When the agent is woken: `mention` = only on a name mention (machine or
+    // display name); `channel_messages` = every channel message. Required (no
+    // default) so a missing value is rejected, not silently coerced.
+    notifyOn: text("notify_on", {
+      enum: ["mention", "channel_messages"]
+    }).notNull(),
     workspaceId: integer("workspace_id")
       .notNull()
       .references(() => workspaces.id),
     createdAt: timestamp("created_at"),
     updatedAt: timestamp("updated_at")
   },
-  (t) => [index("idx_agents_workspace_id").on(t.workspaceId)]
+  (t) => [
+    index("idx_agents_workspace_id").on(t.workspaceId),
+    check("agents_name_lowercase", sql`${t.name} = lower(${t.name})`)
+  ]
 );
 
 /** Channel → agent allowlist. Multiple agents can share a channel; agent names disambiguate. */

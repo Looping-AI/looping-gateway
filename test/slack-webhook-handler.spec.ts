@@ -22,6 +22,17 @@ import { stubSlack } from "./wrappers/slack-stub";
 beforeEach(() => stubSlack(() => ({ ok: true })));
 afterEach(() => vi.unstubAllGlobals());
 
+// A channel_messages agent on C1 so the handler's target gate resolves ≥1 agent
+// and still fires the message/reaction workflows (app_mention, edits, plain msgs).
+beforeEach(async () => {
+  await env.DB.prepare(
+    "INSERT OR IGNORE INTO agents (name, kind, enabled, notify_on, a2a_endpoint, workspace_id) VALUES ('wf-c1', 'custom', 1, 'channel_messages', 'https://example.com/wf-c1', 0)"
+  ).run();
+  await env.DB.prepare(
+    "INSERT OR IGNORE INTO agent_channels (channel_id, agent_name) VALUES ('C1', 'wf-c1')"
+  ).run();
+});
+
 type FakeEnv = Pick<
   Env,
   | "DB"
@@ -407,7 +418,7 @@ describe("lifecycle events", () => {
     );
   });
 
-  it("routes message_changed edits to the Lifecycle Workflow", async () => {
+  it("routes message_changed edits to the Message Workflow", async () => {
     const create = vi.fn();
     const body = JSON.stringify({
       type: "event_callback",
@@ -416,19 +427,228 @@ describe("lifecycle events", () => {
         type: "message",
         subtype: "message_changed",
         channel: "C1",
-        channel_type: "channel"
+        channel_type: "channel",
+        message: { ts: "1700000000.1", user: "U1", text: "new" },
+        previous_message: { ts: "1700000000.1", user: "U1", text: "old" }
       }
     });
     const res = await post(
       body,
-      makeEnv({ LIFECYCLE_WORKFLOW: { create } as unknown as Workflow })
+      makeEnv({ MESSAGE_WORKFLOW: { create } as unknown as Workflow })
     );
     expect(res.status).toBe(200);
     expect(create).toHaveBeenCalledWith(
       expect.objectContaining({
-        params: expect.objectContaining({ subtype: "message_changed" })
+        params: expect.objectContaining({ editKind: "edited", text: "new" })
       })
     );
+  });
+
+  it("extracts userId from message.edited.user when message.user is absent (channel message_changed)", async () => {
+    const create = vi.fn();
+    const body = JSON.stringify({
+      type: "event_callback",
+      event_id: "EvEditedUser",
+      event: {
+        type: "message",
+        subtype: "message_changed",
+        channel: "C1",
+        channel_type: "channel",
+        message: {
+          ts: "1700000000.1",
+          edited: { user: "U_EDITOR" },
+          text: "new"
+        },
+        previous_message: { ts: "1700000000.1", text: "old" }
+      }
+    });
+    const res = await post(
+      body,
+      makeEnv({ MESSAGE_WORKFLOW: { create } as unknown as Workflow })
+    );
+    expect(res.status).toBe(200);
+    expect(create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        params: expect.objectContaining({
+          userId: "U_EDITOR",
+          editKind: "edited"
+        })
+      })
+    );
+  });
+
+  it("ignores a channel message_deleted when no user id is available", async () => {
+    const create = vi.fn();
+    const body = JSON.stringify({
+      type: "event_callback",
+      event_id: "EvDelNoUser",
+      event: {
+        type: "message",
+        subtype: "message_deleted",
+        channel: "C1",
+        channel_type: "channel",
+        deleted_ts: "1700000000.1",
+        previous_message: { ts: "1700000000.1", text: "gone" }
+        // no user on previous_message
+      }
+    });
+    const res = await post(
+      body,
+      makeEnv({ MESSAGE_WORKFLOW: { create } as unknown as Workflow })
+    );
+    expect(res.status).toBe(200);
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it("ignores a DM message_changed when no user id is available", async () => {
+    const create = vi.fn();
+    const body = JSON.stringify({
+      type: "event_callback",
+      event_id: "EvDmEditNoUser",
+      event: {
+        type: "message",
+        channel_type: "im",
+        subtype: "message_changed",
+        channel: "D1",
+        message: { ts: "1700000000.1", text: "new" },
+        previous_message: { ts: "1700000000.1", text: "old" }
+        // no user anywhere
+      }
+    });
+    const res = await post(
+      body,
+      makeEnv({ MESSAGE_WORKFLOW: { create } as unknown as Workflow })
+    );
+    expect(res.status).toBe(200);
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it("ignores a DM message_deleted when no user id is available", async () => {
+    const create = vi.fn();
+    const body = JSON.stringify({
+      type: "event_callback",
+      event_id: "EvDmDelNoUser",
+      event: {
+        type: "message",
+        channel_type: "im",
+        subtype: "message_deleted",
+        channel: "D1",
+        deleted_ts: "1700000000.1",
+        previous_message: { ts: "1700000000.1", text: "gone" }
+        // no user on previous_message
+      }
+    });
+    const res = await post(
+      body,
+      makeEnv({ MESSAGE_WORKFLOW: { create } as unknown as Workflow })
+    );
+    expect(res.status).toBe(200);
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it("routes a DM message_deleted to the Message Workflow when user id is present", async () => {
+    const create = vi.fn();
+    const body = JSON.stringify({
+      type: "event_callback",
+      event_id: "EvDmDel",
+      event: {
+        type: "message",
+        channel_type: "im",
+        subtype: "message_deleted",
+        channel: "D1",
+        deleted_ts: "1700000000.1",
+        previous_message: { ts: "1700000000.1", user: "U3", text: "gone" }
+      }
+    });
+    const res = await post(
+      body,
+      makeEnv({ MESSAGE_WORKFLOW: { create } as unknown as Workflow })
+    );
+    expect(res.status).toBe(200);
+    expect(create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        params: expect.objectContaining({ userId: "U3", editKind: "deleted" })
+      })
+    );
+  });
+
+  it("wakes a mention-only agent when its name appears in prevText of a message_deleted", async () => {
+    // Register a mention-only agent named "del-agent" on channel C1.
+    await env.DB.prepare(
+      "INSERT OR IGNORE INTO agents (name, kind, enabled, notify_on, a2a_endpoint, workspace_id) VALUES ('del-agent', 'custom', 1, 'mention', 'https://example.com/del-agent', 0)"
+    ).run();
+    await env.DB.prepare(
+      "INSERT OR IGNORE INTO agent_channels (channel_id, agent_name) VALUES ('C1', 'del-agent')"
+    ).run();
+
+    const create = vi.fn();
+    const body = JSON.stringify({
+      type: "event_callback",
+      event_id: "EvChDel",
+      event: {
+        type: "message",
+        subtype: "message_deleted",
+        channel: "C1",
+        channel_type: "channel",
+        deleted_ts: "1700000000.1",
+        previous_message: {
+          ts: "1700000000.1",
+          user: "U4",
+          text: "hey @del-agent please check this"
+        }
+      }
+    });
+    const res = await post(
+      body,
+      makeEnv({ MESSAGE_WORKFLOW: { create } as unknown as Workflow })
+    );
+    expect(res.status).toBe(200);
+    // The mention-only agent must be woken even though base.text is empty.
+    expect(create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        params: expect.objectContaining({ editKind: "deleted" })
+      })
+    );
+  });
+
+  it("does not wake a mention-only agent when its name appears in neither text nor prevText of a message_deleted", async () => {
+    // Register a mention-only agent named "quiet-agent" on channel C1.
+    await env.DB.prepare(
+      "INSERT OR IGNORE INTO agents (name, kind, enabled, notify_on, a2a_endpoint, workspace_id) VALUES ('quiet-agent', 'custom', 1, 'mention', 'https://example.com/quiet-agent', 0)"
+    ).run();
+    await env.DB.prepare(
+      "INSERT OR IGNORE INTO agent_channels (channel_id, agent_name) VALUES ('C1', 'quiet-agent')"
+    ).run();
+
+    // Use a separate channel with only the mention-only agent (no channel_messages
+    // agent) so the no-targets path is exercised cleanly.
+    await env.DB.prepare(
+      "INSERT OR IGNORE INTO agent_channels (channel_id, agent_name) VALUES ('C_QUIET', 'quiet-agent')"
+    ).run();
+
+    const create = vi.fn();
+    const body = JSON.stringify({
+      type: "event_callback",
+      event_id: "EvChDelNoMention",
+      event: {
+        type: "message",
+        subtype: "message_deleted",
+        channel: "C_QUIET",
+        channel_type: "channel",
+        deleted_ts: "1700000000.2",
+        previous_message: {
+          ts: "1700000000.2",
+          user: "U4",
+          text: "nothing relevant here"
+        }
+      }
+    });
+    const res = await post(
+      body,
+      makeEnv({ MESSAGE_WORKFLOW: { create } as unknown as Workflow })
+    );
+    expect(res.status).toBe(200);
+    expect(create).not.toHaveBeenCalled();
   });
 });
 
@@ -437,7 +657,7 @@ describe("lifecycle events", () => {
 // ---------------------------------------------------------------------------
 
 describe("ignored events", () => {
-  it("acks 200 and calls no workflow for a bare channel message", async () => {
+  it("routes a bare channel message to the Message Workflow", async () => {
     const message = vi.fn();
     const lifecycle = vi.fn();
     const body = JSON.stringify({
@@ -460,7 +680,7 @@ describe("ignored events", () => {
       })
     );
     expect(res.status).toBe(200);
-    expect(message).not.toHaveBeenCalled();
+    expect(message).toHaveBeenCalledOnce();
     expect(lifecycle).not.toHaveBeenCalled();
   });
 

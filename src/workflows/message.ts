@@ -3,7 +3,6 @@ import type { WorkflowEvent, WorkflowStep } from "cloudflare:workers";
 import type { MessageWorkflowParams } from "@/slack/types";
 import { getDb } from "@/db/client";
 import { buildUserAuthContext } from "@/auth";
-import { resolveTarget } from "@/router/resolve";
 import {
   dispatchToAgent,
   type DispatchAgentRef,
@@ -11,26 +10,21 @@ import {
 } from "@/agents/dispatch";
 import { InvalidEndpointError } from "@/a2a/endpoint";
 import { postReply } from "@/wrappers/slack";
-import { getSlackChannelName } from "@/db/models/channels";
 import {
   REACTION_COLLECT_EVENT,
   reactionInstanceId
 } from "@/workflows/reaction";
 
-export const NO_AGENT_HINT =
-  "I'm not set up to help in this channel yet. Ask a workspace admin to allow an agent here and mention it by name.";
-
-// What the resolve step hands to the later steps (must be Rpc.Serializable).
-export type MessagePlan =
-  | { kind: "none"; userMessage?: string }
-  | {
-      kind: "agent";
-      agent: DispatchAgentRef;
-      /** Workspace scope of the agent; null = org-wide (onboarding). */
-      workspaceId: number | null;
-      text: string;
-      user: Awaited<ReturnType<typeof buildUserAuthContext>>;
-    };
+// One agent's resolved dispatch target (must be Rpc.Serializable).
+export interface AgentPlan {
+  agent: DispatchAgentRef;
+  /** Workspace scope of the agent; null = org-wide (onboarding). */
+  workspaceId: number | null;
+  text: string;
+  /** Channel display name, resolved once in resolveMessage for the fan-out. */
+  channelName: string | null;
+  user: Awaited<ReturnType<typeof buildUserAuthContext>>;
+}
 
 // ---------------------------------------------------------------------------
 // Pure steps — called directly by MessageWorkflow.run() and exported for tests.
@@ -44,42 +38,53 @@ export function replyThreadTs(p: MessageWorkflowParams): string | null {
   return p.threadTs && p.threadTs !== p.ts ? p.threadTs : null;
 }
 
-/** Resolve the target agent + build the caller's auth context. */
+/**
+ * Render the body fanned out to agents. Plain turns carry the user text; edits
+ * and deletes become a feed turn describing the change so agents stay aware of
+ * the evolving channel reality (A2A has no edit/delete primitive).
+ */
+export function feedText(p: MessageWorkflowParams): string {
+  if (p.editKind === "deleted") {
+    return `[deleted a message (ts ${p.ts})] ${p.prevText ?? ""}`.trim();
+  }
+  if (p.editKind === "edited") {
+    return `[edited a message (ts ${p.ts})] before: ${p.prevText ?? ""} | after: ${p.text}`;
+  }
+  return p.text;
+}
+
+/** Build dispatch plans from the targets resolved in the handler + auth context. */
 export async function resolveMessage(
   env: Env,
   p: MessageWorkflowParams
-): Promise<MessagePlan> {
+): Promise<AgentPlan[]> {
   const db = getDb(env);
-  const target = await resolveTarget(db, {
-    channelId: p.channelId,
-    text: p.text
-  });
-  if (target.kind === "none")
-    return { kind: "none", userMessage: target.userMessage };
+  const targets = p.targets;
+  if (targets.length === 0) return [];
 
   // `userId` is guaranteed by the classifier (message events without a sender
   // are ignored), so every caller has an auth context — unknown users get a
   // zero-permission one rather than null.
   const user = await buildUserAuthContext(db, p.userId);
-  return {
-    kind: "agent",
+  return targets.map((t) => ({
     agent: {
-      name: target.agent.name,
-      kind: target.agent.kind,
-      a2aEndpoint: target.agent.a2aEndpoint,
-      workspaceId: target.agent.workspaceId
+      name: t.agent.name,
+      kind: t.agent.kind,
+      a2aEndpoint: t.agent.a2aEndpoint,
+      workspaceId: t.agent.workspaceId
     },
-    workspaceId: target.workspaceId,
-    text: target.text,
+    workspaceId: t.workspaceId,
+    text: feedText(p),
+    channelName: t.channelName,
     user
-  };
+  }));
 }
 
-/** Dispatch a resolved plan to its agent over A2A; returns the reply text. */
+/** Dispatch one resolved plan to its agent over A2A; returns the reply text (may be empty). */
 export async function dispatchMessage(
   env: Env,
   p: MessageWorkflowParams,
-  plan: Extract<MessagePlan, { kind: "agent" }>
+  plan: AgentPlan
 ): Promise<string> {
   let metadata: DispatchMetadata; // per-kind extras only
   if (plan.agent.kind === "admin") {
@@ -97,7 +102,7 @@ export async function dispatchMessage(
     return await dispatchToAgent(env, plan.agent, {
       text: plan.text,
       channelId: p.channelId,
-      channelName: await getSlackChannelName(getDb(env), p.channelId),
+      channelName: plan.channelName,
       threadTs: p.threadTs || p.ts,
       messageTs: p.ts,
       user: plan.user,
@@ -106,8 +111,12 @@ export async function dispatchMessage(
   } catch (err) {
     if (err instanceof InvalidEndpointError) {
       // Policy rejection — not a transient error, so don't let the workflow
-      // retry. Return a user-visible message so the reply step fires normally.
-      return `I wasn't able to reach the agent: ${err.message}`;
+      // retry. Stay silent rather than posting an error for one agent.
+      console.warn("[message] agent endpoint rejected", {
+        agent: plan.agent.name,
+        err: err.message
+      });
+      return "";
     }
     throw err;
   }
@@ -141,12 +150,17 @@ export async function signalReactionCollect(
 // ---------------------------------------------------------------------------
 
 /**
- * Durable, retriable handler for a user-addressed Slack message
- * (`app_mention` or DM). One instance per Slack `event_id`. All real processing
- * happens here, off the ack path.
+ * Durable, retriable handler for a Slack message. One instance per Slack
+ * `event_id`. The Gateway no longer picks a single agent — the woken agents are
+ * resolved up front in the webhook handler and passed in on `params.targets`
+ * (proactive `channel_messages` + any named `mention` agents); each agent
+ * classifies internally and may stay silent.
  *
- * Steps are split so a failed Slack post retries without re-invoking the agent:
- * `resolve` (registry + auth) → `dispatch` (A2A) → `reply` (chat.postMessage).
+ * Steps: `resolve` (build auth + plans from targets) → one `dispatch:{name}` per
+ * agent (A2A) → one `reply:{name}` per non-empty reply (chat.postMessage). Agents
+ * run in parallel; allSettled isolates per-agent failures so one agent's
+ * exhausted retries never blocks the others or aborts the run, and silence
+ * (empty reply) posts nothing.
  */
 export class MessageWorkflow extends WorkflowEntrypoint<
   Env,
@@ -163,31 +177,33 @@ export class MessageWorkflow extends WorkflowEntrypoint<
     // errors that are otherwise invisible. We log the real cause, then rethrow
     // to preserve retry/backoff.
     try {
-      const plan = await step.do("resolve", () => resolveMessage(this.env, p));
+      const plans = await step.do("resolve", () => resolveMessage(this.env, p));
 
-      if (plan.kind === "none") {
-        await step.do("hint", () =>
-          postReply(
-            this.env,
-            p.channelId,
-            threadTs,
-            plan.userMessage ?? NO_AGENT_HINT
-          )
-        );
-        await step.do("collect-reaction", () =>
-          signalReactionCollect(this.env, p.eventId)
-        );
-        return;
+      // Fan out to every agent in parallel; allSettled isolates failures so one
+      // agent's exhausted retries never blocks the others or aborts the run.
+      const results = await Promise.allSettled(
+        plans.map(async (plan) => {
+          const reply = await step.do(`dispatch:${plan.agent.name}`, () =>
+            dispatchMessage(this.env, p, plan)
+          );
+          if (reply.trim()) {
+            await step.do(`reply:${plan.agent.name}`, () =>
+              postReply(this.env, p.channelId, threadTs, reply)
+            );
+          }
+        })
+      );
+      for (const [i, r] of results.entries()) {
+        if (r.status === "rejected") {
+          console.error("[message] agent dispatch failed", {
+            agent: plans[i].agent.name,
+            error:
+              r.reason instanceof Error ? r.reason.message : String(r.reason)
+          });
+        }
       }
 
-      const reply = await step.do("dispatch", () =>
-        dispatchMessage(this.env, p, plan)
-      );
-
-      await step.do("reply", () =>
-        postReply(this.env, p.channelId, threadTs, reply)
-      );
-
+      // Always clear the ⏳ once every agent has settled — reply or silence.
       await step.do("collect-reaction", () =>
         signalReactionCollect(this.env, p.eventId)
       );

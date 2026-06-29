@@ -4,6 +4,7 @@ import * as schema from "../schema";
 
 export type AgentRow = typeof schema.agents.$inferSelect;
 export type AgentKind = AgentRow["kind"];
+export type NotifyOn = AgentRow["notifyOn"];
 
 export interface RegisterAgentInput {
   name: string;
@@ -11,6 +12,8 @@ export interface RegisterAgentInput {
   displayName?: string | null;
   /** Required: custom agents are remote and addressed by this HTTP endpoint. */
   a2aEndpoint: string;
+  /** Required (no default): when the agent is woken — mention vs every message. */
+  notifyOn: NotifyOn;
   workspaceId: number;
   /** Pinned AgentCard signing identity (custom agents; verified at registration). */
   cardSigningJku?: string | null;
@@ -22,6 +25,7 @@ export interface UpdateAgentPatch {
   displayName?: string | null;
   a2aEndpoint?: string;
   enabled?: boolean;
+  notifyOn?: NotifyOn;
   cardSigningJku?: string | null;
   cardSigningKid?: string | null;
 }
@@ -146,6 +150,7 @@ export async function registerAgent(
       kind: input.kind,
       displayName: input.displayName ?? null,
       a2aEndpoint: input.a2aEndpoint,
+      notifyOn: input.notifyOn,
       workspaceId: input.workspaceId,
       cardSigningJku: input.cardSigningJku ?? null,
       cardSigningKid: input.cardSigningKid ?? null
@@ -170,6 +175,7 @@ export async function updateAgent(
         ? { a2aEndpoint: patch.a2aEndpoint }
         : {}),
       ...(patch.enabled !== undefined ? { enabled: patch.enabled } : {}),
+      ...(patch.notifyOn !== undefined ? { notifyOn: patch.notifyOn } : {}),
       ...(patch.cardSigningJku !== undefined
         ? { cardSigningJku: patch.cardSigningJku }
         : {}),

@@ -44,6 +44,7 @@ describe("agents — registry CRUD", () => {
       kind: "custom",
       displayName: "Crud Agent 1",
       a2aEndpoint: "https://example.com/crud-1",
+      notifyOn: "mention",
       workspaceId: ws.id
     });
     expect(row).toMatchObject({
@@ -75,6 +76,7 @@ describe("agents — registry CRUD", () => {
       name: "crud-agent-scoped",
       kind: "custom",
       a2aEndpoint: "https://example.com/crud-scoped",
+      notifyOn: "mention",
       workspaceId: wsA.id
     });
     const inA = await listAgentsForWorkspace(db, wsA.id);
@@ -89,6 +91,7 @@ describe("agents — registry CRUD", () => {
       name: "crud-agent-ch",
       kind: "custom",
       a2aEndpoint: "https://example.com/crud-ch",
+      notifyOn: "mention",
       workspaceId: ws.id
     });
     await attachAgentChannel(db, {
