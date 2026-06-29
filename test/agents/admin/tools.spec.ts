@@ -196,13 +196,13 @@ describe("admin tools — agents_write / agents_read", () => {
     const owner = deps(wsA, ctx({ adminWorkspaces: [wsA] }));
     await agentsWrite(owner, {
       operation: "register",
-      name: "wsA-agent",
-      a2aEndpoint: "https://example.com/wsA-agent",
+      name: "wsa-agent",
+      a2aEndpoint: "https://example.com/wsa-agent",
       notifyOn: "mention"
     });
     const other = deps(wsB, ctx({ adminWorkspaces: [wsB] }));
     expect(
-      await agentsWrite(other, { operation: "unregister", name: "wsA-agent" })
+      await agentsWrite(other, { operation: "unregister", name: "wsa-agent" })
     ).toHaveProperty("error");
   });
 });
