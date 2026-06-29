@@ -4,7 +4,8 @@ import {
   text,
   integer,
   primaryKey,
-  index
+  index,
+  check
 } from "drizzle-orm/sqlite-core";
 
 // Unix-seconds timestamp column with a SQLite-side default. Reused across tables.
@@ -122,7 +123,10 @@ export const agents = sqliteTable(
     createdAt: timestamp("created_at"),
     updatedAt: timestamp("updated_at")
   },
-  (t) => [index("idx_agents_workspace_id").on(t.workspaceId)]
+  (t) => [
+    index("idx_agents_workspace_id").on(t.workspaceId),
+    check("agents_name_lowercase", sql`${t.name} = lower(${t.name})`)
+  ]
 );
 
 /** Channel → agent allowlist. Multiple agents can share a channel; agent names disambiguate. */

@@ -64,19 +64,25 @@ export async function resolveTargets(
   // Channel agents: proactive always; mention-only when named (machine or display).
   const mentionNames = channelEntries.flatMap((e) => {
     const names = [e.agent.name];
-    if (e.agent.displayName) names.push(e.agent.displayName.toLowerCase());
+    if (e.agent.displayName) names.push(e.agent.displayName);
     return names;
   });
   const mentioned = new Set(
     findAllAgentNameMentions(text, mentionNames).map((n) => n.toLowerCase())
   );
   for (const entry of channelEntries) {
-    const named =
-      mentioned.has(entry.agent.name.toLowerCase()) ||
-      (entry.agent.displayName != null &&
-        mentioned.has(entry.agent.displayName.toLowerCase()));
-    if (entry.agent.notifyOn === "channel_messages" || named)
+    if (entry.agent.notifyOn === "channel_messages") {
       add(entry.agent, entry.workspaceId);
+      continue;
+    }
+
+    if (
+      mentioned.has(entry.agent.name) ||
+      (entry.agent.displayName != null &&
+        mentioned.has(entry.agent.displayName.toLowerCase()))
+    ) {
+      add(entry.agent, entry.workspaceId);
+    }
   }
 
   // Admin channel → admin built-in (proactive co-worker).

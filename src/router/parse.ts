@@ -55,24 +55,37 @@ export function findAllAgentNameMentions(
   text: string,
   agentNames: readonly string[]
 ): string[] {
-  const lowerText = text.toLowerCase();
-  const hit: string[] = [];
+  const names = agentNames.filter(Boolean);
+  if (names.length === 0) return [];
 
-  for (const name of agentNames) {
-    if (!name || hit.includes(name)) continue;
-    const lowerName = name.toLowerCase();
-    let index = lowerText.indexOf(lowerName);
-    while (index !== -1) {
-      if (
-        isAgentNameBoundary(text, index - 1) &&
-        isAgentNameBoundary(text, index + lowerName.length)
-      ) {
-        hit.push(name);
-        break;
-      }
-      index = lowerText.indexOf(lowerName, index + 1);
+  // Build lowercase→canonical map (first occurrence wins for case duplicates).
+  const lowerToCanonical = new Map<string, string>();
+  for (const n of names) {
+    const lower = n.toLowerCase();
+    if (!lowerToCanonical.has(lower)) lowerToCanonical.set(lower, n);
+  }
+
+  // Sort longest first so "sales-bot" wins over "sales" in alternation.
+  const escaped = [...lowerToCanonical.keys()]
+    .sort((a, b) => b.length - a.length)
+    .map((n) => n.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+
+  // Single pass: boundaries mirror isAgentNameBoundary (chars NOT in [A-Za-z0-9_-]).
+  const pattern = new RegExp(
+    `(?<![A-Za-z0-9_-])(${escaped.join("|")})(?![A-Za-z0-9_-])`,
+    "gi"
+  );
+
+  const seen = new Set<string>();
+  const result: string[] = [];
+
+  for (const match of text.matchAll(pattern)) {
+    const canonical = lowerToCanonical.get(match[1].toLowerCase());
+    if (canonical !== undefined && !seen.has(canonical)) {
+      seen.add(canonical);
+      result.push(canonical);
     }
   }
 
-  return hit;
+  return result;
 }

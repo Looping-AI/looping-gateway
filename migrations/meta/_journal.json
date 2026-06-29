@@ -78,6 +78,13 @@
       "when": 1782660000000,
       "tag": "0010_agents_notify_on",
       "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "6",
+      "when": 1782740962586,
+      "tag": "0011_agents_name_lowercase",
+      "breakpoints": true
     }
   ]
 }

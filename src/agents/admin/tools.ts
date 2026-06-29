@@ -448,7 +448,13 @@ export function buildAdminTools(deps: AdminToolDeps): ToolSet {
       inputSchema: z.discriminatedUnion("operation", [
         z.object({
           operation: z.literal("register"),
-          name: z.string().describe("Unique agent name"),
+          name: z
+            .string()
+            .regex(
+              /^[a-z0-9_-]+$/,
+              "Agent name must be a lowercase slug (a-z, 0-9, _ or -)"
+            )
+            .describe("Unique agent name"),
           displayName: z.string().optional(),
           a2aEndpoint: z
             .string()
