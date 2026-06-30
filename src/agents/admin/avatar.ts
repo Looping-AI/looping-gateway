@@ -1,4 +1,4 @@
-import { AVATAR_IMAGE_MODEL_ID, AI_GATEWAY_ID } from "@/config";
+import { AVATAR_IMAGE_MODEL_ID } from "@/config";
 
 /** A generated avatar: raw image bytes plus the MIME type to serve them under. */
 export interface GeneratedImage {
@@ -43,6 +43,11 @@ export async function generateAvatar(
   // expose its serialized body or boundary, so we run it through a Response to get the
   // body stream + the Content-Type header (with boundary) the model needs to parse the
   // fields. 512×512 is Slack's recommended avatar size.
+  //
+  // NB: this call deliberately does NOT route through the AI Gateway. The gateway can't
+  // carry a binary multipart body via the `env.AI.run` binding — it rejects a
+  // ReadableStream and JSON-serializes an ArrayBuffer body to `{}` ("Invalid input").
+  // Chat/embed go through the gateway because their inputs are plain JSON.
   const form = new FormData();
   form.append("prompt", prompt);
   form.append("width", "512");
@@ -50,8 +55,7 @@ export async function generateAvatar(
   const formResponse = new Response(form);
 
   // The `Ai` binding overloads don't cover this model id, so cast like shared/recall
-  // does for the embedding model. Route through the AI Gateway (observability + caching),
-  // same as the chat models in agents/model.ts.
+  // does for the embedding model.
   const res = (await env.AI.run(
     AVATAR_IMAGE_MODEL_ID as Parameters<Ai["run"]>[0],
     {
@@ -59,8 +63,7 @@ export async function generateAvatar(
         body: formResponse.body,
         contentType: formResponse.headers.get("content-type")
       }
-    } as Parameters<Ai["run"]>[1],
-    { gateway: { id: AI_GATEWAY_ID } }
+    } as Parameters<Ai["run"]>[1]
   )) as { image?: string };
 
   if (!res?.image) {
