@@ -1,4 +1,4 @@
-import { AVATAR_IMAGE_MODEL_ID } from "@/config";
+import { AVATAR_IMAGE_MODEL_ID, AI_GATEWAY_ID } from "@/config";
 
 /** A generated avatar: raw image bytes plus the MIME type to serve them under. */
 export interface GeneratedImage {
@@ -21,7 +21,8 @@ export interface AvatarPromptInput {
 export function buildAvatarPrompt(input: AvatarPromptInput): string {
   const base =
     `A clean, modern square slack avatar for the "${input.workspaceName}" team's ` +
-    `admin assistant — a friendly, professional mascot or emblem.`;
+    `admin assistant — a friendly, professional mascot or emblem. ` +
+    `It must have a robot face or head, but not be a literal human.`;
   const direction = input.instructions?.trim();
   const style =
     "Flat vector style, bold simple shapes, centered composition, solid background, " +
@@ -38,11 +39,28 @@ export async function generateAvatar(
   env: Env,
   prompt: string
 ): Promise<GeneratedImage> {
-  // The `Ai` binding overloads don't cover the preview model id, so cast like
-  // shared/recall does for the embedding model.
+  // FLUX.2 klein takes a multipart form input (not plain JSON). FormData doesn't
+  // expose its serialized body or boundary, so we run it through a Response to get the
+  // body stream + the Content-Type header (with boundary) the model needs to parse the
+  // fields. 512×512 is Slack's recommended avatar size.
+  const form = new FormData();
+  form.append("prompt", prompt);
+  form.append("width", "512");
+  form.append("height", "512");
+  const formResponse = new Response(form);
+
+  // The `Ai` binding overloads don't cover this model id, so cast like shared/recall
+  // does for the embedding model. Route through the AI Gateway (observability + caching),
+  // same as the chat models in agents/model.ts.
   const res = (await env.AI.run(
     AVATAR_IMAGE_MODEL_ID as Parameters<Ai["run"]>[0],
-    { prompt } as Parameters<Ai["run"]>[1]
+    {
+      multipart: {
+        body: formResponse.body,
+        contentType: formResponse.headers.get("content-type")
+      }
+    } as Parameters<Ai["run"]>[1],
+    { gateway: { id: AI_GATEWAY_ID } }
   )) as { image?: string };
 
   if (!res?.image) {
