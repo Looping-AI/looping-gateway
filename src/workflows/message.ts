@@ -23,6 +23,14 @@ export interface AgentPlan {
   text: string;
   /** Channel display name, resolved once in resolveMessage for the fan-out. */
   channelName: string | null;
+  /**
+   * Name to render this agent's Slack reply under (chat.postMessage `username`).
+   * The agent's display name, falling back to its machine name — resolved here
+   * so it's never null.
+   */
+  displayName: string;
+  /** Icon URL for the agent's avatar in Slack (chat.postMessage `icon_url`). Null = use default bot icon. */
+  iconUrl: string | null;
   user: Awaited<ReturnType<typeof buildUserAuthContext>>;
 }
 
@@ -76,6 +84,8 @@ export async function resolveMessage(
     workspaceId: t.workspaceId,
     text: feedText(p),
     channelName: t.channelName,
+    displayName: t.agent.displayName ?? t.agent.name,
+    iconUrl: t.agent.iconUrl ?? null,
     user
   }));
 }
@@ -188,7 +198,14 @@ export class MessageWorkflow extends WorkflowEntrypoint<
           );
           if (reply.trim()) {
             await step.do(`reply:${plan.agent.name}`, () =>
-              postReply(this.env, p.channelId, threadTs, reply)
+              postReply(
+                this.env,
+                p.channelId,
+                threadTs,
+                reply,
+                plan.displayName,
+                plan.iconUrl
+              )
             );
           }
         })

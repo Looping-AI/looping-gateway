@@ -5,6 +5,8 @@ import {
   getConfig,
   setConfig,
   unsetConfig,
+  getAdminIconUrl,
+  setAdminIconUrl,
   SystemConfigKeys
 } from "@/db/models/workspace-configs";
 import { upsertWorkspace } from "@/db/models/workspaces";
@@ -57,5 +59,28 @@ describe("workspace_configs", () => {
 
   it("SystemConfigKeys.SLACK_TEAM_ID is the reserved system key", () => {
     expect(SystemConfigKeys.SLACK_TEAM_ID).toBe("slack_team_id");
+  });
+
+  it("admin icon URL is workspace-scoped (null when unset, round-trips per ws)", async () => {
+    await upsertWorkspace(db, { id: 203, name: "iconcfg_a" });
+    await upsertWorkspace(db, { id: 204, name: "iconcfg_b" });
+    expect(await getAdminIconUrl(db, 203)).toBeNull();
+
+    await setAdminIconUrl(
+      db,
+      203,
+      "https://gw.example.com/icons/admin/203/a.jpg"
+    );
+    await setAdminIconUrl(
+      db,
+      204,
+      "https://gw.example.com/icons/admin/204/b.jpg"
+    );
+    expect(await getAdminIconUrl(db, 203)).toBe(
+      "https://gw.example.com/icons/admin/203/a.jpg"
+    );
+    expect(await getAdminIconUrl(db, 204)).toBe(
+      "https://gw.example.com/icons/admin/204/b.jpg"
+    );
   });
 });

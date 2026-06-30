@@ -6,6 +6,7 @@ import {
   setWorkspaceAdminChannel,
   upsertWorkspace
 } from "@/db/models/workspaces";
+import { setAdminIconUrl } from "@/db/models/workspace-configs";
 
 const db = getDb(env);
 
@@ -54,6 +55,27 @@ describe("resolveTargets — built-in context routing", () => {
   it("scopes the admin agent to the channel's workspace", async () => {
     const t = await resolveTargets(db, { channelId: "C_WS1ADMIN", text: "hi" });
     expect(t.find((x) => x.agent.name === "admin")?.workspaceId).toBe(1);
+  });
+
+  it("overrides the admin iconUrl with the per-workspace avatar when set", async () => {
+    await setAdminIconUrl(
+      db,
+      1,
+      "https://gw.example.com/icons/admin/1/abc.jpg"
+    );
+    const t = await resolveTargets(db, { channelId: "C_WS1ADMIN", text: "hi" });
+    const admin = t.find((x) => x.agent.name === "admin");
+    expect(admin?.agent.iconUrl).toBe(
+      "https://gw.example.com/icons/admin/1/abc.jpg"
+    );
+    // Other workspaces are unaffected (seeded admin row has no icon).
+    const org = await resolveTargets(db, {
+      channelId: "C_ORGADMIN",
+      text: "hi"
+    });
+    expect(
+      org.find((x) => x.agent.name === "admin")?.agent.iconUrl ?? null
+    ).toBeNull();
   });
 
   it("a DM always includes onboarding (DM is an implicit mention)", async () => {

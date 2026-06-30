@@ -8,11 +8,13 @@ import {
   workspaceRead,
   workspaceWrite,
   remoteAgentDomains,
+  regenerateAvatar,
   buildAdminTools,
   type AdminToolDeps
 } from "@/agents/admin/tools";
 import { ORG_WORKSPACE_ID, createWorkspace } from "@/db/models/workspaces";
 import { getAgent } from "@/db/models/agents";
+import { setPublicUrl, getAdminIconUrl } from "@/db/models/workspace-configs";
 
 const db = getDb(env);
 
@@ -41,8 +43,12 @@ function deps(wsId: number, c: UserAuthContext | null): AdminToolDeps {
     wsId,
     // Offline stub: pretend every endpoint serves a validly-signed card.
     verifyEndpoint: async (endpoint) => ({
-      cardSigningJku: `${new URL(endpoint).origin}/.well-known/jwks.json`,
-      cardSigningKid: "test-kid"
+      pin: {
+        cardSigningJku: `${new URL(endpoint).origin}/.well-known/jwks.json`,
+        cardSigningKid: "test-kid"
+      },
+      displayName: "Stubbed Agent",
+      iconUrl: "https://example.com/icon.png"
     })
   };
 }
@@ -220,8 +226,12 @@ describe("admin tools — card-signing verification + pin (TOFU)", () => {
   it("persists the verified signing pin on register", async () => {
     const wsId = await freshWsId("tools-ws-pin");
     const d = depsWith(wsId, ctx({ adminWorkspaces: [wsId] }), async () => ({
-      cardSigningJku: "https://signed.example.com/.well-known/jwks.json",
-      cardSigningKid: "pin-kid-1"
+      pin: {
+        cardSigningJku: "https://signed.example.com/.well-known/jwks.json",
+        cardSigningKid: "pin-kid-1"
+      },
+      displayName: "Pinned Agent",
+      iconUrl: null
     }));
     const reg = await agentsWrite(d, {
       operation: "register",
@@ -260,8 +270,12 @@ describe("admin tools — card-signing verification + pin (TOFU)", () => {
       wsId,
       ctx({ adminWorkspaces: [wsId] }),
       async () => ({
-        cardSigningJku: "https://a.example.com/.well-known/jwks.json",
-        cardSigningKid: "key-A"
+        pin: {
+          cardSigningJku: "https://a.example.com/.well-known/jwks.json",
+          cardSigningKid: "key-A"
+        },
+        displayName: "Agent A",
+        iconUrl: null
       })
     );
     await agentsWrite(original, {
@@ -276,8 +290,12 @@ describe("admin tools — card-signing verification + pin (TOFU)", () => {
       wsId,
       ctx({ adminWorkspaces: [wsId] }),
       async () => ({
-        cardSigningJku: "https://b.example.com/.well-known/jwks.json",
-        cardSigningKid: "key-B"
+        pin: {
+          cardSigningJku: "https://b.example.com/.well-known/jwks.json",
+          cardSigningKid: "key-B"
+        },
+        displayName: "Agent B",
+        iconUrl: null
       })
     );
     const res = await agentsWrite(repointed, {
@@ -300,7 +318,11 @@ describe("admin tools — card-signing verification + pin (TOFU)", () => {
       cardSigningJku: "https://same.example.com/.well-known/jwks.json",
       cardSigningKid: "key-same"
     };
-    const d = depsWith(wsId, ctx({ adminWorkspaces: [wsId] }), async () => pin);
+    const d = depsWith(wsId, ctx({ adminWorkspaces: [wsId] }), async () => ({
+      pin,
+      displayName: "Same Agent",
+      iconUrl: null
+    }));
     await agentsWrite(d, {
       operation: "register",
       name: "tofu-ok-agent",
@@ -315,6 +337,113 @@ describe("admin tools — card-signing verification + pin (TOFU)", () => {
     expect(res).toMatchObject({ ok: true });
     const row = await getAgent(db, "tofu-ok-agent");
     expect(row?.a2aEndpoint).toBe("https://same.example.com/v2");
+  });
+});
+
+describe("admin tools — derive displayName and iconUrl from card", () => {
+  function depsWith(
+    wsId: number,
+    c: UserAuthContext | null,
+    verifyEndpoint: AdminToolDeps["verifyEndpoint"]
+  ): AdminToolDeps {
+    return { db, ctx: c, wsId, verifyEndpoint };
+  }
+
+  it("uses card name as displayName when none is provided at register", async () => {
+    const wsId = await freshWsId("tools-ws-derive-a");
+    const d = depsWith(wsId, ctx({ adminWorkspaces: [wsId] }), async () => ({
+      pin: {
+        cardSigningJku: "https://derive.example.com/.well-known/jwks.json",
+        cardSigningKid: "k1"
+      },
+      displayName: "From Card",
+      iconUrl: "https://derive.example.com/icon.png"
+    }));
+    await agentsWrite(d, {
+      operation: "register",
+      name: "derive-agent",
+      a2aEndpoint: "https://derive.example.com/a2a",
+      notifyOn: "mention"
+    });
+    const row = await getAgent(db, "derive-agent");
+    expect(row?.displayName).toBe("From Card");
+    expect(row?.iconUrl).toBe("https://derive.example.com/icon.png");
+  });
+
+  it("explicit displayName at register overrides the card name", async () => {
+    const wsId = await freshWsId("tools-ws-derive-b");
+    const d = depsWith(wsId, ctx({ adminWorkspaces: [wsId] }), async () => ({
+      pin: {
+        cardSigningJku: "https://derive2.example.com/.well-known/jwks.json",
+        cardSigningKid: "k2"
+      },
+      displayName: "From Card",
+      iconUrl: null
+    }));
+    await agentsWrite(d, {
+      operation: "register",
+      name: "derive-override-agent",
+      displayName: "My Override",
+      a2aEndpoint: "https://derive2.example.com/a2a",
+      notifyOn: "mention"
+    });
+    const row = await getAgent(db, "derive-override-agent");
+    expect(row?.displayName).toBe("My Override");
+  });
+
+  it("endpoint update re-derives displayName and iconUrl from new card", async () => {
+    const wsId = await freshWsId("tools-ws-derive-c");
+    const pin = {
+      cardSigningJku: "https://rederive.example.com/.well-known/jwks.json",
+      cardSigningKid: "k3"
+    };
+    const d = depsWith(wsId, ctx({ adminWorkspaces: [wsId] }), async () => ({
+      pin,
+      displayName: "New Card Name",
+      iconUrl: "https://rederive.example.com/new-icon.png"
+    }));
+    await agentsWrite(d, {
+      operation: "register",
+      name: "rederive-agent",
+      a2aEndpoint: "https://rederive.example.com/v1",
+      notifyOn: "mention"
+    });
+    await agentsWrite(d, {
+      operation: "update",
+      name: "rederive-agent",
+      a2aEndpoint: "https://rederive.example.com/v2"
+    });
+    const row = await getAgent(db, "rederive-agent");
+    expect(row?.a2aEndpoint).toBe("https://rederive.example.com/v2");
+    expect(row?.displayName).toBe("New Card Name");
+    expect(row?.iconUrl).toBe("https://rederive.example.com/new-icon.png");
+  });
+
+  it("explicit displayName on endpoint update overrides re-derived card name", async () => {
+    const wsId = await freshWsId("tools-ws-derive-d");
+    const pin = {
+      cardSigningJku: "https://override2.example.com/.well-known/jwks.json",
+      cardSigningKid: "k4"
+    };
+    const d = depsWith(wsId, ctx({ adminWorkspaces: [wsId] }), async () => ({
+      pin,
+      displayName: "Card Name",
+      iconUrl: null
+    }));
+    await agentsWrite(d, {
+      operation: "register",
+      name: "override2-agent",
+      a2aEndpoint: "https://override2.example.com/v1",
+      notifyOn: "mention"
+    });
+    await agentsWrite(d, {
+      operation: "update",
+      name: "override2-agent",
+      a2aEndpoint: "https://override2.example.com/v2",
+      displayName: "Manual Override"
+    });
+    const row = await getAgent(db, "override2-agent");
+    expect(row?.displayName).toBe("Manual Override");
   });
 });
 
@@ -475,5 +604,88 @@ describe("admin tools — workspace_read scoping", () => {
     const d = deps(2, ctx({ adminWorkspaces: [2] }));
     const denied = await workspaceRead(d, { id: 999 });
     expect(denied).toHaveProperty("error");
+  });
+});
+
+describe("admin tools — avatar_regenerate", () => {
+  const okImage = {
+    data: new Uint8Array([1, 2, 3]),
+    contentType: "image/jpeg"
+  };
+
+  /** Tool deps with the image/store seams wired to in-memory fakes. */
+  function avatarDeps(
+    wsId: number,
+    c: UserAuthContext | null,
+    overrides: Partial<AdminToolDeps> = {}
+  ): AdminToolDeps {
+    return {
+      ...deps(wsId, c),
+      generateImage: async () => okImage,
+      storeIcon: async () => ({
+        key: "abc123def4567890",
+        contentType: "image/jpeg"
+      }),
+      ...overrides
+    };
+  }
+
+  it("generates, stores, and records the per-workspace avatar URL", async () => {
+    const wsId = await freshWsId("tools-ws-avatar");
+    await setPublicUrl(db, "https://gw.example.com");
+    const prompts: string[] = [];
+    const d = avatarDeps(wsId, ctx({ adminWorkspaces: [wsId] }), {
+      generateImage: async (p) => {
+        prompts.push(p);
+        return okImage;
+      }
+    });
+
+    const res = (await regenerateAvatar(d, { instructions: "blue robot" })) as {
+      ok?: boolean;
+      iconUrl?: string;
+    };
+    expect(res.ok).toBe(true);
+    expect(res.iconUrl).toBe(
+      `https://gw.example.com/icons/admin/${wsId}/abc123def4567890.jpg`
+    );
+    expect(prompts[0]).toContain("tools-ws-avatar");
+    expect(prompts[0]).toContain("blue robot");
+    expect(await getAdminIconUrl(db, wsId)).toBe(res.iconUrl);
+  });
+
+  it("errors when the gateway public URL isn't known yet", async () => {
+    const wsId = await freshWsId("tools-ws-avatar-nourl");
+    const d = avatarDeps(wsId, ctx({ adminWorkspaces: [wsId] }));
+    expect(await regenerateAvatar(d, {})).toHaveProperty("error");
+  });
+
+  it("denies a caller who is not an admin of the workspace", async () => {
+    const wsId = await freshWsId("tools-ws-avatar-deny");
+    await setPublicUrl(db, "https://gw.example.com");
+    const d = avatarDeps(wsId, ctx({ adminWorkspaces: [999] }));
+    expect(await regenerateAvatar(d, {})).toHaveProperty("error");
+  });
+
+  it("surfaces a friendly error when generation throws", async () => {
+    const wsId = await freshWsId("tools-ws-avatar-fail");
+    await setPublicUrl(db, "https://gw.example.com");
+    const d = avatarDeps(wsId, ctx({ adminWorkspaces: [wsId] }), {
+      generateImage: async () => {
+        throw new Error("model overloaded");
+      }
+    });
+    const res = (await regenerateAvatar(d, {})) as { error?: string };
+    expect(res.error).toContain("Avatar generation failed");
+  });
+
+  it("registers avatar_regenerate only when the image/store seams are present", () => {
+    const wsId = 3;
+    const base = ctx({ adminWorkspaces: [wsId] });
+    const without = buildAdminTools(deps(wsId, base));
+    expect(Object.keys(without)).not.toContain("avatar_regenerate");
+
+    const withSeams = buildAdminTools(avatarDeps(wsId, base));
+    expect(Object.keys(withSeams)).toContain("avatar_regenerate");
   });
 });

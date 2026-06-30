@@ -18,11 +18,14 @@ export interface RegisterAgentInput {
   /** Pinned AgentCard signing identity (custom agents; verified at registration). */
   cardSigningJku?: string | null;
   cardSigningKid?: string | null;
+  /** Icon URL derived from the agent's published AgentCard. */
+  iconUrl?: string | null;
 }
 
 /** Patch for `updateAgent` — only provided fields are written. */
 export interface UpdateAgentPatch {
   displayName?: string | null;
+  iconUrl?: string | null;
   a2aEndpoint?: string;
   enabled?: boolean;
   notifyOn?: NotifyOn;
@@ -146,9 +149,10 @@ export async function registerAgent(
   const rows = await db
     .insert(schema.agents)
     .values({
-      name: input.name,
+      name: input.name.trim().toLowerCase(),
       kind: input.kind,
-      displayName: input.displayName ?? null,
+      displayName: input.displayName?.trim() || null,
+      iconUrl: input.iconUrl?.trim() || null,
       a2aEndpoint: input.a2aEndpoint,
       notifyOn: input.notifyOn,
       workspaceId: input.workspaceId,
@@ -169,7 +173,10 @@ export async function updateAgent(
     .update(schema.agents)
     .set({
       ...(patch.displayName !== undefined
-        ? { displayName: patch.displayName }
+        ? { displayName: patch.displayName?.trim() || null }
+        : {}),
+      ...(patch.iconUrl !== undefined
+        ? { iconUrl: patch.iconUrl?.trim() || null }
         : {}),
       ...(patch.a2aEndpoint !== undefined
         ? { a2aEndpoint: patch.a2aEndpoint }

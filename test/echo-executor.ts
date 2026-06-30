@@ -4,12 +4,12 @@ import type {
   RequestContext
 } from "@a2a-js/sdk/server";
 import type { Message } from "@a2a-js/sdk";
-import { textOf } from "./parts";
+import { textOf } from "@/a2a/parts";
 
 /**
- * Phase-3 placeholder agent behavior: echo the user's text straight back as a
- * single agent message. Proves the full Slack → Workflow → A2A → reply loop
- * end-to-end without an LLM. Phase 4/5 replace this with the real AI-SDK loop.
+ * Test stub agent behavior: echo the user's text straight back as a single
+ * agent message. Used by serve.spec.ts to prove the A2A serve loop end-to-end
+ * without an LLM.
  */
 export class EchoExecutor implements AgentExecutor {
   execute = async (

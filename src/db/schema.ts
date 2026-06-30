@@ -102,6 +102,8 @@ export const agents = sqliteTable(
     name: text("name").primaryKey(),
     kind: text("kind", { enum: ["admin", "onboarding", "custom"] }).notNull(),
     displayName: text("display_name"),
+    // Optional icon URL derived from the agent's published AgentCard (custom agents only).
+    iconUrl: text("icon_url"),
     // Always set: custom agents carry a real HTTP endpoint; built-ins use an
     // `http://{name}.local` sentinel. Routing is by `kind`, not this value.
     a2aEndpoint: text("a2a_endpoint").notNull(),

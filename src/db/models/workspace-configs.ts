@@ -24,7 +24,15 @@ export const OperatorConfigKeys = {
    * and applies org-wide. An absent or empty array means no remote agents are
    * approved (deny-all). Managed via the `remote_agent_domains` admin tool.
    */
-  REMOTE_AGENT_ALLOWED_DOMAINS: "remote_agent_allowed_domains"
+  REMOTE_AGENT_ALLOWED_DOMAINS: "remote_agent_allowed_domains",
+  /**
+   * Public URL of this workspace's admin-agent avatar, generated via Workers AI
+   * and served from the per-workspace admin DO (`/icons/admin/{wsId}/{key}`).
+   * Stored per workspace so each admin instance has its own avatar; read by the
+   * router to override the shared `admin` registry row's iconUrl. Managed via the
+   * `avatar_regenerate` admin tool.
+   */
+  ADMIN_ICON_URL: "admin_icon_url"
 } as const;
 
 export const SystemConfigKeys = {
@@ -175,4 +183,24 @@ export async function setAllowedRemoteAgentDomains(
     OperatorConfigKeys.REMOTE_AGENT_ALLOWED_DOMAINS,
     JSON.stringify(domains)
   );
+}
+
+/**
+ * Read the admin avatar URL for a workspace (null = use the default bot icon).
+ * Workspace-scoped: each admin instance has its own avatar.
+ */
+export async function getAdminIconUrl(
+  db: Db,
+  workspaceId: number
+): Promise<string | null> {
+  return getConfig(db, workspaceId, OperatorConfigKeys.ADMIN_ICON_URL);
+}
+
+/** Set (upsert) the admin avatar URL for a workspace. */
+export async function setAdminIconUrl(
+  db: Db,
+  workspaceId: number,
+  url: string
+): Promise<void> {
+  return setConfig(db, workspaceId, OperatorConfigKeys.ADMIN_ICON_URL, url);
 }

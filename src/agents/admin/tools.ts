@@ -1,7 +1,7 @@
 import { tool, type ToolSet } from "ai";
 import { z } from "zod";
 import { authorize, type UserAuthContext } from "@/auth";
-import type { CardSigningPin } from "@/a2a/card-verify";
+import type { CardSigningPin, VerifiedAgentCard } from "@/a2a/card-verify";
 import type { Db } from "@/db/client";
 import {
   type AgentRow,
@@ -25,9 +25,12 @@ import {
 } from "@/db/models/workspaces";
 import {
   getAllowedRemoteAgentDomains,
-  setAllowedRemoteAgentDomains
+  setAllowedRemoteAgentDomains,
+  getPublicUrl,
+  setAdminIconUrl
 } from "@/db/models/workspace-configs";
 import { SHARED_INFRA_ROOTS } from "@/a2a/endpoint";
+import { buildAvatarPrompt, type GeneratedImage } from "./avatar";
 
 /**
  * Admin tools — registry + workspace CRUD on D1. Consolidated to read/write per
@@ -55,10 +58,23 @@ export interface AdminToolDeps {
    * handlers stay offline-testable; production binds it to the live verifier.
    */
   verifyEndpoint: EndpointVerifier;
+  /**
+   * Generate an avatar image from a prompt (Workers AI). Injected side-effect
+   * seam — present only in production; the `avatar_regenerate` tool is omitted
+   * when either this or {@link storeIcon} is absent.
+   */
+  generateImage?: (prompt: string) => Promise<GeneratedImage>;
+  /** Persist a generated avatar in the admin DO storage; returns its key. */
+  storeIcon?: (
+    img: GeneratedImage
+  ) => Promise<{ key: string; contentType: string }>;
 }
 
-/** Verify a remote agent endpoint + signed card; resolves to the pin to persist. */
-export type EndpointVerifier = (endpoint: string) => Promise<CardSigningPin>;
+/** Verify a remote agent endpoint + signed card; resolves to pin and card-derived metadata. */
+export type EndpointVerifier = (endpoint: string) => Promise<VerifiedAgentCard>;
+
+// CardSigningPin is re-exported so existing imports from this module keep working.
+export type { CardSigningPin };
 
 /** A reserved/built-in agent name that registry CRUD must never touch. */
 const RESERVED_NAMES = new Set(["admin", "onboarding"]);
@@ -74,6 +90,7 @@ function shape(a: AgentRow, channels: string[]): ToolResult {
     name: a.name,
     kind: a.kind,
     displayName: a.displayName,
+    iconUrl: a.iconUrl,
     enabled: a.enabled,
     notifyOn: a.notifyOn,
     a2aEndpoint: a.a2aEndpoint,
@@ -176,9 +193,9 @@ export async function agentsWrite(
         return { error: `"${args.name}" is a reserved built-in agent name.` };
       if (await getAgent(deps.db, args.name))
         return { error: `An agent named "${args.name}" already exists.` };
-      let pin: CardSigningPin;
+      let verified: VerifiedAgentCard;
       try {
-        pin = await deps.verifyEndpoint(args.a2aEndpoint);
+        verified = await deps.verifyEndpoint(args.a2aEndpoint);
       } catch (err) {
         return {
           error: `Endpoint verification failed: ${(err as Error).message}`
@@ -187,12 +204,13 @@ export async function agentsWrite(
       const row = await registerAgent(deps.db, {
         name: args.name,
         kind: "custom",
-        displayName: args.displayName ?? null,
+        displayName: args.displayName ?? verified.displayName,
+        iconUrl: verified.iconUrl,
         a2aEndpoint: args.a2aEndpoint,
         notifyOn: args.notifyOn,
         workspaceId: deps.wsId,
-        cardSigningJku: pin.cardSigningJku,
-        cardSigningKid: pin.cardSigningKid
+        cardSigningJku: verified.pin.cardSigningJku,
+        cardSigningKid: verified.pin.cardSigningKid
       });
       return { ok: true, agent: await present(deps.db, row) };
     }
@@ -201,13 +219,15 @@ export async function agentsWrite(
       if ("error" in target) return target;
       // A re-pointed endpoint is re-verified and must keep the SAME pinned
       // signing identity (Trust-On-First-Use) — a different signer is rejected.
-      let pin: CardSigningPin | undefined;
+      // Derived fields (displayName, iconUrl) are refreshed from the new card
+      // unless the caller explicitly overrides displayName in this call.
+      let verified: VerifiedAgentCard | undefined;
       if (
         args.a2aEndpoint !== undefined &&
         args.a2aEndpoint !== target.a2aEndpoint
       ) {
         try {
-          pin = await deps.verifyEndpoint(args.a2aEndpoint);
+          verified = await deps.verifyEndpoint(args.a2aEndpoint);
         } catch (err) {
           return {
             error: `Endpoint verification failed: ${(err as Error).message}`
@@ -215,8 +235,8 @@ export async function agentsWrite(
         }
         if (
           target.cardSigningKid &&
-          (pin.cardSigningKid !== target.cardSigningKid ||
-            pin.cardSigningJku !== target.cardSigningJku)
+          (verified.pin.cardSigningKid !== target.cardSigningKid ||
+            verified.pin.cardSigningJku !== target.cardSigningJku)
         ) {
           return {
             error:
@@ -227,14 +247,18 @@ export async function agentsWrite(
         }
       }
       await updateAgent(deps.db, args.name, {
-        displayName: args.displayName,
+        displayName:
+          args.displayName !== undefined
+            ? args.displayName
+            : verified?.displayName,
         enabled: args.enabled,
         a2aEndpoint: args.a2aEndpoint,
         notifyOn: args.notifyOn,
-        ...(pin
+        ...(verified
           ? {
-              cardSigningJku: pin.cardSigningJku,
-              cardSigningKid: pin.cardSigningKid
+              iconUrl: verified.iconUrl,
+              cardSigningJku: verified.pin.cardSigningJku,
+              cardSigningKid: verified.pin.cardSigningKid
             }
           : {})
       });
@@ -427,6 +451,66 @@ export async function remoteAgentDomains(
 }
 
 // ---------------------------------------------------------------------------
+// avatar_regenerate — generate the admin agent's own avatar via Workers AI
+// ---------------------------------------------------------------------------
+
+/**
+ * Regenerate this admin instance's avatar. The image is generated from the
+ * workspace name plus any caller art direction, stored in the admin DO, and its
+ * public URL recorded per-workspace so the agent's next Slack reply uses it.
+ */
+export async function regenerateAvatar(
+  deps: AdminToolDeps,
+  args: { instructions?: string }
+): Promise<ToolResult> {
+  if (!deps.generateImage || !deps.storeIcon)
+    return { error: "Avatar generation is not available in this environment." };
+  if (!deps.ctx) return deny("sign in as an admin to regenerate the avatar");
+  if (
+    !authorize(deps.ctx, { type: "IsWorkspaceAdmin", workspaceId: deps.wsId })
+  )
+    return deny(
+      `regenerating the avatar requires admin of workspace ${deps.wsId}`
+    );
+
+  const publicUrl = await getPublicUrl(deps.db);
+  if (!publicUrl)
+    return {
+      error:
+        "The gateway's public URL isn't known yet (it's discovered after the " +
+        "first Slack event). Try again shortly."
+    };
+
+  const ws = await getWorkspace(deps.db, deps.wsId);
+  const workspaceName = ws?.name ?? `workspace ${deps.wsId}`;
+  const prompt = buildAvatarPrompt({
+    workspaceName,
+    instructions: args.instructions
+  });
+
+  let stored: { key: string; contentType: string };
+  try {
+    const img = await deps.generateImage(prompt);
+    stored = await deps.storeIcon(img);
+  } catch (err) {
+    return {
+      error: `Avatar generation failed: ${(err as Error).message}`
+    };
+  }
+
+  if (stored.contentType !== "image/jpeg")
+    throw new Error(`Unexpected avatar content type: ${stored.contentType}`);
+  const iconUrl = `${publicUrl}/icons/admin/${deps.wsId}/${stored.key}.jpg`;
+  await setAdminIconUrl(deps.db, deps.wsId, iconUrl);
+
+  return {
+    ok: true,
+    iconUrl,
+    note: "Avatar regenerated — it appears on the admin agent's next reply."
+  };
+}
+
+// ---------------------------------------------------------------------------
 
 /** Build the admin tool set for one instance. `workspace_write` is org-only. */
 export function buildAdminTools(deps: AdminToolDeps): ToolSet {
@@ -510,6 +594,26 @@ export function buildAdminTools(deps: AdminToolDeps): ToolSet {
       execute: (args) => workspaceRead(deps, args)
     })
   };
+
+  // Self-service avatar generation — only when the DO has wired the image/store
+  // seams (production). Available to every admin instance, not just the org.
+  if (deps.generateImage && deps.storeIcon) {
+    tools.avatar_regenerate = tool({
+      description:
+        "Regenerate your own avatar (the admin agent's Slack icon) with Workers AI. " +
+        "The image is generated from this workspace's name plus any art direction " +
+        "you pass; it takes effect on your next reply.",
+      inputSchema: z.object({
+        instructions: z
+          .string()
+          .optional()
+          .describe(
+            "Optional art direction for the avatar: style, colors, motifs, mood"
+          )
+      }),
+      execute: (args) => regenerateAvatar(deps, args)
+    });
+  }
 
   if (deps.wsId === ORG_WORKSPACE_ID) {
     tools.workspace_write = tool({
