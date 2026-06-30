@@ -175,7 +175,9 @@ export async function updateAgent(
       ...(patch.displayName !== undefined
         ? { displayName: patch.displayName?.trim() || null }
         : {}),
-      ...(patch.iconUrl !== undefined ? { iconUrl: patch.iconUrl } : {}),
+      ...(patch.iconUrl !== undefined
+        ? { iconUrl: patch.iconUrl?.trim() || null }
+        : {}),
       ...(patch.a2aEndpoint !== undefined
         ? { a2aEndpoint: patch.a2aEndpoint }
         : {}),
