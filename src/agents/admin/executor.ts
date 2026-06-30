@@ -17,6 +17,7 @@ import { verifyRemoteAgentEndpoint } from "@/a2a/card-verify";
 import { getAllowedRemoteAgentDomains } from "@/db/models/workspace-configs";
 import { adminSoul, callerContext } from "./prompt";
 import { buildAdminTools } from "./tools";
+import { generateAvatar, type GeneratedImage } from "./avatar";
 
 // Re-exported so existing test imports (`@/agents/admin/executor`) keep working.
 export type { SessionHost, SessionLike } from "@/agents/shared/session";
@@ -26,6 +27,14 @@ const COMPACT_AFTER_TOKENS = 60_000;
 /** Test seams — production uses the defaults (real model + Sessions store). */
 export interface AdminExecutorOptions extends ModelOverrides {
   createSession?: (wsId: number) => SessionLike;
+  /**
+   * Persist a generated avatar in the agent's DO storage, returning its key.
+   * Injected by {@link AdminAgent} (bound to its DO storage); when absent, the
+   * `avatar_regenerate` tool is not registered.
+   */
+  storeIcon?: (
+    img: GeneratedImage
+  ) => Promise<{ key: string; contentType: string }>;
 }
 
 /**
@@ -107,7 +116,9 @@ export class AdminAgentExecutor implements AgentExecutor {
                   getDb(this.env)
                 );
                 return verifyRemoteAgentEndpoint(endpoint, allowedDomains);
-              }
+              },
+              generateImage: (prompt) => generateAvatar(this.env, prompt),
+              storeIcon: this.options.storeIcon
             }),
             ...recallTools(this.env, namespace, hasArchive)
           }

@@ -8,11 +8,13 @@ import {
   workspaceRead,
   workspaceWrite,
   remoteAgentDomains,
+  regenerateAvatar,
   buildAdminTools,
   type AdminToolDeps
 } from "@/agents/admin/tools";
 import { ORG_WORKSPACE_ID, createWorkspace } from "@/db/models/workspaces";
 import { getAgent } from "@/db/models/agents";
+import { setPublicUrl, getAdminIconUrl } from "@/db/models/workspace-configs";
 
 const db = getDb(env);
 
@@ -602,5 +604,88 @@ describe("admin tools — workspace_read scoping", () => {
     const d = deps(2, ctx({ adminWorkspaces: [2] }));
     const denied = await workspaceRead(d, { id: 999 });
     expect(denied).toHaveProperty("error");
+  });
+});
+
+describe("admin tools — avatar_regenerate", () => {
+  const okImage = {
+    data: new Uint8Array([1, 2, 3]),
+    contentType: "image/jpeg"
+  };
+
+  /** Tool deps with the image/store seams wired to in-memory fakes. */
+  function avatarDeps(
+    wsId: number,
+    c: UserAuthContext | null,
+    overrides: Partial<AdminToolDeps> = {}
+  ): AdminToolDeps {
+    return {
+      ...deps(wsId, c),
+      generateImage: async () => okImage,
+      storeIcon: async () => ({
+        key: "abc123def4567890",
+        contentType: "image/jpeg"
+      }),
+      ...overrides
+    };
+  }
+
+  it("generates, stores, and records the per-workspace avatar URL", async () => {
+    const wsId = await freshWsId("tools-ws-avatar");
+    await setPublicUrl(db, "https://gw.example.com");
+    const prompts: string[] = [];
+    const d = avatarDeps(wsId, ctx({ adminWorkspaces: [wsId] }), {
+      generateImage: async (p) => {
+        prompts.push(p);
+        return okImage;
+      }
+    });
+
+    const res = (await regenerateAvatar(d, { instructions: "blue robot" })) as {
+      ok?: boolean;
+      iconUrl?: string;
+    };
+    expect(res.ok).toBe(true);
+    expect(res.iconUrl).toBe(
+      `https://gw.example.com/icons/admin/${wsId}/abc123def4567890.jpg`
+    );
+    expect(prompts[0]).toContain("tools-ws-avatar");
+    expect(prompts[0]).toContain("blue robot");
+    expect(await getAdminIconUrl(db, wsId)).toBe(res.iconUrl);
+  });
+
+  it("errors when the gateway public URL isn't known yet", async () => {
+    const wsId = await freshWsId("tools-ws-avatar-nourl");
+    const d = avatarDeps(wsId, ctx({ adminWorkspaces: [wsId] }));
+    expect(await regenerateAvatar(d, {})).toHaveProperty("error");
+  });
+
+  it("denies a caller who is not an admin of the workspace", async () => {
+    const wsId = await freshWsId("tools-ws-avatar-deny");
+    await setPublicUrl(db, "https://gw.example.com");
+    const d = avatarDeps(wsId, ctx({ adminWorkspaces: [999] }));
+    expect(await regenerateAvatar(d, {})).toHaveProperty("error");
+  });
+
+  it("surfaces a friendly error when generation throws", async () => {
+    const wsId = await freshWsId("tools-ws-avatar-fail");
+    await setPublicUrl(db, "https://gw.example.com");
+    const d = avatarDeps(wsId, ctx({ adminWorkspaces: [wsId] }), {
+      generateImage: async () => {
+        throw new Error("model overloaded");
+      }
+    });
+    const res = (await regenerateAvatar(d, {})) as { error?: string };
+    expect(res.error).toContain("Avatar generation failed");
+  });
+
+  it("registers avatar_regenerate only when the image/store seams are present", () => {
+    const wsId = 3;
+    const base = ctx({ adminWorkspaces: [wsId] });
+    const without = buildAdminTools(deps(wsId, base));
+    expect(Object.keys(without)).not.toContain("avatar_regenerate");
+
+    const withSeams = buildAdminTools(avatarDeps(wsId, base));
+    expect(Object.keys(withSeams)).toContain("avatar_regenerate");
   });
 });

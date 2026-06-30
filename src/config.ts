@@ -8,6 +8,12 @@ export const CHAT_MODEL_ID = "@cf/zai-org/glm-5.2";
 export const CHAT_FALLBACK_MODEL_ID = "@cf/google/gemma-4-26b-a4b-it";
 
 /**
+ * Workers AI text-to-image model for admin avatar generation. FLUX.2 returns a
+ * base64-encoded JPEG in `{ image }`, which we decode to bytes before storing.
+ */
+export const AVATAR_IMAGE_MODEL_ID = "@cf/black-forest-labs/flux-2-pro-preview";
+
+/**
  * Workers AI embedding model for episodic recall (archived compacted history).
  * bge-m3 — multilingual (Slack channels are not English-only) with a long context
  * window. 1024-dimensional — must match the `agent-recall` Vectorize index dims.

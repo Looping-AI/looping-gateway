@@ -25,9 +25,12 @@ import {
 } from "@/db/models/workspaces";
 import {
   getAllowedRemoteAgentDomains,
-  setAllowedRemoteAgentDomains
+  setAllowedRemoteAgentDomains,
+  getPublicUrl,
+  setAdminIconUrl
 } from "@/db/models/workspace-configs";
 import { SHARED_INFRA_ROOTS } from "@/a2a/endpoint";
+import { buildAvatarPrompt, type GeneratedImage } from "./avatar";
 
 /**
  * Admin tools — registry + workspace CRUD on D1. Consolidated to read/write per
@@ -55,6 +58,16 @@ export interface AdminToolDeps {
    * handlers stay offline-testable; production binds it to the live verifier.
    */
   verifyEndpoint: EndpointVerifier;
+  /**
+   * Generate an avatar image from a prompt (Workers AI). Injected side-effect
+   * seam — present only in production; the `avatar_regenerate` tool is omitted
+   * when either this or {@link storeIcon} is absent.
+   */
+  generateImage?: (prompt: string) => Promise<GeneratedImage>;
+  /** Persist a generated avatar in the admin DO storage; returns its key. */
+  storeIcon?: (
+    img: GeneratedImage
+  ) => Promise<{ key: string; contentType: string }>;
 }
 
 /** Verify a remote agent endpoint + signed card; resolves to pin and card-derived metadata. */
@@ -438,6 +451,66 @@ export async function remoteAgentDomains(
 }
 
 // ---------------------------------------------------------------------------
+// avatar_regenerate — generate the admin agent's own avatar via Workers AI
+// ---------------------------------------------------------------------------
+
+/**
+ * Regenerate this admin instance's avatar. The image is generated from the
+ * workspace name plus any caller art direction, stored in the admin DO, and its
+ * public URL recorded per-workspace so the agent's next Slack reply uses it.
+ */
+export async function regenerateAvatar(
+  deps: AdminToolDeps,
+  args: { instructions?: string }
+): Promise<ToolResult> {
+  if (!deps.generateImage || !deps.storeIcon)
+    return { error: "Avatar generation is not available in this environment." };
+  if (!deps.ctx) return deny("sign in as an admin to regenerate the avatar");
+  if (
+    !authorize(deps.ctx, { type: "IsWorkspaceAdmin", workspaceId: deps.wsId })
+  )
+    return deny(
+      `regenerating the avatar requires admin of workspace ${deps.wsId}`
+    );
+
+  const publicUrl = await getPublicUrl(deps.db);
+  if (!publicUrl)
+    return {
+      error:
+        "The gateway's public URL isn't known yet (it's discovered after the " +
+        "first Slack event). Try again shortly."
+    };
+
+  const ws = await getWorkspace(deps.db, deps.wsId);
+  const workspaceName = ws?.name ?? `workspace ${deps.wsId}`;
+  const prompt = buildAvatarPrompt({
+    workspaceName,
+    instructions: args.instructions
+  });
+
+  let stored: { key: string; contentType: string };
+  try {
+    const img = await deps.generateImage(prompt);
+    stored = await deps.storeIcon(img);
+  } catch (err) {
+    return {
+      error: `Avatar generation failed: ${(err as Error).message}`
+    };
+  }
+
+  if (stored.contentType !== "image/jpeg")
+    throw new Error(`Unexpected avatar content type: ${stored.contentType}`);
+  const iconUrl = `${publicUrl}/icons/admin/${deps.wsId}/${stored.key}.jpg`;
+  await setAdminIconUrl(deps.db, deps.wsId, iconUrl);
+
+  return {
+    ok: true,
+    iconUrl,
+    note: "Avatar regenerated — it appears on the admin agent's next reply."
+  };
+}
+
+// ---------------------------------------------------------------------------
 
 /** Build the admin tool set for one instance. `workspace_write` is org-only. */
 export function buildAdminTools(deps: AdminToolDeps): ToolSet {
@@ -521,6 +594,26 @@ export function buildAdminTools(deps: AdminToolDeps): ToolSet {
       execute: (args) => workspaceRead(deps, args)
     })
   };
+
+  // Self-service avatar generation — only when the DO has wired the image/store
+  // seams (production). Available to every admin instance, not just the org.
+  if (deps.generateImage && deps.storeIcon) {
+    tools.avatar_regenerate = tool({
+      description:
+        "Regenerate your own avatar (the admin agent's Slack icon) with Workers AI. " +
+        "The image is generated from this workspace's name plus any art direction " +
+        "you pass; it takes effect on your next reply.",
+      inputSchema: z.object({
+        instructions: z
+          .string()
+          .optional()
+          .describe(
+            "Optional art direction for the avatar: style, colors, motifs, mood"
+          )
+      }),
+      execute: (args) => regenerateAvatar(deps, args)
+    });
+  }
 
   if (deps.wsId === ORG_WORKSPACE_ID) {
     tools.workspace_write = tool({
