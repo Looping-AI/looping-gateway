@@ -46,7 +46,7 @@ describe("Worker routing", () => {
   it("serves a stored admin avatar with a long immutable cache", async () => {
     // Seed an avatar in the admin:0 DO, then fetch it through the public route.
     const stub = env.AdminAgent.get(env.AdminAgent.idFromName("admin:0"));
-    const data = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a]);
+    const data = new Uint8Array([0xff, 0xd8, 0xff, 0xdb, 0x00, 0x43]);
     const { key } = await stub.putIcon(data, "image/jpeg");
 
     const ctx = createExecutionContext();
