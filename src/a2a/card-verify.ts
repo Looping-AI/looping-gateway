@@ -79,6 +79,22 @@ export function canonicalCardPayload(card: AgentCard): string {
   return JSON.stringify(sortKeys(rest));
 }
 
+/**
+ * Normalize `AgentCard.iconUrl` to a trimmed string only when it's a valid
+ * absolute URL; otherwise return null so a malformed value surfaces as a missing
+ * icon rather than breaking persistence or downstream consumers.
+ */
+function normalizeIconUrl(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  try {
+    return new URL(trimmed).toString();
+  } catch {
+    return null;
+  }
+}
+
 /** GET JSON with an abort timeout and a hard size cap (SSRF/DoS hardening). */
 async function fetchJsonCapped(url: string): Promise<unknown> {
   const controller = new AbortController();
@@ -213,5 +229,9 @@ export async function verifyRemoteAgentEndpoint(
 ): Promise<VerifiedAgentCard> {
   const card = await fetchAgentCard(endpoint, allowedDomains);
   const pin = await verifyAgentCardSignature(card, { allowedDomains });
-  return { pin, displayName: card.name, iconUrl: card.iconUrl ?? null };
+  return {
+    pin,
+    displayName: card.name,
+    iconUrl: normalizeIconUrl(card.iconUrl)
+  };
 }
