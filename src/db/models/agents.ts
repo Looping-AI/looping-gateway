@@ -152,7 +152,7 @@ export async function registerAgent(
       name: input.name.trim().toLowerCase(),
       kind: input.kind,
       displayName: input.displayName?.trim() || null,
-      iconUrl: input.iconUrl ?? null,
+      iconUrl: input.iconUrl?.trim() || null,
       a2aEndpoint: input.a2aEndpoint,
       notifyOn: input.notifyOn,
       workspaceId: input.workspaceId,
