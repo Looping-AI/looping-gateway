@@ -14,7 +14,8 @@
   "scripts": {
     "dev": "wrangler dev",
     "keygen": "node scripts/generate-gateway-key.mjs",
-    "types": "wrangler types env.d.ts --include-runtime false",
+    "types": "wrangler types",
+    "types:check": "wrangler types --check",
     "db:generate": "drizzle-kit generate",
     "db:migrate:local": "wrangler d1 migrations apply looping-registry --local",
     "db:migrate": "wrangler d1 migrations apply looping-registry --remote",
@@ -22,7 +23,7 @@
     "lint": "eslint .",
     "test": "vitest run",
     "test:watch": "vitest",
-    "check": "prettier --check . && eslint . && tsc && tsc -p test/tsconfig.json",
+    "check": "wrangler types --check && prettier --check . && eslint . && tsc && tsc -p test/tsconfig.json",
     "prepare": "husky"
   },
   "dependencies": {
@@ -39,7 +40,6 @@
   },
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "^0.16.20",
-    "@cloudflare/workers-types": "^4.20260630.1",
     "@types/node": "^26.0.1",
     "drizzle-kit": "^0.31.10",
     "eslint": "^10.6.0",

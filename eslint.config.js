@@ -35,6 +35,11 @@ export default tseslint.config(
   },
   {
     // Generated / build artifacts — never lint these.
-    ignores: ["env.d.ts", "node_modules/", ".wrangler/", "migrations/"]
+    ignores: [
+      "worker-configuration.d.ts",
+      "node_modules/",
+      ".wrangler/",
+      "migrations/"
+    ]
   }
 );
