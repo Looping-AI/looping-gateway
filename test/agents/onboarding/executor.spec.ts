@@ -1,10 +1,16 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect } from "vitest";
 import { env } from "cloudflare:workers";
 import { MockLanguageModelV3 } from "ai/test";
-import type { SessionMessage } from "agents/experimental/memory/session";
 import { OnboardingAgentExecutor } from "@/agents/onboarding/executor";
-import type { SessionHost, SessionLike } from "@/agents/shared/session";
+import type { SessionHost } from "@/agents/shared/session";
 import type { UserAuthContext } from "@/auth";
+import {
+  FakeSession,
+  fakeRecallEnv,
+  okResult,
+  toolCallResult,
+  makeRequest
+} from "../../helpers/agents";
 
 const sqlHost: SessionHost = { sql: () => [] };
 
@@ -16,104 +22,12 @@ const caller: UserAuthContext = {
   adminWorkspaces: []
 };
 
-class FakeSession implements SessionLike {
-  messages: SessionMessage[] = [];
-  constructor(private compactions: unknown[] = []) {}
-  async appendMessage(m: SessionMessage) {
-    this.messages.push(m);
-  }
-  async getHistory() {
-    return this.messages;
-  }
-  async refreshSystemPrompt() {
-    return "SYSTEM PROMPT";
-  }
-  async tools() {
-    return {};
-  }
-  async getCompactions() {
-    return this.compactions;
-  }
-}
-
-/** Spread real env but replace AI + VECTORIZE with spies (no network needed). */
-function fakeRecallEnv() {
-  const run = vi.fn(async () => ({ data: [Array(1024).fill(0.1)] }));
-  const query = vi.fn(async (_vector: number[], _opts: unknown) => ({
-    count: 0,
-    matches: []
-  }));
-  return {
-    env: { ...env, AI: { run }, VECTORIZE: { query } } as unknown as Env,
-    run,
-    query
-  };
-}
-
-function toolCallResult(toolName: string, input: unknown) {
-  return {
-    content: [
-      {
-        type: "tool-call",
-        toolCallId: "tc1",
-        toolName,
-        input: JSON.stringify(input)
-      }
-    ],
-    finishReason: { unified: "tool-calls" },
-    usage: {
-      inputTokens: { total: 1, noCache: 1 },
-      outputTokens: { total: 1 },
-      totalTokens: 2
-    },
-    warnings: []
-  };
-}
-
-function makeRequest() {
-  const published: Array<{ parts: Array<{ text?: string }> }> = [];
-  let finished = false;
-  const eventBus = {
-    publish: (e: unknown) => published.push(e as never),
-    finished: () => {
-      finished = true;
-    }
-  };
-  const requestContext = {
+const onboardingRequest = () =>
+  makeRequest({
     contextId: "D_ONB:thread-1",
-    userMessage: {
-      kind: "message",
-      messageId: "m1",
-      role: "user",
-      parts: [{ kind: "text", text: "how does Looping work?" }],
-      metadata: {
-        user: caller,
-        agentKind: "onboarding"
-      }
-    }
-  };
-  return {
-    published,
-    isFinished: () => finished,
-    // Cast at the boundary — we only exercise the fields the executor reads.
-    eventBus: eventBus as never,
-    requestContext: requestContext as never
-  };
-}
-
-// Minimal valid LanguageModelV3 generate result.
-function okResult(text: string) {
-  return {
-    content: [{ type: "text", text }],
-    finishReason: { unified: "stop" },
-    usage: {
-      inputTokens: { total: 1, noCache: 1 },
-      outputTokens: { total: 1 },
-      totalTokens: 2
-    },
-    warnings: []
-  };
-}
+    text: "how does Looping work?",
+    metadata: { user: caller, agentKind: "onboarding" }
+  });
 
 describe("OnboardingAgentExecutor", () => {
   it("runs the loop and publishes the model's reply", async () => {
@@ -127,7 +41,7 @@ describe("OnboardingAgentExecutor", () => {
       createSession: () => session
     });
 
-    const t = makeRequest();
+    const t = onboardingRequest();
     await exec.execute(t.requestContext, t.eventBus);
 
     expect(t.isFinished()).toBe(true);
@@ -153,7 +67,7 @@ describe("OnboardingAgentExecutor", () => {
       createSession: () => new ThrowingSession()
     });
 
-    const t = makeRequest();
+    const t = onboardingRequest();
     await exec.execute(t.requestContext, t.eventBus);
 
     expect(t.isFinished()).toBe(true);
@@ -176,7 +90,7 @@ describe("OnboardingAgentExecutor", () => {
       createSession: () => session
     });
 
-    const t = makeRequest();
+    const t = onboardingRequest();
     await exec.execute(t.requestContext, t.eventBus);
 
     expect(t.isFinished()).toBe(true);
