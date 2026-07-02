@@ -1,7 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import { MockLanguageModelV3 } from "ai/test";
 import type { LanguageModel } from "ai";
-import type { SessionMessage } from "agents/experimental/memory/session";
 import type { ModelPair } from "@/agents/model";
 import type { SessionLike } from "@/agents/shared/session";
 import {
@@ -9,58 +8,11 @@ import {
   executeAgentTurn,
   type AgentTurnConfig
 } from "@/agents/shared/loop";
+import { FakeSession, okResult, lengthResult } from "../../helpers/agents";
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-function okResult(text: string) {
-  return {
-    content: [{ type: "text", text }],
-    finishReason: { unified: "stop" },
-    usage: {
-      inputTokens: { total: 1, noCache: 1 },
-      outputTokens: { total: 1 },
-      totalTokens: 2
-    },
-    warnings: []
-  };
-}
-
-function lengthResult(text: string) {
-  return {
-    content: [{ type: "text", text }],
-    finishReason: { unified: "length" },
-    usage: {
-      inputTokens: { total: 1, noCache: 1 },
-      outputTokens: { total: 1 },
-      totalTokens: 2
-    },
-    warnings: []
-  };
-}
-
-class FakeSession implements SessionLike {
-  messages: SessionMessage[] = [];
-  appendSpy = vi.fn(async (m: SessionMessage) => {
-    this.messages.push(m);
-  });
-  async appendMessage(m: SessionMessage) {
-    return this.appendSpy(m);
-  }
-  async getHistory() {
-    return this.messages;
-  }
-  async refreshSystemPrompt() {
-    return "SYSTEM";
-  }
-  async tools() {
-    return {};
-  }
-  async getCompactions() {
-    return [];
-  }
-}
 
 function fakeEventBus() {
   const published: Array<{ parts: Array<{ text?: string }> }> = [];
