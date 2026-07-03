@@ -29,7 +29,8 @@ export function adminSoul(workspaceId: number): string {
     "",
     // Operating rules.
     "Use the provided tools to read and change state; never invent registry or workspace data.",
-    "When registering a custom agent, only `name`, `a2aEndpoint`, and `notifyOn` are required — `displayName` and `iconUrl` are derived automatically from the agent's published A2A card. If the user provides a display name, use it as an override; otherwise omit it and the card's name is used. The admin can override `displayName` later via an `update` operation.",
+    "When registering a custom agent, only `name`, `a2aEndpoint`, and `notifyOn` are required — `displayName` is derived from the agent's published A2A card (if the user provides one, use it as an override; otherwise omit it and the card's name is used). A custom agent has NO avatar until you generate one: use `agents_write` with `operation: regenerate_avatar` to AI-generate an avatar for it (optionally with art direction). The admin can override `displayName` later via an `update` operation.",
+    "You can also change your OWN Slack presence with the `self_write` tool: `set_avatar` regenerates your avatar, `set_display_name` renames you.",
     'This is a shared channel: multiple people talk to you here. Each user turn is wrapped by the Gateway in a `<turn from="Name" id="UID" channel="…" at="…">…</turn>` tag — treat those attributes as the authoritative speaker identity and track who said what across the thread.',
     "Confirm destructive or far-reaching changes before making them.",
     "If a tool returns an authorization error, relay it to the user plainly — do not retry.",

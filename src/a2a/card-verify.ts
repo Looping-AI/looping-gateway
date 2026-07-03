@@ -43,8 +43,6 @@ export interface VerifiedAgentCard {
   pin: CardSigningPin;
   /** Display name sourced from `AgentCard.name`. */
   displayName: string;
-  /** Optional icon URL sourced from `AgentCard.iconUrl`. */
-  iconUrl: string | null;
 }
 
 /** A2A AgentCard JWS signature entry (detached payload). */
@@ -77,22 +75,6 @@ export function canonicalCardPayload(card: AgentCard): string {
   };
   void _signatures;
   return JSON.stringify(sortKeys(rest));
-}
-
-/**
- * Normalize `AgentCard.iconUrl` to a trimmed string only when it's a valid
- * absolute URL; otherwise return null so a malformed value surfaces as a missing
- * icon rather than breaking persistence or downstream consumers.
- */
-function normalizeIconUrl(value: unknown): string | null {
-  if (typeof value !== "string") return null;
-  const trimmed = value.trim();
-  if (!trimmed) return null;
-  try {
-    return new URL(trimmed).toString();
-  } catch {
-    return null;
-  }
 }
 
 /** GET JSON with an abort timeout and a hard size cap (SSRF/DoS hardening). */
@@ -221,7 +203,8 @@ export async function verifyAgentCardSignature(
 /**
  * One-shot verifier used at agent registration: fetch the card from the
  * endpoint, verify its signature, and return the pin plus card-derived metadata
- * (displayName, iconUrl) to persist alongside the agent row.
+ * (displayName) to persist alongside the agent row. The agent's avatar is NOT
+ * sourced from the card — `iconUrl` is a gateway-internal, admin-generated value.
  */
 export async function verifyRemoteAgentEndpoint(
   endpoint: string,
@@ -231,7 +214,6 @@ export async function verifyRemoteAgentEndpoint(
   const pin = await verifyAgentCardSignature(card, { allowedDomains });
   return {
     pin,
-    displayName: card.name,
-    iconUrl: normalizeIconUrl(card.iconUrl)
+    displayName: card.name
   };
 }

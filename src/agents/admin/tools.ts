@@ -27,16 +27,21 @@ import {
   getAllowedRemoteAgentDomains,
   setAllowedRemoteAgentDomains,
   getPublicUrl,
-  setAdminIconUrl
+  setAdminIconUrl,
+  setAdminDisplayName
 } from "@/db/models/workspace-configs";
 import { SHARED_INFRA_ROOTS } from "@/a2a/endpoint";
-import { buildAvatarPrompt, type GeneratedImage } from "./avatar";
+import {
+  buildAvatarPrompt,
+  buildAgentAvatarPrompt,
+  type GeneratedImage
+} from "./avatar";
 
 /**
  * Admin tools — registry + workspace CRUD on D1. Consolidated to read/write per
- * domain (no tool proliferation): `agents_read`, `agents_write`,
- * `workspace_read`, `workspace_write`, `remote_agent_domains`. Writes use a
- * discriminated `operation`.
+ * domain (no tool proliferation): `agents_read`, `agents_write`, `workspace_read`,
+ * `workspace_write`, `remote_agent_domains`, and `self_write` (the admin's own
+ * avatar + display name). Writes use a discriminated `operation`.
  *
  * Two gating layers (see PLAN Phase 4):
  *  1. Instance-scoped availability — `buildAdminTools` only constructs
@@ -60,13 +65,19 @@ export interface AdminToolDeps {
   verifyEndpoint: EndpointVerifier;
   /**
    * Generate an avatar image from a prompt (Workers AI). Injected side-effect
-   * seam — present only in production; the `avatar_regenerate` tool is omitted
-   * when either this or {@link storeIcon} is absent.
+   * seam — present only in production. When this or {@link storeIcon} is absent,
+   * avatar generation (self_write `set_avatar` and agents_write
+   * `regenerate_avatar`) returns a "not available" error at runtime.
    */
   generateImage?: (prompt: string) => Promise<GeneratedImage>;
-  /** Persist a generated avatar in the admin DO storage; returns its key. */
+  /**
+   * Persist a generated avatar in the admin DO storage; returns its key. `owner`
+   * is `"self"` (the admin's own avatar) or a custom agent's name — icons are
+   * pruned per owner.
+   */
   storeIcon?: (
-    img: GeneratedImage
+    img: GeneratedImage,
+    owner: string
   ) => Promise<{ key: string; contentType: string }>;
 }
 
@@ -175,6 +186,7 @@ export type AgentsWriteArgs =
     }
   | { operation: "add_channel"; name: string; channelId: string }
   | { operation: "remove_channel"; name: string; channelId: string }
+  | { operation: "regenerate_avatar"; name: string; instructions?: string }
   | { operation: "unregister"; name: string };
 
 export async function agentsWrite(
@@ -205,7 +217,8 @@ export async function agentsWrite(
         name: args.name,
         kind: "custom",
         displayName: args.displayName ?? verified.displayName,
-        iconUrl: verified.iconUrl,
+        // No icon at registration — a custom agent's avatar is gateway-hosted and
+        // set later by the admin via `regenerate_avatar` (never sourced from the card).
         a2aEndpoint: args.a2aEndpoint,
         notifyOn: args.notifyOn,
         workspaceId: deps.wsId,
@@ -219,8 +232,9 @@ export async function agentsWrite(
       if ("error" in target) return target;
       // A re-pointed endpoint is re-verified and must keep the SAME pinned
       // signing identity (Trust-On-First-Use) — a different signer is rejected.
-      // Derived fields (displayName, iconUrl) are refreshed from the new card
-      // unless the caller explicitly overrides displayName in this call.
+      // `displayName` is refreshed from the new card unless the caller explicitly
+      // overrides it here. `iconUrl` is NOT touched — the avatar is gateway-hosted
+      // and admin-generated, so it survives endpoint changes.
       let verified: VerifiedAgentCard | undefined;
       if (
         args.a2aEndpoint !== undefined &&
@@ -256,7 +270,6 @@ export async function agentsWrite(
         notifyOn: args.notifyOn,
         ...(verified
           ? {
-              iconUrl: verified.iconUrl,
               cardSigningJku: verified.pin.cardSigningJku,
               cardSigningKid: verified.pin.cardSigningKid
             }
@@ -283,6 +296,24 @@ export async function agentsWrite(
       if ("error" in target) return target;
       await detachAgentChannel(deps.db, args.name, args.channelId);
       return { ok: true, agent: await present(deps.db, target) };
+    }
+    case "regenerate_avatar": {
+      const target = await requireWritableAgent(deps, args.name);
+      if ("error" in target) return target;
+      const prompt = buildAgentAvatarPrompt({
+        agentName: target.name,
+        displayName: target.displayName,
+        instructions: args.instructions
+      });
+      const result = await generateAndStoreIcon(deps, target.name, prompt);
+      if ("error" in result) return result;
+      await updateAgent(deps.db, args.name, { iconUrl: result.iconUrl });
+      const updated = await getAgent(deps.db, args.name);
+      return {
+        ok: true,
+        agent: updated ? await present(deps.db, updated) : null,
+        note: `Avatar generated for "${args.name}" — it appears on the agent's next reply.`
+      };
     }
     case "unregister": {
       const target = await requireWritableAgent(deps, args.name);
@@ -451,27 +482,22 @@ export async function remoteAgentDomains(
 }
 
 // ---------------------------------------------------------------------------
-// avatar_regenerate — generate the admin agent's own avatar via Workers AI
+// Avatar generation — shared by the admin self-avatar and custom-agent avatars.
 // ---------------------------------------------------------------------------
 
 /**
- * Regenerate this admin instance's avatar. The image is generated from the
- * workspace name plus any caller art direction, stored in the admin DO, and its
- * public URL recorded per-workspace so the agent's next Slack reply uses it.
+ * Generate an avatar image and persist it in the admin DO under `owner`, returning
+ * its public gateway URL (`/icons/admin/{wsId}/{key}.jpg`, served by the admin DO).
+ * Guards the image seams and the public-URL precondition. Shared by the admin's own
+ * avatar (`owner === "self"`) and custom-agent avatars (`owner === agent name`).
  */
-export async function regenerateAvatar(
+async function generateAndStoreIcon(
   deps: AdminToolDeps,
-  args: { instructions?: string }
-): Promise<ToolResult> {
+  owner: string,
+  prompt: string
+): Promise<{ iconUrl: string } | { error: string }> {
   if (!deps.generateImage || !deps.storeIcon)
     return { error: "Avatar generation is not available in this environment." };
-  if (!deps.ctx) return deny("sign in as an admin to regenerate the avatar");
-  if (
-    !authorize(deps.ctx, { type: "IsWorkspaceAdmin", workspaceId: deps.wsId })
-  )
-    return deny(
-      `regenerating the avatar requires admin of workspace ${deps.wsId}`
-    );
 
   const publicUrl = await getPublicUrl(deps.db);
   if (!publicUrl)
@@ -481,33 +507,67 @@ export async function regenerateAvatar(
         "first Slack event). Try again shortly."
     };
 
-  const ws = await getWorkspace(deps.db, deps.wsId);
-  const workspaceName = ws?.name ?? `workspace ${deps.wsId}`;
-  const prompt = buildAvatarPrompt({
-    workspaceName,
-    instructions: args.instructions
-  });
-
   let stored: { key: string; contentType: string };
   try {
     const img = await deps.generateImage(prompt);
-    stored = await deps.storeIcon(img);
+    stored = await deps.storeIcon(img, owner);
   } catch (err) {
-    return {
-      error: `Avatar generation failed: ${(err as Error).message}`
-    };
+    return { error: `Avatar generation failed: ${(err as Error).message}` };
   }
 
   if (stored.contentType !== "image/jpeg")
     throw new Error(`Unexpected avatar content type: ${stored.contentType}`);
-  const iconUrl = `${publicUrl}/icons/admin/${deps.wsId}/${stored.key}.jpg`;
-  await setAdminIconUrl(deps.db, deps.wsId, iconUrl);
+  return { iconUrl: `${publicUrl}/icons/admin/${deps.wsId}/${stored.key}.jpg` };
+}
 
-  return {
-    ok: true,
-    iconUrl,
-    note: "Avatar regenerated — it appears on the admin agent's next reply."
-  };
+// ---------------------------------------------------------------------------
+// self_write — the admin agent mutates its OWN identity (avatar, display name).
+// ---------------------------------------------------------------------------
+
+export type SelfWriteArgs =
+  | { operation: "set_avatar"; instructions?: string }
+  | { operation: "set_display_name"; displayName: string };
+
+export async function selfWrite(
+  deps: AdminToolDeps,
+  args: SelfWriteArgs
+): Promise<ToolResult> {
+  if (!deps.ctx) return deny("sign in as an admin to change your own identity");
+  if (
+    !authorize(deps.ctx, { type: "IsWorkspaceAdmin", workspaceId: deps.wsId })
+  )
+    return deny(
+      `changing the admin agent's identity requires admin of workspace ${deps.wsId}`
+    );
+
+  switch (args.operation) {
+    case "set_avatar": {
+      const ws = await getWorkspace(deps.db, deps.wsId);
+      const workspaceName = ws?.name ?? `workspace ${deps.wsId}`;
+      const prompt = buildAvatarPrompt({
+        workspaceName,
+        instructions: args.instructions
+      });
+      const result = await generateAndStoreIcon(deps, "self", prompt);
+      if ("error" in result) return result;
+      await setAdminIconUrl(deps.db, deps.wsId, result.iconUrl);
+      return {
+        ok: true,
+        iconUrl: result.iconUrl,
+        note: "Avatar regenerated — it appears on the admin agent's next reply."
+      };
+    }
+    case "set_display_name": {
+      const displayName = args.displayName.trim();
+      if (!displayName) return { error: "Display name cannot be empty." };
+      await setAdminDisplayName(deps.db, deps.wsId, displayName);
+      return {
+        ok: true,
+        displayName,
+        note: "Display name updated — it appears on the admin agent's next reply."
+      };
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -527,8 +587,8 @@ export function buildAdminTools(deps: AdminToolDeps): ToolSet {
       description:
         "Create, update, or remove a custom agent in this workspace. " +
         "Use operation=update to change fields; add_channel/remove_channel to " +
-        "manage one channel at a time. " +
-        "Built-in admin/onboarding agents cannot be modified.",
+        "manage one channel at a time; regenerate_avatar to AI-generate a new " +
+        "avatar for the agent. Built-in admin/onboarding agents cannot be modified.",
       inputSchema: z.discriminatedUnion("operation", [
         z.object({
           operation: z.literal("register"),
@@ -583,6 +643,16 @@ export function buildAdminTools(deps: AdminToolDeps): ToolSet {
             .string()
             .describe("A channel id to stop routing this agent in")
         }),
+        z.object({
+          operation: z.literal("regenerate_avatar"),
+          name: z.string(),
+          instructions: z
+            .string()
+            .optional()
+            .describe(
+              "Optional art direction for the avatar: style, colors, motifs, mood"
+            )
+        }),
         z.object({ operation: z.literal("unregister"), name: z.string() })
       ]),
       execute: (args) => agentsWrite(deps, args)
@@ -592,28 +662,34 @@ export function buildAdminTools(deps: AdminToolDeps): ToolSet {
         "Read workspace(s). Omit `id` to list (org admin) or get your own.",
       inputSchema: z.object({ id: z.coerce.number().int().optional() }),
       execute: (args) => workspaceRead(deps, args)
+    }),
+    // Self-service identity — the admin changes its OWN Slack presence. Built for
+    // every admin instance. `set_avatar` needs the image seams (guarded at
+    // runtime); `set_display_name` does not, so this tool is always registered.
+    self_write: tool({
+      description:
+        "Change your own identity (the admin agent's Slack presence). " +
+        "set_avatar AI-generates a new avatar from this workspace's name plus any " +
+        "art direction; set_display_name renames you. Changes take effect on your " +
+        "next reply.",
+      inputSchema: z.discriminatedUnion("operation", [
+        z.object({
+          operation: z.literal("set_avatar"),
+          instructions: z
+            .string()
+            .optional()
+            .describe(
+              "Optional art direction for the avatar: style, colors, motifs, mood"
+            )
+        }),
+        z.object({
+          operation: z.literal("set_display_name"),
+          displayName: z.string().describe("The admin agent's new display name")
+        })
+      ]),
+      execute: (args) => selfWrite(deps, args)
     })
   };
-
-  // Self-service avatar generation — only when the DO has wired the image/store
-  // seams (production). Available to every admin instance, not just the org.
-  if (deps.generateImage && deps.storeIcon) {
-    tools.avatar_regenerate = tool({
-      description:
-        "Regenerate your own avatar (the admin agent's Slack icon) with Workers AI. " +
-        "The image is generated from this workspace's name plus any art direction " +
-        "you pass; it takes effect on your next reply.",
-      inputSchema: z.object({
-        instructions: z
-          .string()
-          .optional()
-          .describe(
-            "Optional art direction for the avatar: style, colors, motifs, mood"
-          )
-      }),
-      execute: (args) => regenerateAvatar(deps, args)
-    });
-  }
 
   if (deps.wsId === ORG_WORKSPACE_ID) {
     tools.workspace_write = tool({

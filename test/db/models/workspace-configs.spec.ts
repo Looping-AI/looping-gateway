@@ -7,6 +7,8 @@ import {
   unsetConfig,
   getAdminIconUrl,
   setAdminIconUrl,
+  getAdminDisplayName,
+  setAdminDisplayName,
   SystemConfigKeys
 } from "@/db/models/workspace-configs";
 import { upsertWorkspace } from "@/db/models/workspaces";
@@ -82,5 +84,16 @@ describe("workspace_configs", () => {
     expect(await getAdminIconUrl(db, 204)).toBe(
       "https://gw.example.com/icons/admin/204/b.jpg"
     );
+  });
+
+  it("admin display name is workspace-scoped (null when unset, round-trips per ws)", async () => {
+    await upsertWorkspace(db, { id: 205, name: "namecfg_a" });
+    await upsertWorkspace(db, { id: 206, name: "namecfg_b" });
+    expect(await getAdminDisplayName(db, 205)).toBeNull();
+
+    await setAdminDisplayName(db, 205, "Ops Bot");
+    await setAdminDisplayName(db, 206, "Support Bot");
+    expect(await getAdminDisplayName(db, 205)).toBe("Ops Bot");
+    expect(await getAdminDisplayName(db, 206)).toBe("Support Bot");
   });
 });

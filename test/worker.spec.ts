@@ -47,7 +47,7 @@ describe("Worker routing", () => {
     // Seed an avatar in the admin:0 DO, then fetch it through the public route.
     const stub = env.AdminAgent.get(env.AdminAgent.idFromName("admin:0"));
     const data = new Uint8Array([0xff, 0xd8, 0xff, 0xdb, 0x00, 0x43]);
-    const { key } = await stub.putIcon(data, "image/jpeg");
+    const { key } = await stub.putIcon(data, "image/jpeg", "self");
 
     const ctx = createExecutionContext();
     const res = await worker.fetch(
@@ -80,11 +80,13 @@ describe("Worker routing", () => {
       const stub = env.AdminAgent.get(env.AdminAgent.idFromName("admin:10"));
       const { key: k1 } = await stub.putIcon(
         new Uint8Array([0x01]),
-        "image/jpeg"
+        "image/jpeg",
+        "self"
       );
       const { key: k2 } = await stub.putIcon(
         new Uint8Array([0x02]),
-        "image/jpeg"
+        "image/jpeg",
+        "self"
       );
       expect(await stub.getIcon(k1)).not.toBeNull();
       expect(await stub.getIcon(k2)).not.toBeNull();
@@ -94,15 +96,18 @@ describe("Worker routing", () => {
       const stub = env.AdminAgent.get(env.AdminAgent.idFromName("admin:11"));
       const { key: k1 } = await stub.putIcon(
         new Uint8Array([0x0a]),
-        "image/jpeg"
+        "image/jpeg",
+        "self"
       );
       const { key: k2 } = await stub.putIcon(
         new Uint8Array([0x0b]),
-        "image/jpeg"
+        "image/jpeg",
+        "self"
       );
       const { key: k3 } = await stub.putIcon(
         new Uint8Array([0x0c]),
-        "image/jpeg"
+        "image/jpeg",
+        "self"
       );
       expect(await stub.getIcon(k1)).toBeNull(); // pruned
       expect(await stub.getIcon(k2)).not.toBeNull();
@@ -112,16 +117,39 @@ describe("Worker routing", () => {
     it("deduplicates: storing the same bytes twice does not grow the index", async () => {
       const stub = env.AdminAgent.get(env.AdminAgent.idFromName("admin:12"));
       const bytes = new Uint8Array([0xff, 0xd8, 0xff]);
-      const { key: k1 } = await stub.putIcon(bytes, "image/jpeg");
-      const { key: k2 } = await stub.putIcon(bytes, "image/jpeg");
+      const { key: k1 } = await stub.putIcon(bytes, "image/jpeg", "self");
+      const { key: k2 } = await stub.putIcon(bytes, "image/jpeg", "self");
       expect(k1).toBe(k2); // same content → same hash
       // A third distinct icon should only evict nothing (index length is still 1).
       const { key: k3 } = await stub.putIcon(
         new Uint8Array([0x01]),
-        "image/jpeg"
+        "image/jpeg",
+        "self"
       );
       expect(await stub.getIcon(k1)).not.toBeNull(); // k1/k2 still alive (only 2 in index)
       expect(await stub.getIcon(k3)).not.toBeNull();
+    });
+
+    it("prunes per owner: a custom agent's avatars don't evict the admin's own", async () => {
+      const stub = env.AdminAgent.get(env.AdminAgent.idFromName("admin:13"));
+      // The admin's own avatar under the "self" owner.
+      const { key: self } = await stub.putIcon(
+        new Uint8Array([0x10]),
+        "image/jpeg",
+        "self"
+      );
+      // Three distinct avatars for a custom agent would blow past ICON_KEEP if
+      // they shared the "self" index — but they're keyed under the agent's name.
+      await stub.putIcon(new Uint8Array([0x11]), "image/jpeg", "paint-agent");
+      await stub.putIcon(new Uint8Array([0x12]), "image/jpeg", "paint-agent");
+      const { key: a3 } = await stub.putIcon(
+        new Uint8Array([0x13]),
+        "image/jpeg",
+        "paint-agent"
+      );
+      // Self avatar survives; the custom agent's latest is still there.
+      expect(await stub.getIcon(self)).not.toBeNull();
+      expect(await stub.getIcon(a3)).not.toBeNull();
     });
   });
 

@@ -15,6 +15,15 @@ const ICON_PREFIX = "icon:";
 const ICON_INDEX_KEY = "icon:index";
 /** Keep the current + previous avatar so in-flight cached URLs don't 404. */
 const ICON_KEEP = 2;
+
+/**
+ * Per-owner index key. The admin's own avatar keeps the legacy `icon:index` key
+ * (unchanged behavior); each custom agent gets its own index so their avatars
+ * don't evict one another under the {@link ICON_KEEP} cap.
+ */
+function iconIndexKey(owner: string): string {
+  return owner === "self" ? ICON_INDEX_KEY : `${ICON_INDEX_KEY}:${owner}`;
+}
 /** Avatars are immutable per content-hash key; cache for a year (new image = new URL). */
 const ICON_CACHE_CONTROL =
   "public, max-age=31536000, s-maxage=31536000, immutable";
@@ -26,8 +35,9 @@ const ICON_PATH = /^\/icons\/admin\/\d+\/([^/]+?)(?:\.\w+)?$/;
  * Workers-AI tool loop over registry/workspace CRUD tools gated by the caller's
  * auth context (carried on `message.metadata`).
  *
- * It also owns its own avatar: the `avatar_regenerate` tool generates an image via
- * Workers AI and persists it here via {@link putIcon}; `fetch` serves it back so
+ * It also hosts avatars: the `self_write` (own avatar) and `agents_write`
+ * `regenerate_avatar` (custom-agent avatars) tools generate an image via Workers AI
+ * and persist it here via {@link putIcon}, keyed per owner; `fetch` serves it back so
  * Slack (and any A2A consumer) can fetch the agent's `iconUrl` over HTTP.
  */
 export class AdminAgent extends A2AAgent {
@@ -41,18 +51,26 @@ export class AdminAgent extends A2AAgent {
 
   protected executor(): AgentExecutor {
     return new AdminAgentExecutor(this, this.env, {
-      storeIcon: (img) => this.putIcon(img.data, img.contentType)
+      storeIcon: (img, owner) => this.putIcon(img.data, img.contentType, owner)
     });
   }
 
   /**
-   * Persist an avatar in DO storage keyed by its content hash, prune to the last
-   * {@link ICON_KEEP}, and return the key. The hash key makes the served URL
-   * effectively immutable (a regenerated image gets a new key ⇒ new URL).
+   * Persist an avatar in DO storage keyed by its content hash, prune the owner's
+   * index to the last {@link ICON_KEEP}, and return the key. The hash key makes
+   * the served URL effectively immutable (a regenerated image gets a new key ⇒
+   * new URL). `owner` is `"self"` for the admin's own avatar or a custom agent's
+   * name — each owner has its own index so avatars don't evict one another.
+   *
+   * NB: the `icon:{key}` store is shared across owners, so pruning one owner could
+   * in theory delete a key another owner still references — only possible if two
+   * agents produce a byte-identical image, which differing prompts make effectively
+   * impossible.
    */
   async putIcon(
     data: Uint8Array<ArrayBuffer>,
-    contentType: string
+    contentType: string,
+    owner: string
   ): Promise<{ key: string; contentType: string }> {
     const digest = await crypto.subtle.digest("SHA-256", data);
     const key = [...new Uint8Array(digest)]
@@ -63,13 +81,14 @@ export class AdminAgent extends A2AAgent {
     const icon: StoredIcon = { contentType, data };
     await this.ctx.storage.put(ICON_PREFIX + key, icon);
 
-    const index = (await this.ctx.storage.get<string[]>(ICON_INDEX_KEY)) ?? [];
+    const indexKey = iconIndexKey(owner);
+    const index = (await this.ctx.storage.get<string[]>(indexKey)) ?? [];
     const next = [...index.filter((k) => k !== key), key];
     while (next.length > ICON_KEEP) {
       const stale = next.shift();
       if (stale) await this.ctx.storage.delete(ICON_PREFIX + stale);
     }
-    await this.ctx.storage.put(ICON_INDEX_KEY, next);
+    await this.ctx.storage.put(indexKey, next);
 
     return { key, contentType };
   }

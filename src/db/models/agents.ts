@@ -18,7 +18,7 @@ export interface RegisterAgentInput {
   /** Pinned AgentCard signing identity (custom agents; verified at registration). */
   cardSigningJku?: string | null;
   cardSigningKid?: string | null;
-  /** Icon URL derived from the agent's published AgentCard. */
+  /** Gateway-hosted, admin-generated avatar URL (never sourced from the AgentCard). */
   iconUrl?: string | null;
 }
 
