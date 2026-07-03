@@ -71,13 +71,13 @@ export interface AdminToolDeps {
    */
   generateImage?: (prompt: string) => Promise<GeneratedImage>;
   /**
-   * Persist a generated avatar in the admin DO storage; returns its key. `owner`
-   * is `"self"` (the admin's own avatar) or a custom agent's name — icons are
-   * pruned per owner.
+   * Persist a generated avatar in the admin DO storage; returns its key. `name`
+   * is `"admin"` (the admin's own avatar) or a custom agent's name — icons are
+   * pruned per agent.
    */
   storeIcon?: (
     img: GeneratedImage,
-    owner: string
+    name: string
   ) => Promise<{ key: string; contentType: string }>;
 }
 
@@ -486,14 +486,14 @@ export async function remoteAgentDomains(
 // ---------------------------------------------------------------------------
 
 /**
- * Generate an avatar image and persist it in the admin DO under `owner`, returning
- * its public gateway URL (`/icons/admin/{wsId}/{key}.jpg`, served by the admin DO).
+ * Generate an avatar image and persist it in the admin DO under `name`, returning
+ * its public gateway URL (`/icons/{wsId}/{name}/{key}.jpg`, served by the admin DO).
  * Guards the image seams and the public-URL precondition. Shared by the admin's own
- * avatar (`owner === "self"`) and custom-agent avatars (`owner === agent name`).
+ * avatar (`name === "admin"`) and custom-agent avatars (`name === agent name`).
  */
 async function generateAndStoreIcon(
   deps: AdminToolDeps,
-  owner: string,
+  name: string,
   prompt: string
 ): Promise<{ iconUrl: string } | { error: string }> {
   if (!deps.generateImage || !deps.storeIcon)
@@ -510,14 +510,16 @@ async function generateAndStoreIcon(
   let stored: { key: string; contentType: string };
   try {
     const img = await deps.generateImage(prompt);
-    stored = await deps.storeIcon(img, owner);
+    stored = await deps.storeIcon(img, name);
   } catch (err) {
     return { error: `Avatar generation failed: ${(err as Error).message}` };
   }
 
   if (stored.contentType !== "image/jpeg")
     throw new Error(`Unexpected avatar content type: ${stored.contentType}`);
-  return { iconUrl: `${publicUrl}/icons/admin/${deps.wsId}/${stored.key}.jpg` };
+  return {
+    iconUrl: `${publicUrl}/icons/${deps.wsId}/${name}/${stored.key}.jpg`
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -548,7 +550,7 @@ export async function selfWrite(
         workspaceName,
         instructions: args.instructions
       });
-      const result = await generateAndStoreIcon(deps, "self", prompt);
+      const result = await generateAndStoreIcon(deps, "admin", prompt);
       if ("error" in result) return result;
       await setAdminIconUrl(deps.db, deps.wsId, result.iconUrl);
       return {

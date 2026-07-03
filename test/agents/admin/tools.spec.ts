@@ -424,7 +424,7 @@ describe("admin tools — derive displayName from card (iconUrl is never card-so
     });
     const generated = (await getAgent(db, "rederive-agent"))?.iconUrl;
     expect(generated).toBe(
-      `https://gw.example.com/icons/admin/${wsId}/deadbeefdeadbeef.jpg`
+      `https://gw.example.com/icons/${wsId}/rederive-agent/deadbeefdeadbeef.jpg`
     );
 
     await agentsWrite(d, {
@@ -649,18 +649,18 @@ function avatarDeps(
 }
 
 describe("admin tools — self_write set_avatar", () => {
-  it("generates, stores under the 'self' owner, and records the avatar URL", async () => {
+  it("generates, stores under the 'admin' name, and records the avatar URL", async () => {
     const wsId = await freshWsId("tools-ws-avatar");
     await setPublicUrl(db, "https://gw.example.com");
     const prompts: string[] = [];
-    const owners: string[] = [];
+    const names: string[] = [];
     const d = avatarDeps(wsId, ctx({ adminWorkspaces: [wsId] }), {
       generateImage: async (p) => {
         prompts.push(p);
         return okImage;
       },
-      storeIcon: async (_img, owner) => {
-        owners.push(owner);
+      storeIcon: async (_img, name) => {
+        names.push(name);
         return { key: "abc123def4567890", contentType: "image/jpeg" };
       }
     });
@@ -671,11 +671,11 @@ describe("admin tools — self_write set_avatar", () => {
     })) as { ok?: boolean; iconUrl?: string };
     expect(res.ok).toBe(true);
     expect(res.iconUrl).toBe(
-      `https://gw.example.com/icons/admin/${wsId}/abc123def4567890.jpg`
+      `https://gw.example.com/icons/${wsId}/admin/abc123def4567890.jpg`
     );
     expect(prompts[0]).toContain("tools-ws-avatar");
     expect(prompts[0]).toContain("blue robot");
-    expect(owners).toEqual(["self"]);
+    expect(names).toEqual(["admin"]);
     expect(await getAdminIconUrl(db, wsId)).toBe(res.iconUrl);
   });
 
@@ -782,14 +782,14 @@ describe("admin tools — agents_write regenerate_avatar", () => {
     const wsId = await freshWsId("tools-ws-agent-avatar");
     await setPublicUrl(db, "https://gw.example.com");
     const prompts: string[] = [];
-    const owners: string[] = [];
+    const names: string[] = [];
     const d = avatarDeps(wsId, ctx({ adminWorkspaces: [wsId] }), {
       generateImage: async (p) => {
         prompts.push(p);
         return okImage;
       },
-      storeIcon: async (_img, owner) => {
-        owners.push(owner);
+      storeIcon: async (_img, name) => {
+        names.push(name);
         return { key: "abc123def4567890", contentType: "image/jpeg" };
       }
     });
@@ -801,15 +801,15 @@ describe("admin tools — agents_write regenerate_avatar", () => {
       instructions: "teal owl"
     })) as { ok?: boolean; agent?: { iconUrl?: string } };
     expect(res.ok).toBe(true);
-    const expected = `https://gw.example.com/icons/admin/${wsId}/abc123def4567890.jpg`;
+    const expected = `https://gw.example.com/icons/${wsId}/paint-agent/abc123def4567890.jpg`;
     expect(res.agent?.iconUrl).toBe(expected);
     expect((await getAgent(db, "paint-agent"))?.iconUrl).toBe(expected);
     // Prompt anchors on the agent's display name, not the "admin assistant";
-    // stored under the per-agent owner.
+    // stored under the per-agent name.
     expect(prompts[0]).toContain("Stubbed Agent"); // the registered displayName
     expect(prompts[0]).not.toContain("admin assistant");
     expect(prompts[0]).toContain("teal owl");
-    expect(owners).toEqual(["paint-agent"]);
+    expect(names).toEqual(["paint-agent"]);
   });
 
   it("rejects a built-in / reserved agent", async () => {

@@ -64,12 +64,12 @@ describe("resolveTargets — built-in context routing", () => {
     await setAdminIconUrl(
       db,
       1,
-      "https://gw.example.com/icons/admin/1/abc.jpg"
+      "https://gw.example.com/icons/1/admin/abc.jpg"
     );
     const t = await resolveTargets(db, { channelId: "C_WS1ADMIN", text: "hi" });
     const admin = t.find((x) => x.agent.name === "admin");
     expect(admin?.agent.iconUrl).toBe(
-      "https://gw.example.com/icons/admin/1/abc.jpg"
+      "https://gw.example.com/icons/1/admin/abc.jpg"
     );
     // Other workspaces are unaffected (seeded admin row has no icon).
     const org = await resolveTargets(db, {

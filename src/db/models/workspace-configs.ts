@@ -27,7 +27,7 @@ export const OperatorConfigKeys = {
   REMOTE_AGENT_ALLOWED_DOMAINS: "remote_agent_allowed_domains",
   /**
    * Public URL of this workspace's admin-agent avatar, generated via Workers AI
-   * and served from the per-workspace admin DO (`/icons/admin/{wsId}/{key}`).
+   * and served from the per-workspace admin DO (`/icons/{wsId}/admin/{key}`).
    * Stored per workspace so each admin instance has its own avatar; read by the
    * router to override the shared `admin` registry row's iconUrl. Managed via the
    * `self_write` admin tool (`set_avatar`).

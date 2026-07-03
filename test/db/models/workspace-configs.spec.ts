@@ -71,18 +71,18 @@ describe("workspace_configs", () => {
     await setAdminIconUrl(
       db,
       203,
-      "https://gw.example.com/icons/admin/203/a.jpg"
+      "https://gw.example.com/icons/203/admin/a.jpg"
     );
     await setAdminIconUrl(
       db,
       204,
-      "https://gw.example.com/icons/admin/204/b.jpg"
+      "https://gw.example.com/icons/204/admin/b.jpg"
     );
     expect(await getAdminIconUrl(db, 203)).toBe(
-      "https://gw.example.com/icons/admin/203/a.jpg"
+      "https://gw.example.com/icons/203/admin/a.jpg"
     );
     expect(await getAdminIconUrl(db, 204)).toBe(
-      "https://gw.example.com/icons/admin/204/b.jpg"
+      "https://gw.example.com/icons/204/admin/b.jpg"
     );
   });
 

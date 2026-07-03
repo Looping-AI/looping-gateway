@@ -29,13 +29,13 @@ export interface AdminExecutorOptions extends ModelOverrides {
   createSession?: (wsId: number) => SessionLike;
   /**
    * Persist a generated avatar in the agent's DO storage, returning its key.
-   * `owner` is `"self"` (the admin's own avatar) or a custom agent's name, so each
-   * owner's icons are pruned independently. Injected by {@link AdminAgent} (bound to
+   * `name` is `"admin"` (the admin's own avatar) or a custom agent's name, so each
+   * agent's icons are pruned independently. Injected by {@link AdminAgent} (bound to
    * its DO storage); when absent, avatar generation is unavailable.
    */
   storeIcon?: (
     img: GeneratedImage,
-    owner: string
+    name: string
   ) => Promise<{ key: string; contentType: string }>;
 }
 
