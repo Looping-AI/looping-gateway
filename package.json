@@ -11,10 +11,14 @@
   ],
   "license": "GPL-3.0",
   "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
   "scripts": {
     "dev": "wrangler dev",
     "keygen": "node scripts/generate-gateway-key.mjs",
-    "types": "wrangler types env.d.ts --include-runtime false",
+    "types": "wrangler types",
+    "types:check": "wrangler types --check",
     "db:generate": "drizzle-kit generate",
     "db:migrate:local": "wrangler d1 migrations apply looping-registry --local",
     "db:migrate": "wrangler d1 migrations apply looping-registry --remote",
@@ -22,25 +26,24 @@
     "lint": "eslint .",
     "test": "vitest run",
     "test:watch": "vitest",
-    "check": "prettier --check . && eslint . && tsc && tsc -p test/tsconfig.json",
+    "check": "wrangler types --check && prettier --check . && eslint . && tsc && tsc -p test/tsconfig.json",
     "prepare": "husky"
   },
   "dependencies": {
     "@a2a-js/sdk": "^0.3.13",
-    "@chat-adapter/slack": "^4.31.0",
+    "@chat-adapter/slack": "^4.32.0",
     "agents": "^0.17.3",
-    "ai": "^6.0.216",
-    "chat": "^4.31.0",
+    "ai": "^6.0.219",
+    "chat": "^4.32.0",
     "drizzle-orm": "^0.45.2",
     "jose": "^6.2.3",
     "slackify-markdown": "github:Looping-AI/slackify-markdown#5.0.0",
-    "workers-ai-provider": "^3.3.0",
+    "workers-ai-provider": "^3.3.1",
     "zod": "^4.4.3"
   },
   "devDependencies": {
-    "@cloudflare/vitest-pool-workers": "^0.16.20",
-    "@cloudflare/workers-types": "^4.20260630.1",
-    "@types/node": "^26.0.1",
+    "@cloudflare/vitest-pool-workers": "^0.18.0",
+    "@types/node": "^26.1.0",
     "drizzle-kit": "^0.31.10",
     "eslint": "^10.6.0",
     "husky": "^9.1.7",
@@ -48,7 +51,7 @@
     "typescript": "^6.0.3",
     "typescript-eslint": "^8.62.1",
     "vitest": "^4.1.9",
-    "wrangler": "^4.105.0"
+    "wrangler": "^4.107.0"
   },
   "overrides": {
     "@esbuild-kit/core-utils": {

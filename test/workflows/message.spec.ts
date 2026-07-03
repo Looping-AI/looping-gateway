@@ -105,7 +105,7 @@ describe("MessageWorkflow (introspectWorkflow)", () => {
       const res = await trigger(body);
       expect(res.status).toBe(200);
 
-      const [instance] = introspector.get();
+      const [instance] = await introspector.get();
       await instance.waitForStatus("complete");
 
       // The admin agent now runs the real AI loop (Workers AI). That binding is
@@ -130,7 +130,7 @@ describe("MessageWorkflow (introspectWorkflow)", () => {
       const res = await trigger(body);
       expect(res.status).toBe(200);
 
-      const [instance] = introspector.get();
+      const [instance] = await introspector.get();
       await instance.waitForStatus("complete");
 
       // The onboarding concierge now runs the real AI loop (Workers AI), keyed to
@@ -160,7 +160,7 @@ describe("MessageWorkflow (introspectWorkflow)", () => {
       expect(res.status).toBe(200);
 
       // Gate skips the workflow entirely when no agent resolves — no flicker.
-      expect(introspector.get()).toHaveLength(0);
+      expect(await introspector.get()).toHaveLength(0);
       expect(calls).toHaveLength(0);
     } finally {
       await introspector.dispose();
@@ -216,12 +216,12 @@ describe("parallel ReactionWorkflow (via webhook handler)", () => {
 
       // The handler adds the ⏳ reaction inline and creates the removal workflow
       // in parallel with the message one.
-      const [reaction] = reactionIntrospector.get();
+      const [reaction] = await reactionIntrospector.get();
       expect(reaction).toBeDefined();
 
       // The MessageWorkflow's collect-reaction step sends the real `reply_posted`
       // event, which resolves the reaction workflow's wait and triggers removal.
-      const [msg] = msgIntrospector.get();
+      const [msg] = await msgIntrospector.get();
       await msg.waitForStatus("complete");
       await reaction.waitForStatus("complete");
 
