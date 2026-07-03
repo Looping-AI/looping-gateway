@@ -13,7 +13,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for a full breakdown of the agent design,
 ### Prerequisites
 
 - A [Cloudflare account](https://dash.cloudflare.com/sign-up) (free tier works)
-- Node.js ≥ 18
+- Node.js >= 24
 - A Slack workspace where you can install apps
 
 ### 1. Use this template
