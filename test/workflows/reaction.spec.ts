@@ -56,7 +56,7 @@ describe("ReactionWorkflow", () => {
         params: p
       });
 
-      const [instance] = introspector.get();
+      const [instance] = await introspector.get();
       await instance.waitForStatus("complete");
 
       // The reaction is *added* inline by the webhook handler, not here — this
@@ -88,7 +88,7 @@ describe("ReactionWorkflow", () => {
         params: p
       });
 
-      const [instance] = introspector.get();
+      const [instance] = await introspector.get();
       await instance.waitForStatus("complete");
 
       expect(calls.map((c) => c.method)).toEqual(["reactions.remove"]);
