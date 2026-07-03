@@ -76,6 +76,13 @@
       "class_name": "ReactionWorkflow"
     }
   ],
+  "secrets": {
+    "required": [
+      "SLACK_BOT_TOKEN",
+      "SLACK_SIGNING_SECRET",
+      "GATEWAY_JWT_PRIVATE_KEY"
+    ]
+  },
   "observability": {
     "enabled": true
   },
