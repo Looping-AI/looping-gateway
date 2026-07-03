@@ -1,5 +1,5 @@
 import type { SessionMessage } from "agents/experimental/memory/session";
-import { EMBED_MODEL_ID } from "@/config";
+import { AI_GATEWAY_ID, EMBED_MODEL_ID } from "@/config";
 import { parseTurn, sessionText } from "@/agents/shared/messages";
 
 /**
@@ -29,10 +29,14 @@ async function embed(env: Env, texts: string[]): Promise<number[][]> {
     const batch = texts.slice(i, i + EMBED_BATCH);
     // truncate_inputs: a single over-long message is truncated for embedding (the
     // full text is still stored in metadata) rather than failing the whole batch.
-    const res = (await env.AI.run(EMBED_MODEL_ID, {
-      text: batch,
-      truncate_inputs: true
-    })) as { data: number[][] };
+    const res = (await env.AI.run(
+      EMBED_MODEL_ID,
+      {
+        text: batch,
+        truncate_inputs: true
+      },
+      { gateway: { id: AI_GATEWAY_ID } }
+    )) as { data: number[][] };
     out.push(...res.data);
   }
   return out;
