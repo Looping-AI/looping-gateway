@@ -75,6 +75,27 @@ describe("Worker routing", () => {
     expect(res.status).toBe(404);
   });
 
+  // Regression: the /icons route must only forward the exact avatar shape
+  // ({16-hex}.{ext}). A path with extra segments must NOT reach the admin DO,
+  // otherwise it would fall through to the A2A handler and expose the
+  // AgentCard (and any other GET the bridge serves) under the /icons prefix.
+  it.each([
+    "/icons/0/admin/.well-known/agent-card.json",
+    "/icons/0/admin/deadbeefdeadbeef.jpg/extra",
+    "/icons/0/admin/nothex.jpg",
+    "/icons/0/admin/deadbeefdeadbeef"
+  ])("returns 404 without forwarding non-avatar path %s", async (path) => {
+    const ctx = createExecutionContext();
+    const res = await worker.fetch(
+      new Request(`http://localhost${path}`),
+      env,
+      ctx
+    );
+    await waitOnExecutionContext(ctx);
+    expect(res.status).toBe(404);
+    expect(res.headers.get("content-type")).not.toContain("application/json");
+  });
+
   describe("admin avatar icon index (sliding window pruning)", () => {
     it("keeps both icons when exactly ICON_KEEP (2) are stored", async () => {
       const stub = env.AdminAgent.get(env.AdminAgent.idFromName("admin:10"));

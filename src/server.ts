@@ -40,8 +40,13 @@ export default {
     // per-workspace DO (`admin:{wsId}`), keyed by agent name. DOs aren't publicly
     // reachable, so this route forwards to the right instance by wsId, which
     // returns the bytes (or 404) with a long immutable cache.
-    // Path: /icons/{wsId}/{name}/{key}.{ext}
-    const icon = url.pathname.match(/^\/icons\/(\d+)\/[a-z0-9_-]+\/.+$/);
+    // Path: /icons/{wsId}/{name}/{key}.{ext} — {key} is a 16-char content-hash
+    // (see AdminAgent.putIcon). Pin the exact shape: a single trailing segment
+    // with no further slashes, so unrelated GETs (e.g. the A2A AgentCard at
+    // /icons/{wsId}/admin/.well-known/agent-card.json) are never forwarded.
+    const icon = url.pathname.match(
+      /^\/icons\/(\d+)\/[a-z0-9_-]+\/[a-f0-9]{16}\.[a-z0-9]+$/
+    );
     if (request.method === "GET" && icon) {
       const ns = env.AdminAgent;
       const stub = ns.get(ns.idFromName(`admin:${icon[1]}`));
