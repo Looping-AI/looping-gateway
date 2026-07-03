@@ -8,13 +8,17 @@ import {
   workspaceRead,
   workspaceWrite,
   remoteAgentDomains,
-  regenerateAvatar,
+  selfWrite,
   buildAdminTools,
   type AdminToolDeps
 } from "@/agents/admin/tools";
 import { ORG_WORKSPACE_ID, createWorkspace } from "@/db/models/workspaces";
 import { getAgent } from "@/db/models/agents";
-import { setPublicUrl, getAdminIconUrl } from "@/db/models/workspace-configs";
+import {
+  setPublicUrl,
+  getAdminIconUrl,
+  getAdminDisplayName
+} from "@/db/models/workspace-configs";
 
 const db = getDb(env);
 
@@ -47,8 +51,7 @@ function deps(wsId: number, c: UserAuthContext | null): AdminToolDeps {
         cardSigningJku: `${new URL(endpoint).origin}/.well-known/jwks.json`,
         cardSigningKid: "test-kid"
       },
-      displayName: "Stubbed Agent",
-      iconUrl: "https://example.com/icon.png"
+      displayName: "Stubbed Agent"
     })
   };
 }
@@ -230,8 +233,7 @@ describe("admin tools — card-signing verification + pin (TOFU)", () => {
         cardSigningJku: "https://signed.example.com/.well-known/jwks.json",
         cardSigningKid: "pin-kid-1"
       },
-      displayName: "Pinned Agent",
-      iconUrl: null
+      displayName: "Pinned Agent"
     }));
     const reg = await agentsWrite(d, {
       operation: "register",
@@ -274,8 +276,7 @@ describe("admin tools — card-signing verification + pin (TOFU)", () => {
           cardSigningJku: "https://a.example.com/.well-known/jwks.json",
           cardSigningKid: "key-A"
         },
-        displayName: "Agent A",
-        iconUrl: null
+        displayName: "Agent A"
       })
     );
     await agentsWrite(original, {
@@ -294,8 +295,7 @@ describe("admin tools — card-signing verification + pin (TOFU)", () => {
           cardSigningJku: "https://b.example.com/.well-known/jwks.json",
           cardSigningKid: "key-B"
         },
-        displayName: "Agent B",
-        iconUrl: null
+        displayName: "Agent B"
       })
     );
     const res = await agentsWrite(repointed, {
@@ -320,8 +320,7 @@ describe("admin tools — card-signing verification + pin (TOFU)", () => {
     };
     const d = depsWith(wsId, ctx({ adminWorkspaces: [wsId] }), async () => ({
       pin,
-      displayName: "Same Agent",
-      iconUrl: null
+      displayName: "Same Agent"
     }));
     await agentsWrite(d, {
       operation: "register",
@@ -340,7 +339,7 @@ describe("admin tools — card-signing verification + pin (TOFU)", () => {
   });
 });
 
-describe("admin tools — derive displayName and iconUrl from card", () => {
+describe("admin tools — derive displayName from card (iconUrl is never card-sourced)", () => {
   function depsWith(
     wsId: number,
     c: UserAuthContext | null,
@@ -349,15 +348,14 @@ describe("admin tools — derive displayName and iconUrl from card", () => {
     return { db, ctx: c, wsId, verifyEndpoint };
   }
 
-  it("uses card name as displayName when none is provided at register", async () => {
+  it("uses card name as displayName and leaves iconUrl unset at register", async () => {
     const wsId = await freshWsId("tools-ws-derive-a");
     const d = depsWith(wsId, ctx({ adminWorkspaces: [wsId] }), async () => ({
       pin: {
         cardSigningJku: "https://derive.example.com/.well-known/jwks.json",
         cardSigningKid: "k1"
       },
-      displayName: "From Card",
-      iconUrl: "https://derive.example.com/icon.png"
+      displayName: "From Card"
     }));
     await agentsWrite(d, {
       operation: "register",
@@ -367,7 +365,8 @@ describe("admin tools — derive displayName and iconUrl from card", () => {
     });
     const row = await getAgent(db, "derive-agent");
     expect(row?.displayName).toBe("From Card");
-    expect(row?.iconUrl).toBe("https://derive.example.com/icon.png");
+    // A custom agent has no avatar until the admin generates one.
+    expect(row?.iconUrl).toBeNull();
   });
 
   it("explicit displayName at register overrides the card name", async () => {
@@ -377,8 +376,7 @@ describe("admin tools — derive displayName and iconUrl from card", () => {
         cardSigningJku: "https://derive2.example.com/.well-known/jwks.json",
         cardSigningKid: "k2"
       },
-      displayName: "From Card",
-      iconUrl: null
+      displayName: "From Card"
     }));
     await agentsWrite(d, {
       operation: "register",
@@ -391,7 +389,7 @@ describe("admin tools — derive displayName and iconUrl from card", () => {
     expect(row?.displayName).toBe("My Override");
   });
 
-  it("endpoint update re-derives displayName and iconUrl from new card", async () => {
+  it("endpoint update re-derives displayName but never touches iconUrl", async () => {
     const wsId = await freshWsId("tools-ws-derive-c");
     const pin = {
       cardSigningJku: "https://rederive.example.com/.well-known/jwks.json",
@@ -399,8 +397,7 @@ describe("admin tools — derive displayName and iconUrl from card", () => {
     };
     const d = depsWith(wsId, ctx({ adminWorkspaces: [wsId] }), async () => ({
       pin,
-      displayName: "New Card Name",
-      iconUrl: "https://rederive.example.com/new-icon.png"
+      displayName: "New Card Name"
     }));
     await agentsWrite(d, {
       operation: "register",
@@ -408,6 +405,28 @@ describe("admin tools — derive displayName and iconUrl from card", () => {
       a2aEndpoint: "https://rederive.example.com/v1",
       notifyOn: "mention"
     });
+    // Give the agent a gateway-hosted avatar, then re-point the endpoint.
+    const withSeams: AdminToolDeps = {
+      ...d,
+      generateImage: async () => ({
+        data: new Uint8Array([9, 9, 9]),
+        contentType: "image/jpeg"
+      }),
+      storeIcon: async () => ({
+        key: "deadbeefdeadbeef",
+        contentType: "image/jpeg"
+      })
+    };
+    await setPublicUrl(db, "https://gw.example.com");
+    await agentsWrite(withSeams, {
+      operation: "regenerate_avatar",
+      name: "rederive-agent"
+    });
+    const generated = (await getAgent(db, "rederive-agent"))?.iconUrl;
+    expect(generated).toBe(
+      `https://gw.example.com/icons/${wsId}/rederive-agent/deadbeefdeadbeef.jpg`
+    );
+
     await agentsWrite(d, {
       operation: "update",
       name: "rederive-agent",
@@ -416,7 +435,8 @@ describe("admin tools — derive displayName and iconUrl from card", () => {
     const row = await getAgent(db, "rederive-agent");
     expect(row?.a2aEndpoint).toBe("https://rederive.example.com/v2");
     expect(row?.displayName).toBe("New Card Name");
-    expect(row?.iconUrl).toBe("https://rederive.example.com/new-icon.png");
+    // The admin-generated avatar survives the endpoint change.
+    expect(row?.iconUrl).toBe(generated);
   });
 
   it("explicit displayName on endpoint update overrides re-derived card name", async () => {
@@ -427,8 +447,7 @@ describe("admin tools — derive displayName and iconUrl from card", () => {
     };
     const d = depsWith(wsId, ctx({ adminWorkspaces: [wsId] }), async () => ({
       pin,
-      displayName: "Card Name",
-      iconUrl: null
+      displayName: "Card Name"
     }));
     await agentsWrite(d, {
       operation: "register",
@@ -607,64 +626,84 @@ describe("admin tools — workspace_read scoping", () => {
   });
 });
 
-describe("admin tools — avatar_regenerate", () => {
-  const okImage = {
-    data: new Uint8Array([1, 2, 3]),
-    contentType: "image/jpeg"
+const okImage = {
+  data: new Uint8Array([1, 2, 3]),
+  contentType: "image/jpeg"
+};
+
+/** Tool deps with the image/store seams wired to in-memory fakes. */
+function avatarDeps(
+  wsId: number,
+  c: UserAuthContext | null,
+  overrides: Partial<AdminToolDeps> = {}
+): AdminToolDeps {
+  return {
+    ...deps(wsId, c),
+    generateImage: async () => okImage,
+    storeIcon: async () => ({
+      key: "abc123def4567890",
+      contentType: "image/jpeg"
+    }),
+    ...overrides
   };
+}
 
-  /** Tool deps with the image/store seams wired to in-memory fakes. */
-  function avatarDeps(
-    wsId: number,
-    c: UserAuthContext | null,
-    overrides: Partial<AdminToolDeps> = {}
-  ): AdminToolDeps {
-    return {
-      ...deps(wsId, c),
-      generateImage: async () => okImage,
-      storeIcon: async () => ({
-        key: "abc123def4567890",
-        contentType: "image/jpeg"
-      }),
-      ...overrides
-    };
-  }
-
-  it("generates, stores, and records the per-workspace avatar URL", async () => {
+describe("admin tools — self_write set_avatar", () => {
+  it("generates, stores under the 'admin' name, and records the avatar URL", async () => {
     const wsId = await freshWsId("tools-ws-avatar");
     await setPublicUrl(db, "https://gw.example.com");
     const prompts: string[] = [];
+    const names: string[] = [];
     const d = avatarDeps(wsId, ctx({ adminWorkspaces: [wsId] }), {
       generateImage: async (p) => {
         prompts.push(p);
         return okImage;
+      },
+      storeIcon: async (_img, name) => {
+        names.push(name);
+        return { key: "abc123def4567890", contentType: "image/jpeg" };
       }
     });
 
-    const res = (await regenerateAvatar(d, { instructions: "blue robot" })) as {
-      ok?: boolean;
-      iconUrl?: string;
-    };
+    const res = (await selfWrite(d, {
+      operation: "set_avatar",
+      instructions: "blue robot"
+    })) as { ok?: boolean; iconUrl?: string };
     expect(res.ok).toBe(true);
     expect(res.iconUrl).toBe(
-      `https://gw.example.com/icons/admin/${wsId}/abc123def4567890.jpg`
+      `https://gw.example.com/icons/${wsId}/admin/abc123def4567890.jpg`
     );
     expect(prompts[0]).toContain("tools-ws-avatar");
     expect(prompts[0]).toContain("blue robot");
+    expect(names).toEqual(["admin"]);
     expect(await getAdminIconUrl(db, wsId)).toBe(res.iconUrl);
   });
 
   it("errors when the gateway public URL isn't known yet", async () => {
     const wsId = await freshWsId("tools-ws-avatar-nourl");
     const d = avatarDeps(wsId, ctx({ adminWorkspaces: [wsId] }));
-    expect(await regenerateAvatar(d, {})).toHaveProperty("error");
+    expect(await selfWrite(d, { operation: "set_avatar" })).toHaveProperty(
+      "error"
+    );
   });
 
   it("denies a caller who is not an admin of the workspace", async () => {
     const wsId = await freshWsId("tools-ws-avatar-deny");
     await setPublicUrl(db, "https://gw.example.com");
     const d = avatarDeps(wsId, ctx({ adminWorkspaces: [999] }));
-    expect(await regenerateAvatar(d, {})).toHaveProperty("error");
+    expect(await selfWrite(d, { operation: "set_avatar" })).toHaveProperty(
+      "error"
+    );
+  });
+
+  it("errors when the image seams are absent", async () => {
+    const wsId = await freshWsId("tools-ws-avatar-noseam");
+    await setPublicUrl(db, "https://gw.example.com");
+    const d = deps(wsId, ctx({ adminWorkspaces: [wsId] })); // no generateImage/storeIcon
+    const res = (await selfWrite(d, { operation: "set_avatar" })) as {
+      error?: string;
+    };
+    expect(res.error).toContain("not available");
   });
 
   it("surfaces a friendly error when generation throws", async () => {
@@ -675,17 +714,146 @@ describe("admin tools — avatar_regenerate", () => {
         throw new Error("model overloaded");
       }
     });
-    const res = (await regenerateAvatar(d, {})) as { error?: string };
+    const res = (await selfWrite(d, { operation: "set_avatar" })) as {
+      error?: string;
+    };
     expect(res.error).toContain("Avatar generation failed");
   });
+});
 
-  it("registers avatar_regenerate only when the image/store seams are present", () => {
+describe("admin tools — self_write set_display_name", () => {
+  it("records the per-workspace admin display name", async () => {
+    const wsId = await freshWsId("tools-ws-selfname");
+    const d = deps(wsId, ctx({ adminWorkspaces: [wsId] }));
+    const res = (await selfWrite(d, {
+      operation: "set_display_name",
+      displayName: "  Ops Bot  "
+    })) as { ok?: boolean; displayName?: string };
+    expect(res.ok).toBe(true);
+    expect(res.displayName).toBe("Ops Bot");
+    expect(await getAdminDisplayName(db, wsId)).toBe("Ops Bot");
+  });
+
+  it("rejects an empty display name", async () => {
+    const wsId = await freshWsId("tools-ws-selfname-empty");
+    const d = deps(wsId, ctx({ adminWorkspaces: [wsId] }));
+    expect(
+      await selfWrite(d, { operation: "set_display_name", displayName: "   " })
+    ).toHaveProperty("error");
+  });
+
+  it("denies a non-admin caller", async () => {
+    const wsId = await freshWsId("tools-ws-selfname-deny");
+    const d = deps(wsId, ctx({ adminWorkspaces: [999] }));
+    expect(
+      await selfWrite(d, { operation: "set_display_name", displayName: "X" })
+    ).toHaveProperty("error");
+  });
+});
+
+describe("admin tools — self_write is always registered", () => {
+  it("registers self_write with and without the image seams", () => {
     const wsId = 3;
     const base = ctx({ adminWorkspaces: [wsId] });
     const without = buildAdminTools(deps(wsId, base));
+    expect(Object.keys(without)).toContain("self_write");
     expect(Object.keys(without)).not.toContain("avatar_regenerate");
 
     const withSeams = buildAdminTools(avatarDeps(wsId, base));
-    expect(Object.keys(withSeams)).toContain("avatar_regenerate");
+    expect(Object.keys(withSeams)).toContain("self_write");
+  });
+});
+
+describe("admin tools — agents_write regenerate_avatar", () => {
+  async function registerAgentFor(
+    wsId: number,
+    name: string,
+    d: AdminToolDeps
+  ): Promise<void> {
+    await agentsWrite(d, {
+      operation: "register",
+      name,
+      a2aEndpoint: `https://${name}.example.com/a2a`,
+      notifyOn: "mention"
+    });
+  }
+
+  it("generates an avatar and sets the custom agent's iconUrl", async () => {
+    const wsId = await freshWsId("tools-ws-agent-avatar");
+    await setPublicUrl(db, "https://gw.example.com");
+    const prompts: string[] = [];
+    const names: string[] = [];
+    const d = avatarDeps(wsId, ctx({ adminWorkspaces: [wsId] }), {
+      generateImage: async (p) => {
+        prompts.push(p);
+        return okImage;
+      },
+      storeIcon: async (_img, name) => {
+        names.push(name);
+        return { key: "abc123def4567890", contentType: "image/jpeg" };
+      }
+    });
+    await registerAgentFor(wsId, "paint-agent", d);
+
+    const res = (await agentsWrite(d, {
+      operation: "regenerate_avatar",
+      name: "paint-agent",
+      instructions: "teal owl"
+    })) as { ok?: boolean; agent?: { iconUrl?: string } };
+    expect(res.ok).toBe(true);
+    const expected = `https://gw.example.com/icons/${wsId}/paint-agent/abc123def4567890.jpg`;
+    expect(res.agent?.iconUrl).toBe(expected);
+    expect((await getAgent(db, "paint-agent"))?.iconUrl).toBe(expected);
+    // Prompt anchors on the agent's display name, not the "admin assistant";
+    // stored under the per-agent name.
+    expect(prompts[0]).toContain("Stubbed Agent"); // the registered displayName
+    expect(prompts[0]).not.toContain("admin assistant");
+    expect(prompts[0]).toContain("teal owl");
+    expect(names).toEqual(["paint-agent"]);
+  });
+
+  it("rejects a built-in / reserved agent", async () => {
+    const wsId = await freshWsId("tools-ws-agent-avatar-builtin");
+    await setPublicUrl(db, "https://gw.example.com");
+    const d = avatarDeps(wsId, ctx({ adminWorkspaces: [wsId] }));
+    expect(
+      await agentsWrite(d, { operation: "regenerate_avatar", name: "admin" })
+    ).toHaveProperty("error");
+  });
+
+  it("rejects an agent that doesn't belong to this workspace", async () => {
+    const wsId = await freshWsId("tools-ws-agent-avatar-scope");
+    await setPublicUrl(db, "https://gw.example.com");
+    const d = avatarDeps(wsId, ctx({ adminWorkspaces: [wsId] }));
+    expect(
+      await agentsWrite(d, {
+        operation: "regenerate_avatar",
+        name: "nonexistent-agent"
+      })
+    ).toHaveProperty("error");
+  });
+
+  it("errors when the image seams are absent", async () => {
+    const wsId = await freshWsId("tools-ws-agent-avatar-noseam");
+    await setPublicUrl(db, "https://gw.example.com");
+    const d = deps(wsId, ctx({ adminWorkspaces: [wsId] }));
+    await registerAgentFor(wsId, "noseam-agent", d);
+    const res = (await agentsWrite(d, {
+      operation: "regenerate_avatar",
+      name: "noseam-agent"
+    })) as { error?: string };
+    expect(res.error).toContain("not available");
+  });
+
+  it("errors when the gateway public URL isn't known yet", async () => {
+    const wsId = await freshWsId("tools-ws-agent-avatar-nourl");
+    const d = avatarDeps(wsId, ctx({ adminWorkspaces: [wsId] }));
+    await registerAgentFor(wsId, "nourl-agent", d);
+    expect(
+      await agentsWrite(d, {
+        operation: "regenerate_avatar",
+        name: "nourl-agent"
+      })
+    ).toHaveProperty("error");
   });
 });

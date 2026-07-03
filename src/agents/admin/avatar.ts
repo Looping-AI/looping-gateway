@@ -30,6 +30,32 @@ export function buildAvatarPrompt(input: AvatarPromptInput): string {
   return [base, direction, style].filter(Boolean).join(" ");
 }
 
+export interface AgentAvatarPromptInput {
+  /** The custom agent's machine name (slug) — the fallback subject. */
+  agentName: string;
+  /** The agent's human display name, preferred as the avatar's subject when set. */
+  displayName?: string | null;
+  /** Optional extra art direction from the admin/user (style, colors, motifs). */
+  instructions?: string;
+}
+
+/**
+ * Compose the text-to-image prompt for a custom agent's avatar. Anchored on the
+ * agent's display name (or machine name), NOT the "admin assistant" wording used
+ * for {@link buildAvatarPrompt} — a custom agent is a distinct persona.
+ */
+export function buildAgentAvatarPrompt(input: AgentAvatarPromptInput): string {
+  const subject = input.displayName?.trim() || input.agentName;
+  const base =
+    `A clean, modern square slack avatar for an AI assistant named "${subject}" — ` +
+    `a friendly, distinctive mascot or emblem representing this agent's persona.`;
+  const direction = input.instructions?.trim();
+  const style =
+    "Flat vector style, bold simple shapes, centered composition, solid background, " +
+    "no text, no lettering.";
+  return [base, direction, style].filter(Boolean).join(" ");
+}
+
 /**
  * Generate an avatar via Workers AI. Isolated here (like `embed()` in shared/recall)
  * so the AI binding call is the only impure part. FLUX.2 returns the image as a

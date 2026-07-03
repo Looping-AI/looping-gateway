@@ -1,5 +1,9 @@
 import { describe, it, expect } from "vitest";
-import { buildAvatarPrompt, generateAvatar } from "@/agents/admin/avatar";
+import {
+  buildAvatarPrompt,
+  buildAgentAvatarPrompt,
+  generateAvatar
+} from "@/agents/admin/avatar";
 
 describe("buildAvatarPrompt", () => {
   it("includes the workspace name and the caller's art direction", () => {
@@ -14,6 +18,26 @@ describe("buildAvatarPrompt", () => {
   it("omits absent instructions without leaving a gap", () => {
     const p = buildAvatarPrompt({ workspaceName: "Acme Corp" });
     expect(p).toContain("Acme Corp");
+    expect(p).not.toContain("undefined");
+  });
+});
+
+describe("buildAgentAvatarPrompt", () => {
+  it("anchors on the display name when set, plus art direction", () => {
+    const p = buildAgentAvatarPrompt({
+      agentName: "paint-agent",
+      displayName: "Painter",
+      instructions: "teal owl"
+    });
+    expect(p).toContain("Painter");
+    expect(p).toContain("teal owl");
+    // Custom agents are NOT described as the "admin assistant".
+    expect(p).not.toContain("admin assistant");
+  });
+
+  it("falls back to the machine name and omits absent instructions", () => {
+    const p = buildAgentAvatarPrompt({ agentName: "paint-agent" });
+    expect(p).toContain("paint-agent");
     expect(p).not.toContain("undefined");
   });
 });

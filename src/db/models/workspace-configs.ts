@@ -27,12 +27,18 @@ export const OperatorConfigKeys = {
   REMOTE_AGENT_ALLOWED_DOMAINS: "remote_agent_allowed_domains",
   /**
    * Public URL of this workspace's admin-agent avatar, generated via Workers AI
-   * and served from the per-workspace admin DO (`/icons/admin/{wsId}/{key}`).
+   * and served from the per-workspace admin DO (`/icons/{wsId}/admin/{key}`).
    * Stored per workspace so each admin instance has its own avatar; read by the
    * router to override the shared `admin` registry row's iconUrl. Managed via the
-   * `avatar_regenerate` admin tool.
+   * `self_write` admin tool (`set_avatar`).
    */
-  ADMIN_ICON_URL: "admin_icon_url"
+  ADMIN_ICON_URL: "admin_icon_url",
+  /**
+   * Display name of this workspace's admin agent, set by the admin itself via the
+   * `self_write` tool. Stored per workspace (the `admin` registry row is shared
+   * across workspaces) and read by the router to override the row's displayName.
+   */
+  ADMIN_DISPLAY_NAME: "admin_display_name"
 } as const;
 
 export const SystemConfigKeys = {
@@ -203,4 +209,29 @@ export async function setAdminIconUrl(
   url: string
 ): Promise<void> {
   return setConfig(db, workspaceId, OperatorConfigKeys.ADMIN_ICON_URL, url);
+}
+
+/**
+ * Read the admin display name for a workspace (null = use the registry row's
+ * default). Workspace-scoped: each admin instance has its own name.
+ */
+export async function getAdminDisplayName(
+  db: Db,
+  workspaceId: number
+): Promise<string | null> {
+  return getConfig(db, workspaceId, OperatorConfigKeys.ADMIN_DISPLAY_NAME);
+}
+
+/** Set (upsert) the admin display name for a workspace. */
+export async function setAdminDisplayName(
+  db: Db,
+  workspaceId: number,
+  displayName: string
+): Promise<void> {
+  return setConfig(
+    db,
+    workspaceId,
+    OperatorConfigKeys.ADMIN_DISPLAY_NAME,
+    displayName
+  );
 }
