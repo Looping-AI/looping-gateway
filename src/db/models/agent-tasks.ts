@@ -113,9 +113,8 @@ export async function completeAgentTask(token: string): Promise<boolean> {
 }
 
 /**
- * Delete rows older than `olderThanSeconds` (default 24h). The reaction backstop
- * already clears the ⏳ for tasks that never call back, so these rows are pure
- * bookkeeping — sweeping them keeps the table from growing unbounded.
+ * Delete rows older than `olderThanSeconds` (default 30 days). Called by the
+ * nightly maintenance workflow to keep the table from growing unbounded.
  */
 export async function sweepStaleAgentTasks(
   olderThanSeconds = ONE_MONTH_SECONDS

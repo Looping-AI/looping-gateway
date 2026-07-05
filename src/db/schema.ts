@@ -158,7 +158,7 @@ export const agentChannels = sqliteTable(
  * (`eventId`). Callback rendering identity is read from the current `agents` row.
  *
  * Keyed by the gateway-generated `token` (the value the remote echoes back).
- * Rows are marked `completed` by the callback and swept when stale by reconcile.
+ * Rows are marked `completed` by the callback and swept in the maintenance workflow.
  */
 export const agentTasks = sqliteTable(
   "agent_tasks",
