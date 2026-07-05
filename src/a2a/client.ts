@@ -37,7 +37,7 @@ export interface A2ARemoteTarget {
  * generation — so it can be short. The reply itself arrives later via the
  * push-notification callback, so no gateway request ever blocks on the model.
  */
-const ACCEPT_TIMEOUT_MS = 15_000;
+const ACCEPT_TIMEOUT_MS = 30_000;
 
 /** Hard cap on a remote reply before it reaches Slack (untrusted output). */
 const MAX_REMOTE_REPLY_CHARS = 16_000;
