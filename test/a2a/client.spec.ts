@@ -95,7 +95,7 @@ describe("acceptA2ARemote — async remote accept", () => {
     stubRemote("task-1", calls);
 
     const result = await acceptA2ARemote(
-      { kind: "remote", endpoint: ENDPOINT, authToken: "tok-123" },
+      { endpoint: ENDPOINT, authToken: "tok-123" },
       userMessage("hi"),
       { url: "https://gw.example.com/a2a/notifications", token: "ntok-9" }
     );
@@ -146,7 +146,7 @@ describe("acceptA2ARemote — async remote accept", () => {
     void calls;
 
     const result = await acceptA2ARemote(
-      { kind: "remote", endpoint: ENDPOINT, authToken: "t" },
+      { endpoint: ENDPOINT, authToken: "t" },
       userMessage("hi"),
       { url: "https://gw.example.com/a2a/notifications", token: "n" }
     );

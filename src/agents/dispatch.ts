@@ -264,7 +264,7 @@ export async function dispatchToAgent(
     // its pinned card key (that JWT is the real authenticator — this token is the
     // correlation/dedupe key, stable across retries so they collapse to one row).
     const { taskId } = await acceptA2ARemote(
-      { kind: "remote", endpoint: agent.a2aEndpoint, authToken: gatewayToken },
+      { endpoint: agent.a2aEndpoint, authToken: gatewayToken },
       remoteMessage,
       { url: `${issuer}/a2a/notifications`, token: dispatchId }
     );
@@ -301,6 +301,6 @@ export async function dispatchToAgent(
     description: `Local ${agent.kind} agent`
   });
 
-  const reply = await sendA2ALocal({ kind: "local", card, fetchImpl }, message);
+  const reply = await sendA2ALocal({ card, fetchImpl }, message);
   return { kind: "reply", text: reply };
 }

@@ -23,12 +23,10 @@ import { extractText } from "./parts";
  *   for the accept (a Task ack), never for generation.
  */
 export interface A2ALocalTarget {
-  kind: "local";
   card: AgentCard;
   fetchImpl: typeof fetch;
 }
 export interface A2ARemoteTarget {
-  kind: "remote";
   endpoint: string;
   authToken?: string;
 }
@@ -86,24 +84,32 @@ export function sanitizeRemoteReply(text: string): string {
     : safe;
 }
 
-/** Shared A2A client construction: overrides the JSON-RPC transport `fetchImpl`. */
-async function buildClient(
-  target: A2ALocalTarget | A2ARemoteTarget
-): Promise<Client> {
-  const fetchImpl =
-    target.kind === "local"
-      ? target.fetchImpl
-      : remoteFetchImpl(target.authToken);
+/** Build a local A2A client using an in-process Durable Object fetch impl. */
+async function buildLocalClient(target: A2ALocalTarget): Promise<Client> {
   const options = ClientFactoryOptions.createFrom(
     ClientFactoryOptions.default,
     {
-      transports: [new JsonRpcTransportFactory({ fetchImpl })]
+      transports: [new JsonRpcTransportFactory({ fetchImpl: target.fetchImpl })]
     }
   );
   const factory = new ClientFactory(options);
-  return target.kind === "local"
-    ? factory.createFromAgentCard(target.card)
-    : factory.createFromUrl(target.endpoint);
+  return factory.createFromAgentCard(target.card);
+}
+
+/** Build a remote A2A client with auth header injection and accept timeout. */
+async function buildRemoteClient(target: A2ARemoteTarget): Promise<Client> {
+  const options = ClientFactoryOptions.createFrom(
+    ClientFactoryOptions.default,
+    {
+      transports: [
+        new JsonRpcTransportFactory({
+          fetchImpl: remoteFetchImpl(target.authToken)
+        })
+      ]
+    }
+  );
+  const factory = new ClientFactory(options);
+  return factory.createFromUrl(target.endpoint);
 }
 
 /**
@@ -115,7 +121,7 @@ export async function sendA2ALocal(
   target: A2ALocalTarget,
   message: Message
 ): Promise<string> {
-  const client = await buildClient(target);
+  const client = await buildLocalClient(target);
   const result = await client.sendMessage({ message });
   return extractText(result);
 }
@@ -141,7 +147,7 @@ export async function acceptA2ARemote(
   message: Message,
   pushNotificationConfig: PushNotificationConfig
 ): Promise<RemoteAccept> {
-  const client = await buildClient(target);
+  const client = await buildRemoteClient(target);
   const params: MessageSendParams = {
     message,
     configuration: { pushNotificationConfig }
