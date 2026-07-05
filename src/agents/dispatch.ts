@@ -187,11 +187,14 @@ export function instanceNameFor(metadata: AgentTurnMetadata): string {
  * returned inline for the workflow to post. Remote agents are asynchronous: they
  * only *accept* the message here (returning a Task) and push the real reply later
  * to `/a2a/notifications`, so all the gateway gets now is the correlation `token`
- * (echoed back on the callback) and the remote-assigned `taskId`.
+ * (echoed back on the callback) and the remote-assigned `taskId`. A remote may
+ * violate this async contract by returning a Message; that outcome is surfaced
+ * separately so the workflow can post a visible failure.
  */
 export type DispatchResult =
   | { kind: "reply"; text: string }
-  | { kind: "accepted"; token: string; taskId: string | null };
+  | { kind: "accepted"; token: string; taskId: string }
+  | { kind: "contract_violation"; token: string };
 
 /**
  * Dispatch a user message to an agent over A2A. Routing is by `agent.kind`:
@@ -263,12 +266,15 @@ export async function dispatchToAgent(
     // task (A2A §13.2); the webhook still verifies the remote's signature against
     // its pinned card key (that JWT is the real authenticator — this token is the
     // correlation/dedupe key, stable across retries so they collapse to one row).
-    const { taskId } = await acceptA2ARemote(
+    const accept = await acceptA2ARemote(
       { endpoint: agent.a2aEndpoint, authToken: gatewayToken },
       remoteMessage,
       { url: `${issuer}/a2a/notifications`, token: dispatchId }
     );
-    return { kind: "accepted", token: dispatchId, taskId };
+    if (accept.kind === "accepted") {
+      return { kind: "accepted", token: dispatchId, taskId: accept.taskId };
+    }
+    return { kind: "contract_violation", token: dispatchId };
   }
 
   // Local agent → in-process via DO stub.fetch. Trusted same-worker dispatch, so

@@ -100,7 +100,7 @@ describe("acceptA2ARemote — async remote accept", () => {
       { url: "https://gw.example.com/a2a/notifications", token: "ntok-9" }
     );
 
-    expect(result.taskId).toBe("task-1");
+    expect(result).toEqual({ kind: "accepted", taskId: "task-1" });
 
     const post = calls.find((c) => c.method.toUpperCase() === "POST");
     expect(post).toBeDefined();
@@ -112,7 +112,7 @@ describe("acceptA2ARemote — async remote accept", () => {
     expect(push?.token).toBe("ntok-9");
   });
 
-  it("returns taskId null when the remote replies with a Message (contract violated)", async () => {
+  it("returns contract_violation when the remote replies with a Message", async () => {
     const calls: Captured[] = [];
     const card = buildAgentCard({
       name: "Remote",
@@ -150,7 +150,7 @@ describe("acceptA2ARemote — async remote accept", () => {
       userMessage("hi"),
       { url: "https://gw.example.com/a2a/notifications", token: "n" }
     );
-    expect(result.taskId).toBeNull();
+    expect(result).toEqual({ kind: "contract_violation" });
   });
 });
 

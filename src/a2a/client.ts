@@ -78,6 +78,11 @@ export function sanitizeRemoteReply(text: string): string {
     /[\u0000-\u0008\u000b\u000c\u000e-\u001f]/g,
     ""
   );
+  // Defang Slack broadcast/command sequences (<!channel>, <!here>, <!everyone>,
+  // <!subteam^…>) so a hostile reply can't @-notify a whole channel — even if a
+  // downstream conversion error makes postReply post the raw text. slackifyMarkdown
+  // escapes these on the normal path; this is the belt-and-suspenders at the trust
+  // boundary. Legitimate mentions (<@U…>, <#C…>) are intentionally left intact.
   const safe = stripped.replace(/<!([^>\n]*)>/g, "@$1");
   return safe.length > MAX_REMOTE_REPLY_CHARS
     ? `${safe.slice(0, MAX_REMOTE_REPLY_CHARS)}…`
@@ -127,10 +132,16 @@ export async function sendA2ALocal(
 }
 
 /** Result of accepting a message onto a remote agent's async task queue. */
-export interface RemoteAccept {
-  /** Remote-assigned Task id, or null if the remote didn't return a Task. */
-  taskId: string | null;
-}
+export type RemoteAccept =
+  | {
+      /** Remote accepted the turn and returned its Task id. */
+      kind: "accepted";
+      taskId: string;
+    }
+  | {
+      /** Remote violated async accept contract by returning a Message. */
+      kind: "contract_violation";
+    };
 
 /**
  * Send one A2A message to a **remote** agent for asynchronous processing. The
@@ -139,8 +150,7 @@ export interface RemoteAccept {
  * POST the terminal Task back to the webhook. We only wait for — and return — the
  * accept, never the generation. A remote that replies with a `Message` instead of
  * a Task is honoring neither the async contract nor the push config; we log and
- * treat it as accepted-without-task (its reply is dropped) rather than retrying,
- * since retrying a stateful remote would only duplicate the turn.
+ * return a contract-violation outcome for the caller to surface.
  */
 export async function acceptA2ARemote(
   target: A2ARemoteTarget,
@@ -153,11 +163,11 @@ export async function acceptA2ARemote(
     configuration: { pushNotificationConfig }
   };
   const result = await client.sendMessage(params);
-  if (result.kind === "task") return { taskId: result.id };
+  if (result.kind === "task") return { kind: "accepted", taskId: result.id };
   console.error(
     "[a2a] remote agent returned a Message, not a Task — push-notification " +
       "contract not honored; reply (if any) dropped",
     { contextId: message.contextId }
   );
-  return { taskId: null };
+  return { kind: "contract_violation" };
 }

@@ -17,6 +17,9 @@ import {
   reactionInstanceId
 } from "@/workflows/reaction";
 
+const REMOTE_CONTRACT_VIOLATION_TEXT =
+  "Remote agent did not provide the required task acknowledgment.";
+
 // One agent's resolved dispatch target (must be Rpc.Serializable).
 export interface AgentPlan {
   agent: DispatchAgentRef;
@@ -222,6 +225,22 @@ export class MessageWorkflow extends WorkflowEntrypoint<
               })
             );
             return true;
+          }
+
+          if (result.kind === "contract_violation") {
+            // The remote ignored push-notification async contract and returned a
+            // Message to the accept call. Surface this immediately so the caller
+            // gets explicit feedback instead of silence.
+            await step.do(`contract-violation:${plan.agent.name}`, () =>
+              postReply(
+                p.channelId,
+                threadTs,
+                REMOTE_CONTRACT_VIOLATION_TEXT,
+                plan.displayName,
+                plan.iconUrl
+              )
+            );
+            return false;
           }
 
           // Synchronous local reply (empty = silence, posts nothing).

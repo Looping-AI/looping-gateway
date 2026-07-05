@@ -75,6 +75,44 @@ function stubRemote(posts: RemotePost[]) {
   );
 }
 
+function stubRemoteContractViolation(posts: RemotePost[]) {
+  const card = buildAgentCard({
+    name: "Remote",
+    description: "remote dispatch test agent",
+    url: ENDPOINT
+  });
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const request =
+        input instanceof Request ? input : new Request(input, init);
+      const method = request.method.toUpperCase();
+      if (method === "POST") {
+        const rpc = (await request.clone().json()) as {
+          id?: unknown;
+          params?: { message?: Message };
+        };
+        posts.push({
+          authorization: request.headers.get("authorization"),
+          message: rpc.params?.message as Message
+        });
+        return Response.json({
+          jsonrpc: "2.0",
+          id: rpc.id ?? 1,
+          result: {
+            kind: "message",
+            messageId: "r1",
+            role: "agent",
+            parts: [{ kind: "text", text: "sync reply" }],
+            contextId: "reply"
+          }
+        });
+      }
+      return Response.json(card);
+    })
+  );
+}
+
 afterEach(async () => {
   vi.unstubAllGlobals();
   _resetIssuerCacheForTest();
@@ -260,5 +298,37 @@ describe("dispatchToAgent (local Durable Object)", () => {
       kind: "custom",
       workspaceId: 7
     });
+  });
+
+  it("returns contract_violation when remote accepts with Message instead of Task", async () => {
+    await setPublicUrl("https://gateway.test");
+    await setAllowedRemoteAgentDomains(["example.com"]);
+    const posts: RemotePost[] = [];
+    stubRemoteContractViolation(posts);
+
+    const result = await dispatchToAgent(
+      {
+        name: "remote-bad",
+        kind: "custom",
+        a2aEndpoint: ENDPOINT,
+        workspaceId: 7
+      },
+      {
+        eventId: "Ev-bad-remote",
+        text: "hello",
+        channelId: "C1",
+        channelName: "general",
+        threadTs: "171813.100",
+        messageTs: "171813.100",
+        user: user("U1"),
+        metadata: { agentKind: "custom", workspaceId: 7 }
+      }
+    );
+
+    expect(result.kind).toBe("contract_violation");
+    if (result.kind === "contract_violation") {
+      expect(result.token).toMatch(/^[0-9a-z]{19}$/);
+    }
+    expect(posts).toHaveLength(1);
   });
 });

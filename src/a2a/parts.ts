@@ -16,9 +16,10 @@ export function textOf(message: Message): string {
 }
 
 /**
- * Extract a single reply string from an A2A send result. Echo agents return a
- * `Message`; task-shaped agents (later) surface text via the status message or
- * the first artifact. Returns "" if nothing textual was produced.
+ * Extract a single reply string from an A2A send result from remote agents.
+ * Message-shaped responses return text from message parts; task-shaped
+ * responses return the first available text from the status message or
+ * artifacts. Returns "" if nothing textual was produced.
  */
 export function extractText(result: Message | Task): string {
   if (result.kind === "message") return partsText(result.parts);
