@@ -13,11 +13,7 @@ import { recall } from "@/agents/shared/recall";
  * from the instance's own key — never from model input — so the model cannot
  * reach another instance's history.
  */
-export function recallTools(
-  env: Env,
-  namespace: string,
-  hasArchive: boolean
-): ToolSet {
+export function recallTools(namespace: string, hasArchive: boolean): ToolSet {
   if (!hasArchive) return {};
   return {
     recall: tool({
@@ -37,7 +33,7 @@ export function recallTools(
           .describe("How many past snippets to return (default 5)")
       }),
       execute: async ({ query, topK }) => {
-        const hits = await recall(env, namespace, query, topK ?? 5);
+        const hits = await recall(namespace, query, topK ?? 5);
         return hits.length > 0
           ? { hits }
           : { hits: [], note: "No relevant earlier messages found." };

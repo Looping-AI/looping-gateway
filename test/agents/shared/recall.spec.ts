@@ -1,7 +1,10 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, afterEach, vi } from "vitest";
+import { env } from "cloudflare:workers";
 import type { SessionMessage } from "agents/experimental/memory/session";
 import { archiveMessages, recall } from "@/agents/shared/recall";
 import { recallTools } from "@/agents/shared/recall-tool";
+
+afterEach(() => vi.restoreAllMocks());
 
 function msg(
   id: string,
@@ -24,37 +27,48 @@ const toolOnly = {
   parts: [{ type: "tool-call", toolCallId: "x", toolName: "y", input: {} }]
 } as unknown as SessionMessage;
 
+/**
+ * Spy on the global `env` AI + VECTORIZE bindings. Recall code reads them off
+ * `cloudflare:workers`, so tests stub the real bindings rather than inject a
+ * fake env. Restored by the top-level `afterEach`.
+ */
 function fakeEnv() {
-  const upsert = vi.fn(async (vectors: unknown[]) => ({
+  const upsert = vi.spyOn(env.VECTORIZE, "upsert").mockImplementation((async (
+    vectors: unknown[]
+  ) => ({
     mutationId: "m",
     count: vectors.length
-  }));
-  const query = vi.fn(async (vector: number[], options: unknown) => ({
-    count: 1,
-    matches: [
-      {
-        id: "a",
-        score: 0.91,
-        metadata: {
-          role: "user",
-          text: "deploy plan",
-          createdAt: "2025-01-15T10:00:00.000Z"
+  })) as never);
+  const query = vi
+    .spyOn(env.VECTORIZE, "query")
+    .mockImplementation((async () => ({
+      count: 1,
+      matches: [
+        {
+          id: "a",
+          score: 0.91,
+          metadata: {
+            role: "user",
+            text: "deploy plan",
+            createdAt: "2025-01-15T10:00:00.000Z"
+          }
         }
-      }
-    ]
-  }));
+      ]
+    })) as never);
   // One vector per input text; value encodes batch position so order is checkable.
-  const run = vi.fn(async (model: string, input: { text: string[] }) => ({
+  const run = vi.spyOn(env.AI, "run").mockImplementation((async (
+    model: string,
+    input: { text: string[] }
+  ) => ({
     data: input.text.map((_, i) => [i, i + 1, i + 2])
-  }));
-  const env = { AI: { run }, VECTORIZE: { upsert, query } } as unknown as Env;
-  return { env, upsert, query, run };
+  })) as never);
+  return { upsert, query, run };
 }
 
 describe("archiveMessages", () => {
   it("upserts one vector per non-empty message, keyed by message id, scoped to namespace", async () => {
-    const { env, upsert, run } = fakeEnv();
-    await archiveMessages(env, "admin:7", [
+    const { upsert, run } = fakeEnv();
+    await archiveMessages("admin:7", [
       msg("a", "user", "hello"),
       msg("b", "assistant", "  "), // whitespace → skipped
       toolOnly, // no text → skipped
@@ -81,11 +95,11 @@ describe("archiveMessages", () => {
   });
 
   it("enriches metadata with channel/author/at parsed from a wrapped turn", async () => {
-    const { env, upsert } = fakeEnv();
+    const { upsert } = fakeEnv();
     const wrapped =
       '<turn from="Grace" id="U2" channel="general" ' +
       'at="2026-06-25T14:30:00.000Z">deploy the bot</turn>';
-    await archiveMessages(env, "admin:0", [msg("w", "user", wrapped)]);
+    await archiveMessages("admin:0", [msg("w", "user", wrapped)]);
 
     const vectors = upsert.mock.calls[0][0] as Array<{
       metadata: Record<string, unknown>;
@@ -103,43 +117,43 @@ describe("archiveMessages", () => {
   });
 
   it("no-ops on an empty / all-skipped batch (no AI or Vectorize calls)", async () => {
-    const { env, upsert, run } = fakeEnv();
-    await archiveMessages(env, "admin:0", [toolOnly, msg("x", "user", "   ")]);
+    const { upsert, run } = fakeEnv();
+    await archiveMessages("admin:0", [toolOnly, msg("x", "user", "   ")]);
     expect(run).not.toHaveBeenCalled();
     expect(upsert).not.toHaveBeenCalled();
   });
 
   it("preserves a string createdAt after JSON round-trip", async () => {
-    const { env, upsert } = fakeEnv();
+    const { upsert } = fakeEnv();
     // After getHistory() round-trip, createdAt is a string, not a Date.
-    await archiveMessages(env, "admin:0", [
+    await archiveMessages("admin:0", [
       msg("r", "user", "round-trip", "2024-11-01T09:00:00.000Z")
     ]);
-    const vectors = upsert.mock.calls[0][0] as Array<{
+    const vectors = upsert.mock.calls[0][0] as unknown as Array<{
       metadata: { createdAt: string };
     }>;
     expect(vectors[0].metadata.createdAt).toBe("2024-11-01T09:00:00.000Z");
   });
 
   it("skips messages that have no createdAt (no upsert)", async () => {
-    const { env, upsert, run } = fakeEnv();
+    const { upsert, run } = fakeEnv();
     // Build directly — the msg() helper always sets a default createdAt.
     const noTs = {
       id: "x",
       role: "user",
       parts: [{ type: "text", text: "has text" }]
     } as unknown as SessionMessage;
-    await archiveMessages(env, "admin:0", [noTs]);
+    await archiveMessages("admin:0", [noTs]);
     expect(run).not.toHaveBeenCalled();
     expect(upsert).not.toHaveBeenCalled();
   });
 
   it("batches embeddings under the per-call cap but upserts once", async () => {
-    const { env, upsert, run } = fakeEnv();
+    const { upsert, run } = fakeEnv();
     const many = Array.from({ length: 150 }, (_, i) =>
       msg(`m${i}`, "user", `t${i}`)
     );
-    await archiveMessages(env, "admin:0", many);
+    await archiveMessages("admin:0", many);
     expect(run).toHaveBeenCalledTimes(2); // 100 + 50
     expect(upsert).toHaveBeenCalledTimes(1);
     expect((upsert.mock.calls[0][0] as unknown[]).length).toBe(150);
@@ -148,8 +162,8 @@ describe("archiveMessages", () => {
 
 describe("recall", () => {
   it("queries within the namespace and maps matches to hits", async () => {
-    const { env, query } = fakeEnv();
-    const hits = await recall(env, "admin:7", "how did we deploy?", 3);
+    const { query } = fakeEnv();
+    const hits = await recall("admin:7", "how did we deploy?", 3);
     expect(query).toHaveBeenCalledTimes(1);
     const opts = query.mock.calls[0][1] as {
       namespace: string;
@@ -170,8 +184,8 @@ describe("recall", () => {
   });
 
   it("short-circuits an empty query without touching AI or Vectorize", async () => {
-    const { env, query, run } = fakeEnv();
-    expect(await recall(env, "admin:0", "   ")).toEqual([]);
+    const { query, run } = fakeEnv();
+    expect(await recall("admin:0", "   ")).toEqual([]);
     expect(run).not.toHaveBeenCalled();
     expect(query).not.toHaveBeenCalled();
   });
@@ -179,13 +193,12 @@ describe("recall", () => {
 
 describe("recallTools (gating)", () => {
   it("omits the recall tool before the first compaction", () => {
-    const { env } = fakeEnv();
-    expect(Object.keys(recallTools(env, "admin:0", false))).toEqual([]);
+    expect(Object.keys(recallTools("admin:0", false))).toEqual([]);
   });
 
   it("exposes a single recall tool once an archive exists", async () => {
-    const { env } = fakeEnv();
-    const tools = recallTools(env, "admin:7", true);
+    fakeEnv();
+    const tools = recallTools("admin:7", true);
     expect(Object.keys(tools)).toEqual(["recall"]);
 
     const execute = tools.recall.execute as (
@@ -197,16 +210,14 @@ describe("recallTools (gating)", () => {
   });
 
   it("returns a note when the archive has no matching results", async () => {
-    const emptyQuery = vi.fn(async (vector: number[], options: unknown) => ({
+    vi.spyOn(env.AI, "run").mockImplementation((async () => ({
+      data: [[1, 2, 3]]
+    })) as never);
+    vi.spyOn(env.VECTORIZE, "query").mockImplementation((async () => ({
       count: 0,
       matches: []
-    }));
-    const { run } = fakeEnv();
-    const emptyEnv = {
-      AI: { run },
-      VECTORIZE: { query: emptyQuery }
-    } as unknown as Env;
-    const tools = recallTools(emptyEnv, "admin:0", true);
+    })) as never);
+    const tools = recallTools("admin:0", true);
     const execute = tools.recall.execute as (
       args: { query: string },
       opts?: unknown

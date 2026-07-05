@@ -1,5 +1,5 @@
 import { eq, sql } from "drizzle-orm";
-import type { Db } from "../client";
+import { getDb } from "../client";
 import * as schema from "../schema";
 
 export type WorkspaceRow = typeof schema.workspaces.$inferSelect;
@@ -14,9 +14,9 @@ export interface UpsertWorkspaceInput {
 }
 
 export async function upsertWorkspace(
-  db: Db,
   input: UpsertWorkspaceInput
 ): Promise<void> {
+  const db = getDb();
   await db
     .insert(schema.workspaces)
     .values({
@@ -42,9 +42,9 @@ export interface CreateWorkspaceInput {
 }
 
 export async function createWorkspace(
-  db: Db,
   input: CreateWorkspaceInput
 ): Promise<WorkspaceRow> {
+  const db = getDb();
   const rows = await db
     .insert(schema.workspaces)
     .values({
@@ -55,10 +55,8 @@ export async function createWorkspace(
   return rows[0];
 }
 
-export async function getWorkspace(
-  db: Db,
-  id: number
-): Promise<WorkspaceRow | null> {
+export async function getWorkspace(id: number): Promise<WorkspaceRow | null> {
+  const db = getDb();
   const rows = await db
     .select()
     .from(schema.workspaces)
@@ -68,9 +66,9 @@ export async function getWorkspace(
 }
 
 export async function getWorkspaceByAdminChannel(
-  db: Db,
   channelId: string
 ): Promise<WorkspaceRow | null> {
+  const db = getDb();
   const rows = await db
     .select()
     .from(schema.workspaces)
@@ -79,15 +77,16 @@ export async function getWorkspaceByAdminChannel(
   return rows[0] ?? null;
 }
 
-export async function listWorkspaces(db: Db): Promise<WorkspaceRow[]> {
+export async function listWorkspaces(): Promise<WorkspaceRow[]> {
+  const db = getDb();
   return db.select().from(schema.workspaces);
 }
 
 export async function setWorkspaceAdminChannel(
-  db: Db,
   id: number,
   channelId: string | null
 ): Promise<void> {
+  const db = getDb();
   await db
     .update(schema.workspaces)
     .set({ adminChannelId: channelId, updatedAt: sql`(unixepoch())` })

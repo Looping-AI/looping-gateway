@@ -2,7 +2,6 @@ import { tool, type ToolSet } from "ai";
 import { z } from "zod";
 import { authorize, type UserAuthContext } from "@/auth";
 import type { CardSigningPin, VerifiedAgentCard } from "@/a2a/card-verify";
-import type { Db } from "@/db/client";
 import {
   type AgentRow,
   type NotifyOn,
@@ -53,7 +52,6 @@ import {
  * Tool *logic* is split from the AI-SDK wiring so it unit-tests without an LLM.
  */
 export interface AdminToolDeps {
-  db: Db;
   ctx: UserAuthContext | null;
   /** The workspace this admin instance manages (admin:{wsId}). */
   wsId: number;
@@ -111,8 +109,8 @@ function shape(a: AgentRow, channels: string[]): ToolResult {
 }
 
 /** Shape an agent row for the model (small, with its channel attachments). */
-async function present(db: Db, a: AgentRow): Promise<ToolResult> {
-  return shape(a, await getAgentChannels(db, a.name));
+async function present(a: AgentRow): Promise<ToolResult> {
+  return shape(a, await getAgentChannels(a.name));
 }
 
 /** Resolve a write target: must exist, belong to this workspace, and be a custom agent. */
@@ -123,7 +121,7 @@ async function requireWritableAgent(
   if (RESERVED_NAMES.has(name)) {
     return { error: `"${name}" is a built-in agent and cannot be modified.` };
   }
-  const a = await getAgent(deps.db, name);
+  const a = await getAgent(name);
   if (!a || a.workspaceId !== deps.wsId) {
     return { error: `No agent "${name}" in workspace ${deps.wsId}.` };
   }
@@ -148,17 +146,13 @@ export async function agentsRead(
     return deny(`reading agents requires admin of workspace ${deps.wsId}`);
 
   if (args.name) {
-    const a = await getAgent(deps.db, args.name);
+    const a = await getAgent(args.name);
     return {
-      agents:
-        a && a.workspaceId === deps.wsId ? [await present(deps.db, a)] : []
+      agents: a && a.workspaceId === deps.wsId ? [await present(a)] : []
     };
   }
-  const rows = await listAgentsForWorkspace(deps.db, deps.wsId);
-  const channelRows = await listChannelsForAgents(
-    deps.db,
-    rows.map((r) => r.name)
-  );
+  const rows = await listAgentsForWorkspace(deps.wsId);
+  const channelRows = await listChannelsForAgents(rows.map((r) => r.name));
   const byAgent = new Map<string, string[]>();
   for (const { agentName, channelId } of channelRows) {
     const entry = byAgent.get(agentName);
@@ -203,7 +197,7 @@ export async function agentsWrite(
     case "register": {
       if (RESERVED_NAMES.has(args.name))
         return { error: `"${args.name}" is a reserved built-in agent name.` };
-      if (await getAgent(deps.db, args.name))
+      if (await getAgent(args.name))
         return { error: `An agent named "${args.name}" already exists.` };
       let verified: VerifiedAgentCard;
       try {
@@ -213,7 +207,7 @@ export async function agentsWrite(
           error: `Endpoint verification failed: ${(err as Error).message}`
         };
       }
-      const row = await registerAgent(deps.db, {
+      const row = await registerAgent({
         name: args.name,
         kind: "custom",
         displayName: args.displayName ?? verified.displayName,
@@ -225,7 +219,7 @@ export async function agentsWrite(
         cardSigningJku: verified.pin.cardSigningJku,
         cardSigningKid: verified.pin.cardSigningKid
       });
-      return { ok: true, agent: await present(deps.db, row) };
+      return { ok: true, agent: await present(row) };
     }
     case "update": {
       const target = await requireWritableAgent(deps, args.name);
@@ -260,7 +254,7 @@ export async function agentsWrite(
           };
         }
       }
-      await updateAgent(deps.db, args.name, {
+      await updateAgent(args.name, {
         displayName:
           args.displayName !== undefined
             ? args.displayName
@@ -275,27 +269,27 @@ export async function agentsWrite(
             }
           : {})
       });
-      const updated = await getAgent(deps.db, args.name);
+      const updated = await getAgent(args.name);
       return {
         ok: true,
-        agent: updated ? await present(deps.db, updated) : null
+        agent: updated ? await present(updated) : null
       };
     }
     case "add_channel": {
       const target = await requireWritableAgent(deps, args.name);
       if ("error" in target) return target;
-      await attachAgentChannel(deps.db, {
+      await attachAgentChannel({
         agentName: args.name,
         channelId: args.channelId,
         workspaceId: deps.wsId
       });
-      return { ok: true, agent: await present(deps.db, target) };
+      return { ok: true, agent: await present(target) };
     }
     case "remove_channel": {
       const target = await requireWritableAgent(deps, args.name);
       if ("error" in target) return target;
-      await detachAgentChannel(deps.db, args.name, args.channelId);
-      return { ok: true, agent: await present(deps.db, target) };
+      await detachAgentChannel(args.name, args.channelId);
+      return { ok: true, agent: await present(target) };
     }
     case "regenerate_avatar": {
       const target = await requireWritableAgent(deps, args.name);
@@ -307,18 +301,18 @@ export async function agentsWrite(
       });
       const result = await generateAndStoreIcon(deps, target.name, prompt);
       if ("error" in result) return result;
-      await updateAgent(deps.db, args.name, { iconUrl: result.iconUrl });
-      const updated = await getAgent(deps.db, args.name);
+      await updateAgent(args.name, { iconUrl: result.iconUrl });
+      const updated = await getAgent(args.name);
       return {
         ok: true,
-        agent: updated ? await present(deps.db, updated) : null,
+        agent: updated ? await present(updated) : null,
         note: `Avatar generated for "${args.name}" — it appears on the agent's next reply.`
       };
     }
     case "unregister": {
       const target = await requireWritableAgent(deps, args.name);
       if ("error" in target) return target;
-      await unregisterAgent(deps.db, args.name);
+      await unregisterAgent(args.name);
       return { ok: true, unregistered: args.name };
     }
   }
@@ -338,11 +332,11 @@ export async function workspaceRead(
   if (args.id !== undefined) {
     if (!isOrg && args.id !== deps.wsId)
       return deny(`you can only read workspace ${deps.wsId}`);
-    const ws = await getWorkspace(deps.db, args.id);
+    const ws = await getWorkspace(args.id);
     return { workspaces: ws ? [ws] : [] };
   }
-  if (isOrg) return { workspaces: await listWorkspaces(deps.db) };
-  const ws = await getWorkspace(deps.db, deps.wsId);
+  if (isOrg) return { workspaces: await listWorkspaces() };
+  const ws = await getWorkspace(deps.wsId);
   return { workspaces: ws ? [ws] : [] };
 }
 
@@ -368,14 +362,14 @@ export async function workspaceWrite(
 
   switch (args.operation) {
     case "create": {
-      const ws = await createWorkspace(deps.db, { name: args.name });
+      const ws = await createWorkspace({ name: args.name });
       return { ok: true, workspace: ws };
     }
     case "set_admin_channel": {
-      if (!(await getWorkspace(deps.db, args.id)))
+      if (!(await getWorkspace(args.id)))
         return { error: `Workspace ${args.id} not found.` };
-      await setWorkspaceAdminChannel(deps.db, args.id, args.channelId);
-      return { ok: true, workspace: await getWorkspace(deps.db, args.id) };
+      await setWorkspaceAdminChannel(args.id, args.channelId);
+      return { ok: true, workspace: await getWorkspace(args.id) };
     }
   }
 }
@@ -409,7 +403,7 @@ export async function remoteAgentDomains(
   )
     return deny("remote agent domain management requires org admin");
 
-  const current = await getAllowedRemoteAgentDomains(deps.db);
+  const current = await getAllowedRemoteAgentDomains();
 
   if (args.operation === "list") {
     return {
@@ -458,7 +452,7 @@ export async function remoteAgentDomains(
       };
     }
     const updated = [...current, domain];
-    await setAllowedRemoteAgentDomains(deps.db, updated);
+    await setAllowedRemoteAgentDomains(updated);
     return {
       ok: true,
       approvedDomains: updated,
@@ -477,7 +471,7 @@ export async function remoteAgentDomains(
     };
   }
   const updated = current.filter((d) => d !== domain);
-  await setAllowedRemoteAgentDomains(deps.db, updated);
+  await setAllowedRemoteAgentDomains(updated);
   return { ok: true, approvedDomains: updated };
 }
 
@@ -499,7 +493,7 @@ async function generateAndStoreIcon(
   if (!deps.generateImage || !deps.storeIcon)
     return { error: "Avatar generation is not available in this environment." };
 
-  const publicUrl = await getPublicUrl(deps.db);
+  const publicUrl = await getPublicUrl();
   if (!publicUrl)
     return {
       error:
@@ -544,7 +538,7 @@ export async function selfWrite(
 
   switch (args.operation) {
     case "set_avatar": {
-      const ws = await getWorkspace(deps.db, deps.wsId);
+      const ws = await getWorkspace(deps.wsId);
       const workspaceName = ws?.name ?? `workspace ${deps.wsId}`;
       const prompt = buildAvatarPrompt({
         workspaceName,
@@ -552,7 +546,7 @@ export async function selfWrite(
       });
       const result = await generateAndStoreIcon(deps, "admin", prompt);
       if ("error" in result) return result;
-      await setAdminIconUrl(deps.db, deps.wsId, result.iconUrl);
+      await setAdminIconUrl(deps.wsId, result.iconUrl);
       return {
         ok: true,
         iconUrl: result.iconUrl,
@@ -562,7 +556,7 @@ export async function selfWrite(
     case "set_display_name": {
       const displayName = args.displayName.trim();
       if (!displayName) return { error: "Display name cannot be empty." };
-      await setAdminDisplayName(deps.db, deps.wsId, displayName);
+      await setAdminDisplayName(deps.wsId, displayName);
       return {
         ok: true,
         displayName,

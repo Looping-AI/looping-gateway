@@ -1,9 +1,10 @@
 import { createWorkersAI } from "workers-ai-provider";
 import type { LanguageModel } from "ai";
+import { env } from "cloudflare:workers";
 import { AI_GATEWAY_ID, CHAT_MODEL_ID, CHAT_FALLBACK_MODEL_ID } from "@/config";
 
 /** The model used by the agent tool loop and the Sessions compaction summarizer. */
-export function chatModel(env: Env): LanguageModel {
+export function chatModel(): LanguageModel {
   const workersai = createWorkersAI({
     binding: env.AI,
     gateway: { id: AI_GATEWAY_ID }
@@ -12,7 +13,7 @@ export function chatModel(env: Env): LanguageModel {
 }
 
 /** Fallback model used when the primary model is over capacity. */
-export function fallbackChatModel(env: Env): LanguageModel {
+export function fallbackChatModel(): LanguageModel {
   const workersai = createWorkersAI({
     binding: env.AI,
     gateway: { id: AI_GATEWAY_ID }
@@ -34,17 +35,14 @@ export interface ModelPair {
 }
 
 /** Lazily build + memoize the primary/fallback model pair (being used in tests). */
-export function createModelPair(
-  env: Env,
-  overrides: ModelOverrides = {}
-): ModelPair {
+export function createModelPair(overrides: ModelOverrides = {}): ModelPair {
   let primary: LanguageModel | undefined;
   let fallback: LanguageModel | undefined;
   return {
-    primary: () => (primary ??= overrides.model ?? chatModel(env)),
+    primary: () => (primary ??= overrides.model ?? chatModel()),
     fallback: () =>
       (fallback ??=
-        overrides.fallbackModel ?? overrides.model ?? fallbackChatModel(env)),
+        overrides.fallbackModel ?? overrides.model ?? fallbackChatModel()),
     primaryId: () => CHAT_MODEL_ID,
     fallbackId: () => CHAT_FALLBACK_MODEL_ID
   };

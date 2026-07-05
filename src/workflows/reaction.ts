@@ -67,7 +67,7 @@ export class ReactionWorkflow extends WorkflowEntrypoint<
       }
 
       await step.do("remove-reaction", () =>
-        removeReaction(this.env, p.channelId, p.ts, PENDING_REACTION)
+        removeReaction(p.channelId, p.ts, PENDING_REACTION)
       );
     } catch (err) {
       console.error("[reaction] workflow run failed", {

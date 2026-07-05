@@ -1,4 +1,5 @@
 import type { SessionMessage } from "agents/experimental/memory/session";
+import { env } from "cloudflare:workers";
 import { AI_GATEWAY_ID, EMBED_MODEL_ID } from "@/config";
 import { parseTurn, sessionText } from "@/agents/shared/messages";
 
@@ -23,7 +24,7 @@ export interface RecallHit {
 }
 
 /** Embed texts via Workers AI, batched. Returns one vector per input, in order. */
-async function embed(env: Env, texts: string[]): Promise<number[][]> {
+async function embed(texts: string[]): Promise<number[][]> {
   const out: number[][] = [];
   for (let i = 0; i < texts.length; i += EMBED_BATCH) {
     const batch = texts.slice(i, i + EMBED_BATCH);
@@ -54,7 +55,6 @@ async function embed(env: Env, texts: string[]): Promise<number[][]> {
  * metadata so future recall can filter a channel's history by speaker or origin.
  */
 export async function archiveMessages(
-  env: Env,
   namespace: string,
   messages: SessionMessage[]
 ): Promise<void> {
@@ -83,10 +83,7 @@ export async function archiveMessages(
   });
   if (entries.length === 0) return;
 
-  const values = await embed(
-    env,
-    entries.map((e) => e.text)
-  );
+  const values = await embed(entries.map((e) => e.text));
   await env.VECTORIZE.upsert(
     entries.map((e, i) => ({
       id: e.id,
@@ -108,14 +105,13 @@ export async function archiveMessages(
 
 /** Semantic search over this instance's archived history. Scoped to `namespace`. */
 export async function recall(
-  env: Env,
   namespace: string,
   query: string,
   topK = 5
 ): Promise<RecallHit[]> {
   const trimmed = query.trim();
   if (!trimmed) return [];
-  const [vector] = await embed(env, [trimmed]);
+  const [vector] = await embed([trimmed]);
   const res = await env.VECTORIZE.query(vector, {
     namespace,
     topK,

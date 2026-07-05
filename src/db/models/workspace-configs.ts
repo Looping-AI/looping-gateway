@@ -1,5 +1,5 @@
 import { eq, sql, and } from "drizzle-orm";
-import type { Db } from "../client";
+import { getDb } from "../client";
 import * as schema from "../schema";
 import { ORG_WORKSPACE_ID } from "./workspaces";
 
@@ -70,10 +70,10 @@ export type SystemConfigKey =
  * Returns `null` when the row does not exist (absence = unset).
  */
 export async function getConfig(
-  db: Db,
   workspaceId: number,
   key: string
 ): Promise<string | null> {
+  const db = getDb();
   const rows = await db
     .select({ value: schema.workspaceConfigs.value })
     .from(schema.workspaceConfigs)
@@ -94,11 +94,11 @@ export async function getConfig(
  * intentional workspace migration).
  */
 export async function setConfig(
-  db: Db,
   workspaceId: number,
   key: string,
   value: string
 ): Promise<void> {
+  const db = getDb();
   await db
     .insert(schema.workspaceConfigs)
     .values({ workspaceId, key, value })
@@ -116,10 +116,10 @@ export async function setConfig(
  * No-op if the row does not exist.
  */
 export async function unsetConfig(
-  db: Db,
   workspaceId: number,
   key: string
 ): Promise<void> {
+  const db = getDb();
   await db
     .delete(schema.workspaceConfigs)
     .where(
@@ -134,25 +134,20 @@ export async function unsetConfig(
 // System config helpers (org-level, workspace 0)
 // ---------------------------------------------------------------------------
 
-export async function getSlackTeamId(db: Db): Promise<string | null> {
-  return getConfig(db, ORG_WORKSPACE_ID, SystemConfigKeys.SLACK_TEAM_ID);
+export async function getSlackTeamId(): Promise<string | null> {
+  return getConfig(ORG_WORKSPACE_ID, SystemConfigKeys.SLACK_TEAM_ID);
 }
 
-export async function setSlackTeamId(db: Db, teamId: string): Promise<void> {
-  return setConfig(
-    db,
-    ORG_WORKSPACE_ID,
-    SystemConfigKeys.SLACK_TEAM_ID,
-    teamId
-  );
+export async function setSlackTeamId(teamId: string): Promise<void> {
+  return setConfig(ORG_WORKSPACE_ID, SystemConfigKeys.SLACK_TEAM_ID, teamId);
 }
 
-export async function getPublicUrl(db: Db): Promise<string | null> {
-  return getConfig(db, ORG_WORKSPACE_ID, SystemConfigKeys.PUBLIC_URL);
+export async function getPublicUrl(): Promise<string | null> {
+  return getConfig(ORG_WORKSPACE_ID, SystemConfigKeys.PUBLIC_URL);
 }
 
-export async function setPublicUrl(db: Db, url: string): Promise<void> {
-  return setConfig(db, ORG_WORKSPACE_ID, SystemConfigKeys.PUBLIC_URL, url);
+export async function setPublicUrl(url: string): Promise<void> {
+  return setConfig(ORG_WORKSPACE_ID, SystemConfigKeys.PUBLIC_URL, url);
 }
 
 // ---------------------------------------------------------------------------
@@ -164,9 +159,8 @@ export async function setPublicUrl(db: Db, url: string): Promise<void> {
  * Returns an empty array if not configured (which means no remote agents are
  * approved — deny-all semantics enforced in `validateRemoteEndpoint`).
  */
-export async function getAllowedRemoteAgentDomains(db: Db): Promise<string[]> {
+export async function getAllowedRemoteAgentDomains(): Promise<string[]> {
   const raw = await getConfig(
-    db,
     ORG_WORKSPACE_ID,
     OperatorConfigKeys.REMOTE_AGENT_ALLOWED_DOMAINS
   );
@@ -180,11 +174,9 @@ export async function getAllowedRemoteAgentDomains(db: Db): Promise<string[]> {
 }
 
 export async function setAllowedRemoteAgentDomains(
-  db: Db,
   domains: string[]
 ): Promise<void> {
   return setConfig(
-    db,
     ORG_WORKSPACE_ID,
     OperatorConfigKeys.REMOTE_AGENT_ALLOWED_DOMAINS,
     JSON.stringify(domains)
@@ -196,19 +188,17 @@ export async function setAllowedRemoteAgentDomains(
  * Workspace-scoped: each admin instance has its own avatar.
  */
 export async function getAdminIconUrl(
-  db: Db,
   workspaceId: number
 ): Promise<string | null> {
-  return getConfig(db, workspaceId, OperatorConfigKeys.ADMIN_ICON_URL);
+  return getConfig(workspaceId, OperatorConfigKeys.ADMIN_ICON_URL);
 }
 
 /** Set (upsert) the admin avatar URL for a workspace. */
 export async function setAdminIconUrl(
-  db: Db,
   workspaceId: number,
   url: string
 ): Promise<void> {
-  return setConfig(db, workspaceId, OperatorConfigKeys.ADMIN_ICON_URL, url);
+  return setConfig(workspaceId, OperatorConfigKeys.ADMIN_ICON_URL, url);
 }
 
 /**
@@ -216,20 +206,17 @@ export async function setAdminIconUrl(
  * default). Workspace-scoped: each admin instance has its own name.
  */
 export async function getAdminDisplayName(
-  db: Db,
   workspaceId: number
 ): Promise<string | null> {
-  return getConfig(db, workspaceId, OperatorConfigKeys.ADMIN_DISPLAY_NAME);
+  return getConfig(workspaceId, OperatorConfigKeys.ADMIN_DISPLAY_NAME);
 }
 
 /** Set (upsert) the admin display name for a workspace. */
 export async function setAdminDisplayName(
-  db: Db,
   workspaceId: number,
   displayName: string
 ): Promise<void> {
   return setConfig(
-    db,
     workspaceId,
     OperatorConfigKeys.ADMIN_DISPLAY_NAME,
     displayName

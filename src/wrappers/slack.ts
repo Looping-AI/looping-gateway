@@ -1,13 +1,12 @@
 import { callSlackApi, assertSlackOk } from "@chat-adapter/slack/api";
 import type { SlackApiResponse } from "@chat-adapter/slack/api";
+import { env } from "cloudflare:workers";
 import { pickDisplayName } from "@/util/display-name";
 import { slackifyMarkdown } from "slackify-markdown";
 
 // Thin, cursor-paginated wrappers over the Slack reads the chat SDK doesn't
 // cover. `callSlackApi` only throws on HTTP errors, so we assertSlackOk to
 // surface Slack-level failures (e.g. missing_scope) as thrown errors.
-
-type SlackEnv = Pick<Env, "SLACK_BOT_TOKEN">;
 
 interface SlackMember {
   id: string;
@@ -58,9 +57,7 @@ function normalizeMember(m: SlackMember): SlackUserInfo {
 }
 
 /** Iterate every Slack user via paginated `users.list`. */
-export async function* iterateSlackUsers(
-  env: SlackEnv
-): AsyncGenerator<SlackUserInfo> {
+export async function* iterateSlackUsers(): AsyncGenerator<SlackUserInfo> {
   let cursor: string | undefined;
   do {
     const res = await callSlackApi<UsersListResponse>(
@@ -76,7 +73,6 @@ export async function* iterateSlackUsers(
 
 /** All member ids of a channel via paginated `conversations.members`. */
 export async function fetchChannelMemberIds(
-  env: SlackEnv,
   channelId: string
 ): Promise<Set<string>> {
   const ids = new Set<string>();
@@ -100,9 +96,10 @@ export async function fetchChannelMemberIds(
  * types) are skipped. Reconcile upserts these into D1 so the message hot path
  * resolves channel names without a Slack call.
  */
-export async function* iterateSlackChannels(
-  env: SlackEnv
-): AsyncGenerator<{ id: string; name: string }> {
+export async function* iterateSlackChannels(): AsyncGenerator<{
+  id: string;
+  name: string;
+}> {
   let cursor: string | undefined;
   do {
     const res = await callSlackApi<ConversationsListResponse>(
@@ -129,9 +126,8 @@ export interface BotInfo {
   teamId: string | null;
 }
 
-// Cached per bot token: auth.test is called once per isolate lifetime (the bot
-// identity never changes while the token is in use).
-const botInfoCache = new Map<string, BotInfo>();
+// Cached for the isolate lifetime (token never changes while the isolate lives).
+let botInfoCache: BotInfo | undefined;
 
 /**
  * Reset the bot-info cache. Exposed only for testing — production code never
@@ -139,30 +135,25 @@ const botInfoCache = new Map<string, BotInfo>();
  * @internal
  */
 export function _resetBotInfoCacheForTest(): void {
-  botInfoCache.clear();
+  botInfoCache = undefined;
 }
 
 /** Fetch (and cache) the bot's `user_id` and `team_id` via `auth.test`. */
-export async function getBotInfo(env: SlackEnv): Promise<BotInfo> {
-  const cached = botInfoCache.get(env.SLACK_BOT_TOKEN);
-  if (cached !== undefined) return cached;
+export async function getBotInfo(): Promise<BotInfo> {
+  if (botInfoCache !== undefined) return botInfoCache;
   const res = await callSlackApi<AuthTestResponse>(
     "auth.test",
     {},
     { token: env.SLACK_BOT_TOKEN }
   );
   assertSlackOk("auth.test", res);
-  const info: BotInfo = {
-    userId: res.user_id ?? null,
-    teamId: res.team_id ?? null
-  };
-  botInfoCache.set(env.SLACK_BOT_TOKEN, info);
-  return info;
+  botInfoCache = { userId: res.user_id ?? null, teamId: res.team_id ?? null };
+  return botInfoCache;
 }
 
 /** The bot's own Slack user id, used to skip the bot in membership handling. */
-export async function getBotUserId(env: SlackEnv): Promise<string | null> {
-  return (await getBotInfo(env)).userId;
+export async function getBotUserId(): Promise<string | null> {
+  return (await getBotInfo()).userId;
 }
 
 /**
@@ -175,7 +166,6 @@ export async function getBotUserId(env: SlackEnv): Promise<string | null> {
  * all agent replies flow through here.
  */
 export async function postReply(
-  env: SlackEnv,
   channelId: string,
   threadTs: string | null,
   text: string,
@@ -227,7 +217,6 @@ const BENIGN_REMOVE_REACTION_ERRORS = new Set([
  * Requires the `reactions:write` scope on the bot token.
  */
 export async function addReaction(
-  env: SlackEnv,
   channelId: string,
   timestamp: string,
   name: string
@@ -248,7 +237,6 @@ export async function addReaction(
  * gone. Requires the `reactions:write` scope on the bot token.
  */
 export async function removeReaction(
-  env: SlackEnv,
   channelId: string,
   timestamp: string,
   name: string

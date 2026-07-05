@@ -1,15 +1,17 @@
 import { WorkflowEntrypoint } from "cloudflare:workers";
 import type { WorkflowEvent, WorkflowStep } from "cloudflare:workers";
+import { env } from "cloudflare:workers";
 import type { MessageWorkflowParams } from "@/slack/types";
-import { getDb } from "@/db/client";
 import { buildUserAuthContext } from "@/auth";
 import {
   dispatchToAgent,
   type DispatchAgentRef,
-  type DispatchMetadata
+  type DispatchMetadata,
+  type DispatchResult
 } from "@/agents/dispatch";
 import { InvalidEndpointError } from "@/a2a/endpoint";
 import { postReply } from "@/wrappers/slack";
+import { createAgentTask } from "@/db/models/agent-tasks";
 import {
   REACTION_COLLECT_EVENT,
   reactionInstanceId
@@ -63,17 +65,15 @@ export function feedText(p: MessageWorkflowParams): string {
 
 /** Build dispatch plans from the targets resolved in the handler + auth context. */
 export async function resolveMessage(
-  env: Env,
   p: MessageWorkflowParams
 ): Promise<AgentPlan[]> {
-  const db = getDb(env);
   const targets = p.targets;
   if (targets.length === 0) return [];
 
   // `userId` is guaranteed by the classifier (message events without a sender
   // are ignored), so every caller has an auth context — unknown users get a
   // zero-permission one rather than null.
-  const user = await buildUserAuthContext(db, p.userId);
+  const user = await buildUserAuthContext(p.userId);
   return targets.map((t) => ({
     agent: {
       name: t.agent.name,
@@ -90,12 +90,23 @@ export async function resolveMessage(
   }));
 }
 
-/** Dispatch one resolved plan to its agent over A2A; returns the reply text (may be empty). */
+/**
+ * Dispatch one resolved plan to its agent over A2A. Local agents reply
+ * synchronously (`{ kind: "reply" }`); remote agents only *accept* here and push
+ * their reply later (`{ kind: "accepted" }`).
+ *
+ * Retry policy. A rejected endpoint (`InvalidEndpointError`) is a policy verdict,
+ * not a transient fault: stay silent and do NOT retry. Everything else (network
+ * blip, accept timeout) is thrown so the `dispatch` step retries — which is safe
+ * now because the dispatch id is deterministic (`buildDispatchId`), so a re-send
+ * carries the same A2A `messageId` and push `token`; a conformant remote dedupes
+ * on the `messageId` instead of appending the turn twice, giving at-least-once
+ * delivery with exactly-once effect.
+ */
 export async function dispatchMessage(
-  env: Env,
   p: MessageWorkflowParams,
   plan: AgentPlan
-): Promise<string> {
+): Promise<DispatchResult> {
   let metadata: DispatchMetadata; // per-kind extras only
   if (plan.agent.kind === "admin") {
     if (plan.workspaceId == null) {
@@ -109,7 +120,8 @@ export async function dispatchMessage(
   }
 
   try {
-    return await dispatchToAgent(env, plan.agent, {
+    return await dispatchToAgent(plan.agent, {
+      eventId: p.eventId,
       text: plan.text,
       channelId: p.channelId,
       channelName: plan.channelName,
@@ -120,15 +132,14 @@ export async function dispatchMessage(
     });
   } catch (err) {
     if (err instanceof InvalidEndpointError) {
-      // Policy rejection — not a transient error, so don't let the workflow
-      // retry. Stay silent rather than posting an error for one agent.
-      console.warn("[message] agent endpoint rejected", {
+      // Policy rejection — not transient, so don't let the step retry.
+      console.warn("[message] agent endpoint rejected — staying silent", {
         agent: plan.agent.name,
         err: err.message
       });
-      return "";
+      return { kind: "reply", text: "" };
     }
-    throw err;
+    throw err; // transient — retry is safe (deterministic dispatch id dedupes)
   }
 }
 
@@ -138,10 +149,7 @@ export async function dispatchMessage(
  * logged, not thrown — the reaction is cosmetic and the ReactionWorkflow's
  * timeout backstop removes it regardless.
  */
-export async function signalReactionCollect(
-  env: Env,
-  eventId: string
-): Promise<void> {
+export async function signalReactionCollect(eventId: string): Promise<void> {
   try {
     const instance = await env.REACTION_WORKFLOW.get(
       reactionInstanceId(eventId)
@@ -187,29 +195,55 @@ export class MessageWorkflow extends WorkflowEntrypoint<
     // errors that are otherwise invisible. We log the real cause, then rethrow
     // to preserve retry/backoff.
     try {
-      const plans = await step.do("resolve", () => resolveMessage(this.env, p));
+      const plans = await step.do("resolve", () => resolveMessage(p));
 
       // Fan out to every agent in parallel; allSettled isolates failures so one
-      // agent's exhausted retries never blocks the others or aborts the run.
+      // agent's exhausted retries never blocks the others or aborts the run. Each
+      // task resolves to `true` when it left a remote agent working asynchronously
+      // (an accepted push-notification task), so we know whether the ⏳ must linger.
       const results = await Promise.allSettled(
         plans.map(async (plan) => {
-          const reply = await step.do(`dispatch:${plan.agent.name}`, () =>
-            dispatchMessage(this.env, p, plan)
+          const result = await step.do(`dispatch:${plan.agent.name}`, () =>
+            dispatchMessage(p, plan)
           );
-          if (reply.trim()) {
+
+          if (result.kind === "accepted") {
+            // Remote agent accepted the turn; the real reply arrives later via
+            // /a2a/notifications. Persist the correlation so the callback knows
+            // where to post, which ⏳ to clear, and how to render.
+            await step.do(`record-task:${plan.agent.name}`, () =>
+              createAgentTask({
+                token: result.token,
+                taskId: result.taskId,
+                agentName: plan.agent.name,
+                channelId: p.channelId,
+                replyThreadTs: threadTs,
+                eventId: p.eventId,
+                displayName: plan.displayName,
+                iconUrl: plan.iconUrl,
+                workspaceId: plan.agent.workspaceId
+              })
+            );
+            return true;
+          }
+
+          // Synchronous local reply (empty = silence, posts nothing).
+          if (result.text.trim()) {
             await step.do(`reply:${plan.agent.name}`, () =>
               postReply(
-                this.env,
                 p.channelId,
                 threadTs,
-                reply,
+                result.text,
                 plan.displayName,
                 plan.iconUrl
               )
             );
           }
+          return false;
         })
       );
+
+      let anyAccepted = false;
       for (const [i, r] of results.entries()) {
         if (r.status === "rejected") {
           console.error("[message] agent dispatch failed", {
@@ -217,13 +251,19 @@ export class MessageWorkflow extends WorkflowEntrypoint<
             error:
               r.reason instanceof Error ? r.reason.message : String(r.reason)
           });
+        } else if (r.value === true) {
+          anyAccepted = true;
         }
       }
 
-      // Always clear the ⏳ once every agent has settled — reply or silence.
-      await step.do("collect-reaction", () =>
-        signalReactionCollect(this.env, p.eventId)
-      );
+      // Clear the ⏳ now only when no agent is still working. A pending remote
+      // task keeps it until its push-notification callback collects it (or the
+      // ReactionWorkflow backstop times out) — so the hourglass reflects reality.
+      if (!anyAccepted) {
+        await step.do("collect-reaction", () =>
+          signalReactionCollect(p.eventId)
+        );
+      }
     } catch (err) {
       console.error("[message] workflow run failed", {
         instanceId: event.instanceId,

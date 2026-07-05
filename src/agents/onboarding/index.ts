@@ -21,6 +21,6 @@ export class OnboardingAgent extends A2AAgent {
   }
 
   protected executor(): AgentExecutor {
-    return new OnboardingAgentExecutor(this, this.env);
+    return new OnboardingAgentExecutor(this);
   }
 }

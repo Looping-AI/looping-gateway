@@ -7,25 +7,25 @@ import {
   getSlackChannelIdByName
 } from "@/db/models/channels";
 
-const db = getDb(env);
+const db = getDb();
 
 describe("slack_channels", () => {
   it("inserts then updates the name by id (rename)", async () => {
-    await upsertSlackChannel(db, { channelId: "C_up", name: "old-name" });
-    await upsertSlackChannel(db, { channelId: "C_up", name: "new-name" });
-    expect(await getSlackChannelName(db, "C_up")).toBe("new-name");
+    await upsertSlackChannel({ channelId: "C_up", name: "old-name" });
+    await upsertSlackChannel({ channelId: "C_up", name: "new-name" });
+    expect(await getSlackChannelName("C_up")).toBe("new-name");
   });
 
   it("resolves a channel id by name", async () => {
-    await upsertSlackChannel(db, { channelId: "C_byname", name: "general" });
-    expect(await getSlackChannelIdByName(db, "general")).toBe("C_byname");
+    await upsertSlackChannel({ channelId: "C_byname", name: "general" });
+    expect(await getSlackChannelIdByName("general")).toBe("C_byname");
   });
 
   it("returns null for an unknown channel id", async () => {
-    expect(await getSlackChannelName(db, "C_nope")).toBeNull();
+    expect(await getSlackChannelName("C_nope")).toBeNull();
   });
 
   it("returns null for an unknown name", async () => {
-    expect(await getSlackChannelIdByName(db, "no-such-channel")).toBeNull();
+    expect(await getSlackChannelIdByName("no-such-channel")).toBeNull();
   });
 });

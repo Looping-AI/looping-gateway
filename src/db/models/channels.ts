@@ -1,5 +1,5 @@
 import { eq, sql } from "drizzle-orm";
-import type { Db } from "../client";
+import { getDb } from "../client";
 import * as schema from "../schema";
 
 export type SlackChannelRow = typeof schema.slackChannels.$inferSelect;
@@ -15,9 +15,9 @@ export interface UpsertSlackChannelInput {
  * it for every channel on every pass without churn.
  */
 export async function upsertSlackChannel(
-  db: Db,
   input: UpsertSlackChannelInput
 ): Promise<void> {
+  const db = getDb();
   await db
     .insert(schema.slackChannels)
     .values({
@@ -35,9 +35,9 @@ export async function upsertSlackChannel(
 
 /** The human channel name (`general`, no `#`) for a channel id, or null. */
 export async function getSlackChannelName(
-  db: Db,
   channelId: string
 ): Promise<string | null> {
+  const db = getDb();
   const rows = await db
     .select({ name: schema.slackChannels.name })
     .from(schema.slackChannels)
@@ -48,9 +48,9 @@ export async function getSlackChannelName(
 
 /** Resolve a channel id by exact name (uses idx_slack_channels_name). null if none. */
 export async function getSlackChannelIdByName(
-  db: Db,
   name: string
 ): Promise<string | null> {
+  const db = getDb();
   const rows = await db
     .select({ channelId: schema.slackChannels.channelId })
     .from(schema.slackChannels)

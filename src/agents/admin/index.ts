@@ -51,7 +51,7 @@ export class AdminAgent extends A2AAgent {
   }
 
   protected executor(): AgentExecutor {
-    return new AdminAgentExecutor(this, this.env, {
+    return new AdminAgentExecutor(this, {
       storeIcon: (img, name) => this.putIcon(img.data, img.contentType, name)
     });
   }

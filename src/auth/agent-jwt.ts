@@ -1,4 +1,13 @@
-import { SignJWT, importJWK, type JWK } from "jose";
+import {
+  SignJWT,
+  importJWK,
+  jwtVerify,
+  decodeProtectedHeader,
+  type JWK,
+  type JWTPayload
+} from "jose";
+import { env } from "cloudflare:workers";
+import { resolveSigningKey } from "@/a2a/card-verify";
 
 /**
  * Gateway outbound identity for remote (custom) A2A agents.
@@ -55,10 +64,8 @@ interface SignGatewayTokenArgs {
   identity: RemoteIdentity;
 }
 
-type GatewayJwtEnv = Pick<Env, "GATEWAY_JWT_PRIVATE_KEY">;
-
 /** Parse + validate the configured private JWK (throws if misconfigured). */
-function privateJwk(env: GatewayJwtEnv): JWK & { kid: string } {
+function privateJwk(): JWK & { kid: string } {
   const raw = env.GATEWAY_JWT_PRIVATE_KEY;
   if (!raw) {
     throw new Error("GATEWAY_JWT_PRIVATE_KEY is not configured");
@@ -86,10 +93,9 @@ function privateJwk(env: GatewayJwtEnv): JWK & { kid: string } {
  * identity claim. The remote agent verifies it against the gateway's public JWKS.
  */
 export async function signGatewayToken(
-  env: GatewayJwtEnv,
   args: SignGatewayTokenArgs
 ): Promise<string> {
-  const jwk = privateJwk(env);
+  const jwk = privateJwk();
   const { issuer } = args;
   const jwksUrl = `${issuer}/.well-known/jwks.json`;
   const key = await importJWK(jwk, ALG);
@@ -116,15 +122,98 @@ export async function signGatewayToken(
   );
 }
 
+/** The pinned signing identity of a remote agent, from its registry row. */
+export interface CallbackVerifyPin {
+  cardSigningJku: string;
+  cardSigningKid: string;
+}
+
+/** Thrown when a remote agent's push-notification callback token fails verification. */
+export class AgentCallbackAuthError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "AgentCallbackAuthError";
+  }
+}
+
+/**
+ * Verify a remote agent's push-notification callback JWT (A2A spec §13.2). The
+ * token MUST be signed by the agent's already-pinned AgentCard key: the protected
+ * header's `jku`/`kid` must exactly equal the registry pin (the Trust-On-First-Use
+ * anchor), so a validly-signed token from any *other* key is rejected. Standard
+ * claims are enforced too — `aud` must equal our webhook URL, and `iat`/`exp` must
+ * be fresh (short max age + small clock tolerance).
+ *
+ * This authenticates the caller; durable single-use is enforced separately by the
+ * caller atomically flipping the `agent_tasks` row (`completeAgentTask`), which
+ * dedupes replays across isolates. Returns the verified claims on success.
+ *
+ * Throws {@link AgentCallbackAuthError} on any mismatch.
+ */
+export async function verifyAgentCallbackToken(args: {
+  token: string;
+  pin: CallbackVerifyPin;
+  /** The webhook URL the token's `aud` must match. */
+  audience: string;
+  /** Org-approved domains — SSRF guard when resolving the pinned JWKS. */
+  allowedDomains: string[];
+}): Promise<JWTPayload> {
+  const { token, pin, audience, allowedDomains } = args;
+
+  let header: ReturnType<typeof decodeProtectedHeader>;
+  try {
+    header = decodeProtectedHeader(token);
+  } catch {
+    throw new AgentCallbackAuthError("callback token is not a valid JWS");
+  }
+  if (header.alg !== ALG) {
+    throw new AgentCallbackAuthError(
+      `unexpected alg '${header.alg ?? "none"}'`
+    );
+  }
+  // TOFU: the token must be signed by the exact key pinned at registration.
+  if (header.jku !== pin.cardSigningJku || header.kid !== pin.cardSigningKid) {
+    throw new AgentCallbackAuthError(
+      "callback token key does not match the agent's pinned signing key"
+    );
+  }
+
+  let jwk: JWK;
+  try {
+    jwk = await resolveSigningKey(
+      pin.cardSigningJku,
+      pin.cardSigningKid,
+      allowedDomains
+    );
+  } catch (err) {
+    throw new AgentCallbackAuthError(
+      `could not resolve pinned signing key: ${(err as Error).message}`
+    );
+  }
+
+  const key = await importJWK(jwk, ALG);
+  try {
+    const { payload } = await jwtVerify(token, key, {
+      algorithms: [ALG],
+      audience,
+      clockTolerance: 60,
+      maxTokenAge: "10 minutes"
+    });
+    return payload;
+  } catch (err) {
+    throw new AgentCallbackAuthError(
+      `callback token verification failed: ${(err as Error).message}`
+    );
+  }
+}
+
 /**
  * The gateway's public JWKS — the only key material ever exposed. Derived from
  * the configured private JWK by dropping the private component (`d`). Served at
  * `/.well-known/jwks.json` for remote agents to fetch and cache.
  */
-export function getPublicJwks(env: Pick<Env, "GATEWAY_JWT_PRIVATE_KEY">): {
-  keys: JWK[];
-} {
-  const jwk = privateJwk(env as GatewayJwtEnv);
+export function getPublicJwks(): { keys: JWK[] } {
+  const jwk = privateJwk();
   // Strip the private scalar; publish only the public point.
   const { d: _d, ...pub } = jwk;
   void _d;

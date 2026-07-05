@@ -13,7 +13,7 @@ import {
 } from "@/db/models/workspace-configs";
 import { upsertWorkspace } from "@/db/models/workspaces";
 
-const db = getDb(env);
+const db = getDb();
 
 // Workspace 0 is seeded by migrations; we use a unique workspace for
 // isolation between parallel test runs.
@@ -21,42 +21,42 @@ const WS_ID = 200;
 
 describe("workspace_configs", () => {
   it("returns null for an absent key", async () => {
-    await upsertWorkspace(db, { id: WS_ID, name: "cfgtest" });
-    expect(await getConfig(db, WS_ID, "missing_key")).toBeNull();
+    await upsertWorkspace({ id: WS_ID, name: "cfgtest" });
+    expect(await getConfig(WS_ID, "missing_key")).toBeNull();
   });
 
   it("sets a value and reads it back", async () => {
-    await upsertWorkspace(db, { id: WS_ID, name: "cfgtest" });
-    await setConfig(db, WS_ID, "my_key", "my_value");
-    expect(await getConfig(db, WS_ID, "my_key")).toBe("my_value");
+    await upsertWorkspace({ id: WS_ID, name: "cfgtest" });
+    await setConfig(WS_ID, "my_key", "my_value");
+    expect(await getConfig(WS_ID, "my_key")).toBe("my_value");
   });
 
   it("upserts (overwrites) an existing value", async () => {
-    await upsertWorkspace(db, { id: WS_ID, name: "cfgtest" });
-    await setConfig(db, WS_ID, "over_key", "v1");
-    await setConfig(db, WS_ID, "over_key", "v2");
-    expect(await getConfig(db, WS_ID, "over_key")).toBe("v2");
+    await upsertWorkspace({ id: WS_ID, name: "cfgtest" });
+    await setConfig(WS_ID, "over_key", "v1");
+    await setConfig(WS_ID, "over_key", "v2");
+    expect(await getConfig(WS_ID, "over_key")).toBe("v2");
   });
 
   it("unsets a key (row deleted, get returns null)", async () => {
-    await upsertWorkspace(db, { id: WS_ID, name: "cfgtest" });
-    await setConfig(db, WS_ID, "del_key", "delete_me");
-    await unsetConfig(db, WS_ID, "del_key");
-    expect(await getConfig(db, WS_ID, "del_key")).toBeNull();
+    await upsertWorkspace({ id: WS_ID, name: "cfgtest" });
+    await setConfig(WS_ID, "del_key", "delete_me");
+    await unsetConfig(WS_ID, "del_key");
+    expect(await getConfig(WS_ID, "del_key")).toBeNull();
   });
 
   it("unset is a no-op when the key is absent", async () => {
-    await upsertWorkspace(db, { id: WS_ID, name: "cfgtest" });
-    await expect(unsetConfig(db, WS_ID, "never_set")).resolves.toBeUndefined();
+    await upsertWorkspace({ id: WS_ID, name: "cfgtest" });
+    await expect(unsetConfig(WS_ID, "never_set")).resolves.toBeUndefined();
   });
 
   it("different workspaces hold independent values for the same key", async () => {
-    await upsertWorkspace(db, { id: 201, name: "cfgtest_a" });
-    await upsertWorkspace(db, { id: 202, name: "cfgtest_b" });
-    await setConfig(db, 201, "shared_key", "ws201_value");
-    await setConfig(db, 202, "shared_key", "ws202_value");
-    expect(await getConfig(db, 201, "shared_key")).toBe("ws201_value");
-    expect(await getConfig(db, 202, "shared_key")).toBe("ws202_value");
+    await upsertWorkspace({ id: 201, name: "cfgtest_a" });
+    await upsertWorkspace({ id: 202, name: "cfgtest_b" });
+    await setConfig(201, "shared_key", "ws201_value");
+    await setConfig(202, "shared_key", "ws202_value");
+    expect(await getConfig(201, "shared_key")).toBe("ws201_value");
+    expect(await getConfig(202, "shared_key")).toBe("ws202_value");
   });
 
   it("SystemConfigKeys.SLACK_TEAM_ID is the reserved system key", () => {
@@ -64,36 +64,28 @@ describe("workspace_configs", () => {
   });
 
   it("admin icon URL is workspace-scoped (null when unset, round-trips per ws)", async () => {
-    await upsertWorkspace(db, { id: 203, name: "iconcfg_a" });
-    await upsertWorkspace(db, { id: 204, name: "iconcfg_b" });
-    expect(await getAdminIconUrl(db, 203)).toBeNull();
+    await upsertWorkspace({ id: 203, name: "iconcfg_a" });
+    await upsertWorkspace({ id: 204, name: "iconcfg_b" });
+    expect(await getAdminIconUrl(203)).toBeNull();
 
-    await setAdminIconUrl(
-      db,
-      203,
+    await setAdminIconUrl(203, "https://gw.example.com/icons/203/admin/a.jpg");
+    await setAdminIconUrl(204, "https://gw.example.com/icons/204/admin/b.jpg");
+    expect(await getAdminIconUrl(203)).toBe(
       "https://gw.example.com/icons/203/admin/a.jpg"
     );
-    await setAdminIconUrl(
-      db,
-      204,
-      "https://gw.example.com/icons/204/admin/b.jpg"
-    );
-    expect(await getAdminIconUrl(db, 203)).toBe(
-      "https://gw.example.com/icons/203/admin/a.jpg"
-    );
-    expect(await getAdminIconUrl(db, 204)).toBe(
+    expect(await getAdminIconUrl(204)).toBe(
       "https://gw.example.com/icons/204/admin/b.jpg"
     );
   });
 
   it("admin display name is workspace-scoped (null when unset, round-trips per ws)", async () => {
-    await upsertWorkspace(db, { id: 205, name: "namecfg_a" });
-    await upsertWorkspace(db, { id: 206, name: "namecfg_b" });
-    expect(await getAdminDisplayName(db, 205)).toBeNull();
+    await upsertWorkspace({ id: 205, name: "namecfg_a" });
+    await upsertWorkspace({ id: 206, name: "namecfg_b" });
+    expect(await getAdminDisplayName(205)).toBeNull();
 
-    await setAdminDisplayName(db, 205, "Ops Bot");
-    await setAdminDisplayName(db, 206, "Support Bot");
-    expect(await getAdminDisplayName(db, 205)).toBe("Ops Bot");
-    expect(await getAdminDisplayName(db, 206)).toBe("Support Bot");
+    await setAdminDisplayName(205, "Ops Bot");
+    await setAdminDisplayName(206, "Support Bot");
+    expect(await getAdminDisplayName(205)).toBe("Ops Bot");
+    expect(await getAdminDisplayName(206)).toBe("Support Bot");
   });
 });

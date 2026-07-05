@@ -4,9 +4,9 @@ import {
   SlackWebhookVerificationError
 } from "@chat-adapter/slack/webhook";
 import type { SlackWebhookPayload } from "@chat-adapter/slack/webhook";
+import { env } from "cloudflare:workers";
 import { isRecord, str } from "@/util/json";
 import { pickDisplayName } from "@/util/display-name";
-import { getDb } from "@/db/client";
 import { getSlackTeamId, setPublicUrl } from "@/db/models/workspace-configs";
 import { PENDING_REACTION, reactionInstanceId } from "@/workflows/reaction";
 import { addReaction } from "@/wrappers/slack";
@@ -316,11 +316,10 @@ async function triggerWorkflow(
  * ReactionWorkflow is responsible for removing it.
  */
 async function addPendingReaction(
-  env: Pick<Env, "SLACK_BOT_TOKEN">,
   params: ClassifiedMessageParams
 ): Promise<void> {
   try {
-    await addReaction(env, params.channelId, params.ts, PENDING_REACTION);
+    await addReaction(params.channelId, params.ts, PENDING_REACTION);
   } catch (err) {
     console.error("[gateway] failed to add pending reaction", {
       eventId: params.eventId,
@@ -398,14 +397,11 @@ export function _resetPublicUrlCacheForTest(): void {
  * set or poison this trust anchor. Cheap after the first write: the isolate memo
  * short-circuits every subsequent request.
  */
-async function discoverPublicUrl(
-  request: Request,
-  db: ReturnType<typeof getDb>
-): Promise<void> {
+async function discoverPublicUrl(request: Request): Promise<void> {
   if (cachedPublicUrl !== null) return;
   const origin = new URL(request.url).origin;
   cachedPublicUrl = origin;
-  await setPublicUrl(db, origin);
+  await setPublicUrl(origin);
 }
 
 /**
@@ -418,13 +414,12 @@ async function discoverPublicUrl(
  * Until the anchor is pinned in D1, each request does a single D1 read.
  */
 async function guardTeamId(
-  eventTeamId: string | undefined,
-  db: ReturnType<typeof getDb>
+  eventTeamId: string | undefined
 ): Promise<Response | null> {
   if (!eventTeamId) return null; // no team_id in this event — skip check
 
   if (cachedAnchorTeamId === null) {
-    const anchor = await getSlackTeamId(db);
+    const anchor = await getSlackTeamId();
     if (anchor !== null) {
       cachedAnchorTeamId = anchor; // pin once; never cleared in production
     }
@@ -464,15 +459,6 @@ async function guardTeamId(
  */
 export async function handleSlackEvent(
   request: Request,
-  env: Pick<
-    Env,
-    | "DB"
-    | "SLACK_SIGNING_SECRET"
-    | "SLACK_BOT_TOKEN"
-    | "MESSAGE_WORKFLOW"
-    | "LIFECYCLE_WORKFLOW"
-    | "REACTION_WORKFLOW"
-  >,
   ctx: ExecutionContext
 ): Promise<Response> {
   let rawBody: string;
@@ -488,7 +474,7 @@ export async function handleSlackEvent(
   }
 
   // Signature verified above — safe to record the gateway's public origin now.
-  await discoverPublicUrl(request, getDb(env));
+  await discoverPublicUrl(request);
 
   const payload = parseSlackWebhookBody(rawBody, { headers: request.headers });
   const classification = classifyEvent(payload);
@@ -499,8 +485,7 @@ export async function handleSlackEvent(
       return Response.json({ challenge: classification.challenge });
 
     case "message": {
-      const db = getDb(env);
-      const guardResponse = await guardTeamId(classification.params.teamId, db);
+      const guardResponse = await guardTeamId(classification.params.teamId);
       if (guardResponse) return guardResponse;
       const base = classification.params;
       // Resolve, react, and fan out off-path so the 200 ack is never delayed.
@@ -510,7 +495,7 @@ export async function handleSlackEvent(
       // alive until all tasks settle; each already swallows/logs its own errors.
       ctx.waitUntil(
         (async () => {
-          const targets = await resolveTargets(db, {
+          const targets = await resolveTargets({
             channelId: base.channelId,
             text: base.editKind
               ? `${base.text} ${base.prevText ?? ""}`.trim()
@@ -524,7 +509,7 @@ export async function handleSlackEvent(
             return;
           }
           await Promise.allSettled([
-            addPendingReaction(env, base),
+            addPendingReaction(base),
             triggerReactionWorkflow(env.REACTION_WORKFLOW, base),
             triggerWorkflow(env.MESSAGE_WORKFLOW, { ...base, targets })
           ]);
@@ -534,8 +519,7 @@ export async function handleSlackEvent(
     }
 
     case "lifecycle": {
-      const db = getDb(env);
-      const guardResponse = await guardTeamId(classification.params.teamId, db);
+      const guardResponse = await guardTeamId(classification.params.teamId);
       if (guardResponse) return guardResponse;
       ctx.waitUntil(
         triggerWorkflow(env.LIFECYCLE_WORKFLOW, classification.params)

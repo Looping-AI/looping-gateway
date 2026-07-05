@@ -1,3 +1,4 @@
+import { env } from "cloudflare:workers";
 import { AVATAR_IMAGE_MODEL_ID } from "@/config";
 
 /** A generated avatar: raw image bytes plus the MIME type to serve them under. */
@@ -61,10 +62,7 @@ export function buildAgentAvatarPrompt(input: AgentAvatarPromptInput): string {
  * so the AI binding call is the only impure part. FLUX.2 returns the image as a
  * base64-encoded JPEG in `{ image }`; we decode it to bytes for DO storage.
  */
-export async function generateAvatar(
-  env: Env,
-  prompt: string
-): Promise<GeneratedImage> {
+export async function generateAvatar(prompt: string): Promise<GeneratedImage> {
   // FLUX.2 klein takes a multipart form input (not plain JSON). FormData doesn't
   // expose its serialized body or boundary, so we run it through a Response to get the
   // body stream + the Content-Type header (with boundary) the model needs to parse the

@@ -1,5 +1,5 @@
 import { and, eq, inArray, sql } from "drizzle-orm";
-import type { Db } from "../client";
+import { getDb } from "../client";
 import * as schema from "../schema";
 
 export type AgentRow = typeof schema.agents.$inferSelect;
@@ -39,7 +39,8 @@ export interface AgentChannelEntry {
   workspaceId: number | null;
 }
 
-export async function getAgent(db: Db, name: string): Promise<AgentRow | null> {
+export async function getAgent(name: string): Promise<AgentRow | null> {
+  const db = getDb();
   const rows = await db
     .select()
     .from(schema.agents)
@@ -48,15 +49,16 @@ export async function getAgent(db: Db, name: string): Promise<AgentRow | null> {
   return rows[0] ?? null;
 }
 
-export async function listAgents(db: Db): Promise<AgentRow[]> {
+export async function listAgents(): Promise<AgentRow[]> {
+  const db = getDb();
   return db.select().from(schema.agents);
 }
 
 /** Enabled agents configured for a channel, used for context default routing. */
 export async function getAgentsForChannel(
-  db: Db,
   channelId: string
 ): Promise<AgentChannelEntry[]> {
+  const db = getDb();
   const rows = await db
     .select({
       agent: schema.agents,
@@ -78,10 +80,10 @@ export async function getAgentsForChannel(
 
 /** Check if a specific agent is configured and enabled for a channel. */
 export async function getAgentInChannel(
-  db: Db,
   channelId: string,
   agentName: string
 ): Promise<AgentChannelEntry | null> {
+  const db = getDb();
   const rows = await db
     .select({
       agent: schema.agents,
@@ -105,9 +107,9 @@ export async function getAgentInChannel(
 
 /** All agents scoped to a workspace (registry CRUD listing for one admin instance). */
 export async function listAgentsForWorkspace(
-  db: Db,
   workspaceId: number
 ): Promise<AgentRow[]> {
+  const db = getDb();
   return db
     .select()
     .from(schema.agents)
@@ -115,10 +117,8 @@ export async function listAgentsForWorkspace(
 }
 
 /** Channel ids this agent is attached to (via agent_channels). */
-export async function getAgentChannels(
-  db: Db,
-  agentName: string
-): Promise<string[]> {
+export async function getAgentChannels(agentName: string): Promise<string[]> {
+  const db = getDb();
   const rows = await db
     .select({ channelId: schema.agentChannels.channelId })
     .from(schema.agentChannels)
@@ -128,9 +128,9 @@ export async function getAgentChannels(
 
 /** Channel ids for a set of agents in one query (avoids N+1 in list paths). */
 export async function listChannelsForAgents(
-  db: Db,
   agentNames: string[]
 ): Promise<{ agentName: string; channelId: string }[]> {
+  const db = getDb();
   if (agentNames.length === 0) return [];
   return db
     .select({
@@ -143,9 +143,9 @@ export async function listChannelsForAgents(
 
 /** Insert a new agent row. Caller is responsible for uniqueness checks. */
 export async function registerAgent(
-  db: Db,
   input: RegisterAgentInput
 ): Promise<AgentRow> {
+  const db = getDb();
   const rows = await db
     .insert(schema.agents)
     .values({
@@ -165,10 +165,10 @@ export async function registerAgent(
 
 /** Update mutable fields of an agent. Only provided patch fields are written. */
 export async function updateAgent(
-  db: Db,
   name: string,
   patch: UpdateAgentPatch
 ): Promise<AgentRow | null> {
+  const db = getDb();
   const rows = await db
     .update(schema.agents)
     .set({
@@ -200,7 +200,8 @@ export async function updateAgent(
  * Delete an agent and its channel attachments. D1 does not reliably enforce
  * foreign keys at runtime, so the agent_channels cascade is explicit.
  */
-export async function unregisterAgent(db: Db, name: string): Promise<void> {
+export async function unregisterAgent(name: string): Promise<void> {
+  const db = getDb();
   await db
     .delete(schema.agentChannels)
     .where(eq(schema.agentChannels.agentName, name));
@@ -208,10 +209,12 @@ export async function unregisterAgent(db: Db, name: string): Promise<void> {
 }
 
 /** Attach an agent to a channel (idempotent). */
-export async function attachAgentChannel(
-  db: Db,
-  input: { agentName: string; channelId: string; workspaceId: number | null }
-): Promise<void> {
+export async function attachAgentChannel(input: {
+  agentName: string;
+  channelId: string;
+  workspaceId: number | null;
+}): Promise<void> {
+  const db = getDb();
   await db
     .insert(schema.agentChannels)
     .values({
@@ -224,10 +227,10 @@ export async function attachAgentChannel(
 
 /** Detach an agent from a channel. */
 export async function detachAgentChannel(
-  db: Db,
   agentName: string,
   channelId: string
 ): Promise<void> {
+  const db = getDb();
   await db
     .delete(schema.agentChannels)
     .where(

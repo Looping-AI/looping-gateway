@@ -1,5 +1,5 @@
 import { eq, sql } from "drizzle-orm";
-import type { Db } from "../client";
+import { getDb } from "../client";
 import * as schema from "../schema";
 
 export type SlackUserRow = typeof schema.slackUsers.$inferSelect;
@@ -20,9 +20,9 @@ export interface UpsertSlackUserInput {
  * keeps lifecycle events and cron reconcile safe to interleave in any order.
  */
 export async function upsertSlackUser(
-  db: Db,
   input: UpsertSlackUserInput
 ): Promise<void> {
+  const db = getDb();
   await db
     .insert(schema.slackUsers)
     .values({
@@ -51,9 +51,9 @@ export async function upsertSlackUser(
 }
 
 export async function getSlackUser(
-  db: Db,
   slackUserId: string
 ): Promise<SlackUserRow | null> {
+  const db = getDb();
   const rows = await db
     .select()
     .from(schema.slackUsers)
@@ -63,10 +63,10 @@ export async function getSlackUser(
 }
 
 export async function markUserDeleted(
-  db: Db,
   slackUserId: string,
   deleted: boolean
 ): Promise<void> {
+  const db = getDb();
   await db
     .update(schema.slackUsers)
     .set({ deleted, updatedAt: sql`(unixepoch())` })
@@ -78,7 +78,8 @@ export async function markUserDeleted(
  * deactivation sweep so we mark each user deleted at most once, rather than
  * re-marking already-deactivated users on every run.
  */
-export async function listActiveSlackUserIds(db: Db): Promise<Set<string>> {
+export async function listActiveSlackUserIds(): Promise<Set<string>> {
+  const db = getDb();
   const rows = await db
     .select({ id: schema.slackUsers.slackUserId })
     .from(schema.slackUsers)

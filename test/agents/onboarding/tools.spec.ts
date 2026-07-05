@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import { env } from "cloudflare:workers";
 import { getDb } from "@/db/client";
 import type { UserAuthContext } from "@/auth";
@@ -13,10 +13,12 @@ import { createWorkspace } from "@/db/models/workspaces";
 import { registerAgent, updateAgent } from "@/db/models/agents";
 import { upsertSlackUser } from "@/db/models/users";
 
-const db = getDb(env);
+const db = getDb();
+
+afterEach(() => vi.restoreAllMocks());
 
 async function freshWsId(name: string): Promise<number> {
-  return (await createWorkspace(db, { name })).id;
+  return (await createWorkspace({ name })).id;
 }
 
 function ctx(overrides: Partial<UserAuthContext> = {}): UserAuthContext {
@@ -32,11 +34,7 @@ function ctx(overrides: Partial<UserAuthContext> = {}): UserAuthContext {
 
 function deps(c: UserAuthContext | null): OnboardingToolDeps {
   return {
-    db,
-    ctx: c,
-    reconcileWorkflow: {
-      create: async () => ({ id: "wf-test" })
-    } as unknown as Env["RECONCILE_WORKFLOW"]
+    ctx: c
   };
 }
 
@@ -49,14 +47,14 @@ describe("onboarding tools — directory_read agents", () => {
   it("shows every enabled agent to any caller, regardless of workspace", async () => {
     const mine = await freshWsId("onb-mine");
     const other = await freshWsId("onb-other");
-    await registerAgent(db, {
+    await registerAgent({
       name: "onb-mine-agent",
       kind: "custom",
       a2aEndpoint: "https://example.com/onb-mine",
       notifyOn: "mention",
       workspaceId: mine
     });
-    await registerAgent(db, {
+    await registerAgent({
       name: "onb-other-agent",
       kind: "custom",
       a2aEndpoint: "https://example.com/onb-other",
@@ -65,7 +63,7 @@ describe("onboarding tools — directory_read agents", () => {
     });
 
     // A plain member (admins nothing) still sees the whole directory.
-    const res = (await directoryAgents(deps(ctx()))) as AgentList;
+    const res = (await directoryAgents()) as AgentList;
     const names = res.agents.map((a) => a.name);
 
     // Built-in concierge/admin are always reachable.
@@ -78,18 +76,16 @@ describe("onboarding tools — directory_read agents", () => {
 
   it("hides disabled agents", async () => {
     const wsId = await freshWsId("onb-disabled");
-    await registerAgent(db, {
+    await registerAgent({
       name: "onb-disabled-agent",
       kind: "custom",
       a2aEndpoint: "https://example.com/onb-disabled",
       notifyOn: "mention",
       workspaceId: wsId
     });
-    await updateAgent(db, "onb-disabled-agent", { enabled: false });
+    await updateAgent("onb-disabled-agent", { enabled: false });
 
-    const res = (await directoryAgents(
-      deps(ctx({ adminWorkspaces: [wsId] }))
-    )) as AgentList;
+    const res = (await directoryAgents()) as AgentList;
     expect(res.agents.map((a) => a.name)).not.toContain("onb-disabled-agent");
   });
 });
@@ -121,12 +117,12 @@ describe("onboarding tools — directory_read workspaces", () => {
 describe("onboarding tools — directory_read health", () => {
   it("reports a registered user and admin-channel status", async () => {
     const wsId = (
-      await createWorkspace(db, {
+      await createWorkspace({
         name: "onb-health-ws",
         adminChannelId: "C_HEALTH"
       })
     ).id;
-    await upsertSlackUser(db, {
+    await upsertSlackUser({
       slackUserId: "U_health",
       displayName: "Healthy"
     });
@@ -171,11 +167,11 @@ describe("onboarding tools — buildOnboardingTools", () => {
   });
 
   it("trigger_reconcile starts workflow for org admin callers", async () => {
-    const create = async () => ({ id: "wf-real" });
+    vi.spyOn(env.RECONCILE_WORKFLOW, "create").mockResolvedValue({
+      id: "wf-real"
+    } as WorkflowInstance);
     const tools = buildOnboardingTools({
-      db,
-      ctx: ctx({ isOrgAdmin: true }),
-      reconcileWorkflow: { create } as unknown as Env["RECONCILE_WORKFLOW"]
+      ctx: ctx({ isOrgAdmin: true })
     });
     const result = await (
       tools.trigger_reconcile as unknown as { execute: () => Promise<unknown> }

@@ -1,4 +1,3 @@
-import type { Db } from "@/db/client";
 import type { AgentRow } from "@/db/models/agents";
 import { getAgent, getAgentsForChannel } from "@/db/models/agents";
 import { getWorkspaceByAdminChannel } from "@/db/models/workspaces";
@@ -44,14 +43,13 @@ export function isDmChannel(channelId: string): boolean {
  * Returns an empty list when nothing applies — the caller stays silent.
  */
 export async function resolveTargets(
-  db: Db,
   input: ResolveInput
 ): Promise<ResolvedTarget[]> {
   const text = input.text;
-  const channelEntries = await getAgentsForChannel(db, input.channelId);
-  const ws = await getWorkspaceByAdminChannel(db, input.channelId);
+  const channelEntries = await getAgentsForChannel(input.channelId);
+  const ws = await getWorkspaceByAdminChannel(input.channelId);
   const isDm = isDmChannel(input.channelId);
-  const channelName = await getSlackChannelName(db, input.channelId);
+  const channelName = await getSlackChannelName(input.channelId);
 
   const byName = new Map<string, ResolvedTarget>();
   const add = (agent: AgentRow, workspaceId: number | null) => {
@@ -93,11 +91,11 @@ export async function resolveTargets(
   // shared registry row, so its workspace-specific avatar and display name (set by
   // the admin agent and kept in workspace_configs) override the row's fields here.
   if (ws) {
-    const admin = await getAgent(db, "admin");
+    const admin = await getAgent("admin");
     if (admin?.enabled) {
       const [iconUrl, displayName] = await Promise.all([
-        getAdminIconUrl(db, ws.id),
-        getAdminDisplayName(db, ws.id)
+        getAdminIconUrl(ws.id),
+        getAdminDisplayName(ws.id)
       ]);
       add(
         {
@@ -111,7 +109,7 @@ export async function resolveTargets(
   }
   // DM → onboarding built-in (DM is an implicit mention).
   if (isDm) {
-    const onboarding = await getAgent(db, "onboarding");
+    const onboarding = await getAgent("onboarding");
     if (onboarding?.enabled) add(onboarding, null);
   }
 

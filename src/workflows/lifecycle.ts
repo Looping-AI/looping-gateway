@@ -1,8 +1,6 @@
 import { WorkflowEntrypoint } from "cloudflare:workers";
 import type { WorkflowEvent, WorkflowStep } from "cloudflare:workers";
 import type { LifecycleWorkflowParams } from "@/slack/types";
-import type { Db } from "@/db/client";
-import { getDb } from "@/db/client";
 import { upsertSlackUser } from "@/db/models/users";
 import { getWorkspaceByAdminChannel } from "@/db/models/workspaces";
 import {
@@ -18,11 +16,10 @@ import { getBotUserId } from "@/wrappers/slack";
 
 /** team_join → register the new user (flags stay default; reconcile owns them). */
 export async function handleTeamJoin(
-  db: Db,
   params: LifecycleWorkflowParams
 ): Promise<void> {
   if (!params.userId) return;
-  await upsertSlackUser(db, {
+  await upsertSlackUser({
     slackUserId: params.userId,
     displayName: params.displayName ?? null
   });
@@ -30,28 +27,26 @@ export async function handleTeamJoin(
 
 /** Joining a workspace's admin channel ⇒ admin of that workspace. */
 export async function handleMemberJoined(
-  db: Db,
   params: LifecycleWorkflowParams,
   botUserId: string | null
 ): Promise<void> {
   if (!params.channelId || !params.userId) return;
   if (botUserId && params.userId === botUserId) return; // bot's own join
-  const ws = await getWorkspaceByAdminChannel(db, params.channelId);
+  const ws = await getWorkspaceByAdminChannel(params.channelId);
   if (!ws) return; // not an admin channel — no-op (allowlist is Phase 4)
-  await addWorkspaceAdmin(db, ws.id, params.userId, "membership");
+  await addWorkspaceAdmin(ws.id, params.userId, "membership");
 }
 
 /** Leaving a workspace's admin channel ⇒ losing that workspace's admin rights. */
 export async function handleMemberLeft(
-  db: Db,
   params: LifecycleWorkflowParams,
   botUserId: string | null
 ): Promise<void> {
   if (!params.channelId || !params.userId) return;
   if (botUserId && params.userId === botUserId) return;
-  const ws = await getWorkspaceByAdminChannel(db, params.channelId);
+  const ws = await getWorkspaceByAdminChannel(params.channelId);
   if (!ws) return;
-  await removeWorkspaceAdmin(db, ws.id, params.userId);
+  await removeWorkspaceAdmin(ws.id, params.userId);
 }
 
 // ---------------------------------------------------------------------------
@@ -79,22 +74,20 @@ export class LifecycleWorkflow extends WorkflowEntrypoint<
     try {
       switch (type) {
         case "team_join":
-          await step.do("team-join", () =>
-            handleTeamJoin(getDb(this.env), event.payload)
-          );
+          await step.do("team-join", () => handleTeamJoin(event.payload));
           return;
 
         case "member_joined_channel":
           await step.do("member-joined", async () => {
-            const botUserId = await getBotUserId(this.env);
-            await handleMemberJoined(getDb(this.env), event.payload, botUserId);
+            const botUserId = await getBotUserId();
+            await handleMemberJoined(event.payload, botUserId);
           });
           return;
 
         case "member_left_channel":
           await step.do("member-left", async () => {
-            const botUserId = await getBotUserId(this.env);
-            await handleMemberLeft(getDb(this.env), event.payload, botUserId);
+            const botUserId = await getBotUserId();
+            await handleMemberLeft(event.payload, botUserId);
           });
           return;
 

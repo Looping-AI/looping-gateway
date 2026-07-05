@@ -8,10 +8,10 @@ import { PENDING_REACTION } from "@/workflows/reaction";
 import { stubSlack } from "../wrappers/slack-stub";
 import { slackHeaders } from "../helpers/slack";
 
-const db = getDb(env);
+const db = getDb();
 
 beforeEach(async () => {
-  await setWorkspaceAdminChannel(db, 0, "C_ORGADMIN");
+  await setWorkspaceAdminChannel(0, "C_ORGADMIN");
 });
 
 afterEach(() => vi.unstubAllGlobals());
@@ -89,7 +89,6 @@ async function trigger(body: string) {
       headers: await slackHeaders(body),
       body
     }),
-    env,
     ctx
   );
   await Promise.allSettled(waitUntilPromises);

@@ -1,4 +1,3 @@
-import type { Db } from "@/db/client";
 import { getSlackUser } from "@/db/models/users";
 import { getAdminWorkspaces } from "@/db/models/workspace-admins";
 import type { UserAuthContext } from "./authorize";
@@ -9,12 +8,11 @@ import type { UserAuthContext } from "./authorize";
  * yields a zero-permission context. This is the only I/O in this module.
  */
 export async function buildUserAuthContext(
-  db: Db,
   slackUserId: string
 ): Promise<UserAuthContext> {
   const [user, adminWorkspaces] = await Promise.all([
-    getSlackUser(db, slackUserId),
-    getAdminWorkspaces(db, slackUserId)
+    getSlackUser(slackUserId),
+    getAdminWorkspaces(slackUserId)
   ]);
   return {
     slackUserId,

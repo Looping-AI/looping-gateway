@@ -7,13 +7,17 @@ import {
   getBotUserId,
   postReply,
   addReaction,
-  removeReaction
+  removeReaction,
+  _resetBotInfoCacheForTest
 } from "@/wrappers/slack";
 import type { SlackUserInfo } from "@/wrappers/slack";
 
-const slackEnv = { SLACK_BOT_TOKEN: "xoxb-test" };
-
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => {
+  vi.unstubAllGlobals();
+  // getBotInfo memoizes on a single module-level value; clear it so a prior
+  // test's cached bot identity doesn't short-circuit the next auth.test call.
+  _resetBotInfoCacheForTest();
+});
 
 describe("iterateSlackUsers", () => {
   it("follows the cursor across pages", async () => {
@@ -28,7 +32,7 @@ describe("iterateSlackUsers", () => {
           };
     });
     const ids: string[] = [];
-    for await (const u of iterateSlackUsers(slackEnv)) ids.push(u.id);
+    for await (const u of iterateSlackUsers()) ids.push(u.id);
     expect(ids).toEqual(["U1", "U2"]);
   });
 
@@ -50,7 +54,7 @@ describe("iterateSlackUsers", () => {
         : { ok: true }
     );
     const users: SlackUserInfo[] = [];
-    for await (const u of iterateSlackUsers(slackEnv)) users.push(u);
+    for await (const u of iterateSlackUsers()) users.push(u);
     expect(users[0]).toMatchObject({
       id: "U1",
       isPrimaryOwner: true,
@@ -80,7 +84,7 @@ describe("fetchChannelMemberIds", () => {
             response_metadata: { next_cursor: "c2" }
           };
     });
-    const ids = await fetchChannelMemberIds(slackEnv, "C1");
+    const ids = await fetchChannelMemberIds("C1");
     expect([...ids].sort()).toEqual(["U1", "U2", "U3"]);
   });
 });
@@ -101,7 +105,7 @@ describe("iterateSlackChannels", () => {
           };
     });
     const channels: { id: string; name: string }[] = [];
-    for await (const c of iterateSlackChannels(slackEnv)) channels.push(c);
+    for await (const c of iterateSlackChannels()) channels.push(c);
     expect(channels).toEqual([
       { id: "C_OTHER", name: "general" },
       { id: "C_TARGET", name: "looping-org-admin" }
@@ -115,7 +119,7 @@ describe("iterateSlackChannels", () => {
         : { ok: true }
     );
     const ids: string[] = [];
-    for await (const c of iterateSlackChannels(slackEnv)) ids.push(c.id);
+    for await (const c of iterateSlackChannels()) ids.push(c.id);
     expect(ids).toEqual(["C1"]);
   });
 });
@@ -125,16 +129,14 @@ describe("getBotUserId", () => {
     stubSlack((method) =>
       method === "auth.test" ? { ok: true, user_id: "UBOT" } : { ok: true }
     );
-    expect(await getBotUserId(slackEnv)).toBe("UBOT");
+    expect(await getBotUserId()).toBe("UBOT");
   });
 
   it("throws on a non-ok response (e.g. missing scope)", async () => {
     stubSlack(() => ({ ok: false, error: "missing_scope" }));
-    // Use a distinct token so the module-level cache from the success test above
-    // doesn't short-circuit this call before auth.test can return the error.
-    await expect(
-      getBotUserId({ SLACK_BOT_TOKEN: "xoxb-error-token" })
-    ).rejects.toThrow(/missing_scope/);
+    // The afterEach reset clears the cache from the success test above, so this
+    // call actually hits auth.test and surfaces the error.
+    await expect(getBotUserId()).rejects.toThrow(/missing_scope/);
   });
 });
 
@@ -145,7 +147,7 @@ describe("postReply", () => {
       if (method === "chat.postMessage") captured = body;
       return { ok: true, ts: "1.2" };
     });
-    await postReply(slackEnv, "C1", "1700.1", "hello world");
+    await postReply("C1", "1700.1", "hello world");
     expect(captured?.get("channel")).toBe("C1");
     expect(captured?.get("thread_ts")).toBe("1700.1");
     expect(captured?.get("text")).toBe("hello world");
@@ -157,7 +159,7 @@ describe("postReply", () => {
       if (method === "chat.postMessage") captured = body;
       return { ok: true };
     });
-    await postReply(slackEnv, "D1", null, "hi");
+    await postReply("D1", null, "hi");
     expect(captured?.has("thread_ts")).toBe(false);
   });
 
@@ -167,7 +169,7 @@ describe("postReply", () => {
       if (method === "chat.postMessage") captured = body;
       return { ok: true, ts: "1.2" };
     });
-    await postReply(slackEnv, "C1", "1700.1", "hello", "Analytics Bot");
+    await postReply("C1", "1700.1", "hello", "Analytics Bot");
     expect(captured?.get("username")).toBe("Analytics Bot");
   });
 
@@ -177,9 +179,9 @@ describe("postReply", () => {
       if (method === "chat.postMessage") captured = body;
       return { ok: true, ts: "1.2" };
     });
-    await postReply(slackEnv, "C1", "1700.1", "hello");
+    await postReply("C1", "1700.1", "hello");
     expect(captured?.has("username")).toBe(false);
-    await postReply(slackEnv, "C1", "1700.1", "hello", "");
+    await postReply("C1", "1700.1", "hello", "");
     expect(captured?.has("username")).toBe(false);
   });
 
@@ -190,7 +192,6 @@ describe("postReply", () => {
       return { ok: true, ts: "1.2" };
     });
     await postReply(
-      slackEnv,
       "C1",
       "1700.1",
       "hello",
@@ -206,15 +207,15 @@ describe("postReply", () => {
       if (method === "chat.postMessage") captured = body;
       return { ok: true, ts: "1.2" };
     });
-    await postReply(slackEnv, "C1", "1700.1", "hello");
+    await postReply("C1", "1700.1", "hello");
     expect(captured?.has("icon_url")).toBe(false);
-    await postReply(slackEnv, "C1", "1700.1", "hello", null, null);
+    await postReply("C1", "1700.1", "hello", null, null);
     expect(captured?.has("icon_url")).toBe(false);
   });
 
   it("throws on a non-ok response", async () => {
     stubSlack(() => ({ ok: false, error: "channel_not_found" }));
-    await expect(postReply(slackEnv, "C1", null, "x")).rejects.toThrow(
+    await expect(postReply("C1", null, "x")).rejects.toThrow(
       /channel_not_found/
     );
   });
@@ -227,7 +228,7 @@ describe("addReaction", () => {
       if (method === "reactions.add") captured = body;
       return { ok: true };
     });
-    await addReaction(slackEnv, "C1", "1700.1", "hourglass_flowing_sand");
+    await addReaction("C1", "1700.1", "hourglass_flowing_sand");
     expect(captured?.get("channel")).toBe("C1");
     expect(captured?.get("timestamp")).toBe("1700.1");
     expect(captured?.get("name")).toBe("hourglass_flowing_sand");
@@ -239,9 +240,7 @@ describe("addReaction", () => {
         ? { ok: false, error: "already_reacted" }
         : { ok: true }
     );
-    await expect(
-      addReaction(slackEnv, "C1", "1700.1", "x")
-    ).resolves.toBeUndefined();
+    await expect(addReaction("C1", "1700.1", "x")).resolves.toBeUndefined();
   });
 
   it("throws on other Slack errors", async () => {
@@ -250,7 +249,7 @@ describe("addReaction", () => {
         ? { ok: false, error: "missing_scope" }
         : { ok: true }
     );
-    await expect(addReaction(slackEnv, "C1", "1700.1", "x")).rejects.toThrow(
+    await expect(addReaction("C1", "1700.1", "x")).rejects.toThrow(
       /missing_scope/
     );
   });
@@ -263,7 +262,7 @@ describe("removeReaction", () => {
       if (method === "reactions.remove") captured = body;
       return { ok: true };
     });
-    await removeReaction(slackEnv, "C1", "1700.1", "hourglass_flowing_sand");
+    await removeReaction("C1", "1700.1", "hourglass_flowing_sand");
     expect(captured?.get("channel")).toBe("C1");
     expect(captured?.get("timestamp")).toBe("1700.1");
     expect(captured?.get("name")).toBe("hourglass_flowing_sand");
@@ -275,7 +274,7 @@ describe("removeReaction", () => {
         method === "reactions.remove" ? { ok: false, error } : { ok: true }
       );
       await expect(
-        removeReaction(slackEnv, "C1", "1700.1", "x")
+        removeReaction("C1", "1700.1", "x")
       ).resolves.toBeUndefined();
     }
   });
@@ -286,7 +285,7 @@ describe("removeReaction", () => {
         ? { ok: false, error: "missing_scope" }
         : { ok: true }
     );
-    await expect(removeReaction(slackEnv, "C1", "1700.1", "x")).rejects.toThrow(
+    await expect(removeReaction("C1", "1700.1", "x")).rejects.toThrow(
       /missing_scope/
     );
   });
