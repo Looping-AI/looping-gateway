@@ -17,8 +17,11 @@ import {
   reactionInstanceId
 } from "@/workflows/reaction";
 
-const REMOTE_CONTRACT_VIOLATION_TEXT =
-  "Remote agent did not provide the required task acknowledgment.";
+// Shown when a dispatch's retries are fully exhausted (persistently unreachable
+// endpoint, TLS/DNS failure, persistent 5xx, accept timeout). Not transient by
+// the time we get here, so the user should know rather than see silence.
+export const AGENT_UNREACHABLE_TEXT =
+  "This agent couldn't be reached after several attempts. It may be down or misconfigured, please contact the agent developer.";
 
 // One agent's resolved dispatch target (must be Rpc.Serializable).
 export interface AgentPlan {
@@ -136,11 +139,14 @@ export async function dispatchMessage(
   } catch (err) {
     if (err instanceof InvalidEndpointError) {
       // Policy rejection — not transient, so don't let the step retry.
-      console.warn("[message] agent endpoint rejected — staying silent", {
+      console.warn("[message] agent endpoint rejected", {
         agent: plan.agent.name,
         err: err.message
       });
-      return { kind: "reply", text: "" };
+      return {
+        kind: "error_reply",
+        text: `The agent *${plan.agent.name}* could not be reached because its endpoint was rejected by the security policy: ${err.message}. Please contact the agent developer to resolve this.`
+      };
     }
     throw err; // transient — retry is safe (deterministic dispatch id dedupes)
   }
@@ -227,19 +233,14 @@ export class MessageWorkflow extends WorkflowEntrypoint<
             return true;
           }
 
-          if (result.kind === "contract_violation") {
-            // The remote ignored push-notification async contract and returned a
-            // Message to the accept call. Surface this immediately so the caller
-            // gets explicit feedback instead of silence.
-            await step.do(`contract-violation:${plan.agent.name}`, () =>
-              postReply(
-                p.channelId,
-                threadTs,
-                REMOTE_CONTRACT_VIOLATION_TEXT,
-                plan.displayName,
-                plan.iconUrl
-              )
-            );
+          if (result.kind === "error_reply") {
+            // Gateway error notice (policy rejection, etc.) — use app branding,
+            // not the agent's, since this is the gateway speaking, not the agent.
+            if (result.text.trim()) {
+              await step.do(`error-reply:${plan.agent.name}`, () =>
+                postReply(p.channelId, threadTs, result.text, null, null)
+              );
+            }
             return false;
           }
 
@@ -262,11 +263,33 @@ export class MessageWorkflow extends WorkflowEntrypoint<
       let anyAccepted = false;
       for (const [i, r] of results.entries()) {
         if (r.status === "rejected") {
+          const plan = plans[i];
           console.error("[message] agent dispatch failed", {
-            agent: plans[i].agent.name,
+            agent: plan.agent.name,
             error:
               r.reason instanceof Error ? r.reason.message : String(r.reason)
           });
+          // Retries are exhausted (not transient anymore) — tell the user the
+          // agent couldn't be reached instead of silently clearing the ⏳ below.
+          // Best-effort: a failed post here must not abort the run or block the
+          // collect-reaction step, so isolate it (the cause is already logged).
+          try {
+            await step.do(`dispatch-failed:${plan.agent.name}`, () =>
+              postReply(
+                p.channelId,
+                threadTs,
+                AGENT_UNREACHABLE_TEXT,
+                null,
+                null
+              )
+            );
+          } catch (postErr) {
+            console.error("[message] failed to post unreachable notice", {
+              agent: plan.agent.name,
+              error:
+                postErr instanceof Error ? postErr.message : String(postErr)
+            });
+          }
         } else if (r.value === true) {
           anyAccepted = true;
         }

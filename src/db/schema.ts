@@ -181,6 +181,9 @@ export const agentTasks = sqliteTable(
     status: text("status", { enum: ["pending", "completed"] })
       .notNull()
       .default("pending"),
+    // Last gateway-controlled reason a callback was rejected (auth/malformed),
+    // captured for the reaction backstop to surface. Never holds remote payload.
+    lastError: text("last_error"),
     createdAt: timestamp("created_at"),
     completedAt: integer("completed_at")
   },

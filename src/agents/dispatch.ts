@@ -193,8 +193,8 @@ export function instanceNameFor(metadata: AgentTurnMetadata): string {
  */
 export type DispatchResult =
   | { kind: "reply"; text: string }
-  | { kind: "accepted"; token: string; taskId: string }
-  | { kind: "contract_violation"; token: string };
+  | { kind: "error_reply"; text: string }
+  | { kind: "accepted"; token: string; taskId: string };
 
 /**
  * Dispatch a user message to an agent over A2A. Routing is by `agent.kind`:
@@ -274,7 +274,10 @@ export async function dispatchToAgent(
     if (accept.kind === "accepted") {
       return { kind: "accepted", token: dispatchId, taskId: accept.taskId };
     }
-    return { kind: "contract_violation", token: dispatchId };
+    return {
+      kind: "error_reply",
+      text: "Remote agent did not provide the required task acknowledgment."
+    };
   }
 
   // Local agent → in-process via DO stub.fetch. Trusted same-worker dispatch, so

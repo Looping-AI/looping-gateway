@@ -198,7 +198,10 @@ describe("handleAgentNotification", () => {
 
     expect(res.status).toBe(401);
     expect(posts).toHaveLength(0);
-    expect((await getAgentTaskByToken(NTOK))?.status).toBe("pending");
+    const row = await getAgentTaskByToken(NTOK);
+    expect(row?.status).toBe("pending");
+    // The reason is captured (still pending) so the reaction backstop can surface it.
+    expect(row?.lastError).toContain("signature could not be verified");
   });
 
   it("rejects a callback signed by a key other than the pinned one", async () => {
@@ -213,6 +216,29 @@ describe("handleAgentNotification", () => {
 
     expect(res.status).toBe(401);
     expect(posts).toHaveLength(0);
+  });
+
+  it("400s and records the reason when the body is not a Task", async () => {
+    const posts: SlackPost[] = [];
+    stubFetch(key, posts);
+    const bearer = await signCallback(key);
+    const req = new Request(`${ISSUER}${NOTIFICATIONS_PATH}`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${bearer}`,
+        [NOTIFICATION_TOKEN_HEADER]: NTOK,
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({ kind: "message", not: "a task" })
+    });
+
+    const res = await handleAgentNotification(req);
+
+    expect(res.status).toBe(400);
+    expect(posts).toHaveLength(0);
+    const row = await getAgentTaskByToken(NTOK);
+    expect(row?.status).toBe("pending");
+    expect(row?.lastError).toContain("not a valid A2A Task");
   });
 
   it("404s an unknown notification token", async () => {

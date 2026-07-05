@@ -5,6 +5,7 @@ import { getDb } from "@/db/client";
 import { setWorkspaceAdminChannel } from "@/db/models/workspaces";
 import { handleSlackEvent } from "@/slack-webhook-handler";
 import { PENDING_REACTION } from "@/workflows/reaction";
+import { AGENT_UNREACHABLE_TEXT } from "@/workflows/message";
 import { stubSlack } from "../wrappers/slack-stub";
 import { slackHeaders } from "../helpers/slack";
 
@@ -142,6 +143,39 @@ describe("MessageWorkflow (introspectWorkflow)", () => {
       expect(calls[0]).toMatchObject({ channel: "D1" });
       expect(calls[0].thread_ts).toBeUndefined();
       expect(calls[0].text.length).toBeGreaterThan(0);
+    } finally {
+      await introspector.dispose();
+    }
+  });
+
+  it("posts an unreachable notice when a dispatch's retries are exhausted", async () => {
+    const calls = captureSlack();
+    const introspector = await introspectWorkflow(env.MESSAGE_WORKFLOW);
+    try {
+      // Force the admin dispatch to fail on every attempt (a persistent failure,
+      // e.g. connection refused), with retry backoff disabled so we don't wait.
+      await introspector.modifyAll(async (m) => {
+        await m.disableRetryDelays([{ name: "dispatch:admin" }]);
+        await m.mockStepError(
+          { name: "dispatch:admin" },
+          new Error("connection refused")
+        );
+      });
+
+      const { body } = makeAppMentionRequest("C_ORGADMIN", "<@UBOT> hello");
+      const res = await trigger(body);
+      expect(res.status).toBe(200);
+
+      const [instance] = await introspector.get();
+      await instance.waitForStatus("complete");
+
+      // Instead of silently clearing the ⏳, the user is told the agent couldn't
+      // be reached — posted under the agent's identity in the same channel.
+      expect(calls).toHaveLength(1);
+      expect(calls[0]).toMatchObject({
+        channel: "C_ORGADMIN",
+        text: AGENT_UNREACHABLE_TEXT
+      });
     } finally {
       await introspector.dispose();
     }

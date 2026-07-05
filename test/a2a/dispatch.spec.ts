@@ -325,9 +325,9 @@ describe("dispatchToAgent (local Durable Object)", () => {
       }
     );
 
-    expect(result.kind).toBe("contract_violation");
-    if (result.kind === "contract_violation") {
-      expect(result.token).toMatch(/^[0-9a-z]{19}$/);
+    expect(result.kind).toBe("error_reply");
+    if (result.kind === "error_reply") {
+      expect(result.text).toContain("required task acknowledgment");
     }
     expect(posts).toHaveLength(1);
   });

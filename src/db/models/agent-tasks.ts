@@ -54,6 +54,44 @@ export async function getAgentTaskByToken(
   return rows[0] ?? null;
 }
 
+/** Pending (not-yet-completed) tasks for a Slack trigger event — the reaction backstop reads these. */
+export async function getPendingAgentTasksByEventId(
+  eventId: string
+): Promise<AgentTaskRow[]> {
+  const db = getDb();
+  return db
+    .select()
+    .from(schema.agentTasks)
+    .where(
+      and(
+        eq(schema.agentTasks.eventId, eventId),
+        eq(schema.agentTasks.status, "pending")
+      )
+    );
+}
+
+/**
+ * Record why a callback was rejected, so the reaction backstop can surface the
+ * reason instead of silence. Conditional on `pending` so a completed task is
+ * never reopened. `message` must be a gateway-controlled string — never remote
+ * payload — since it can be posted to Slack verbatim.
+ */
+export async function recordAgentTaskError(
+  token: string,
+  message: string
+): Promise<void> {
+  const db = getDb();
+  await db
+    .update(schema.agentTasks)
+    .set({ lastError: message })
+    .where(
+      and(
+        eq(schema.agentTasks.token, token),
+        eq(schema.agentTasks.status, "pending")
+      )
+    );
+}
+
 /**
  * Mark a task completed. Conditional on it still being `pending` so a duplicate
  * or replayed callback flips exactly one row — the returned count is the caller's

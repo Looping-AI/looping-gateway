@@ -3,7 +3,8 @@ import { isRecord } from "@/util/json";
 import { getAgent } from "@/db/models/agents";
 import {
   getAgentTaskByToken,
-  completeAgentTask
+  completeAgentTask,
+  recordAgentTaskError
 } from "@/db/models/agent-tasks";
 import {
   getPublicUrl,
@@ -25,6 +26,26 @@ export const NOTIFICATION_TOKEN_HEADER = "x-a2a-notification-token";
 export const NOTIFICATIONS_PATH = "/a2a/notifications";
 
 const OK = () => new Response("ok", { status: 200 });
+
+/**
+ * Persist why a callback was rejected onto the pending task row so the reaction
+ * backstop can surface the reason to the Slack user. Best-effort: a DB failure
+ * must never change the HTTP status we return to the remote. `message` is always
+ * a gateway-controlled string (never remote payload) so it is safe to store and
+ * later post verbatim.
+ */
+async function captureCallbackError(
+  token: string,
+  message: string
+): Promise<void> {
+  try {
+    await recordAgentTaskError(token, message);
+  } catch (err) {
+    console.error("[notifications] failed to record callback error", {
+      err: err instanceof Error ? err.message : String(err)
+    });
+  }
+}
 
 /**
  * Handle a remote agent's push-notification callback (A2A spec §13.2). This is
@@ -66,6 +87,10 @@ export async function handleAgentNotification(
     console.error("[notifications] agent missing or unsigned", {
       agent: row.agentName
     });
+    await captureCallbackError(
+      notificationToken,
+      "the agent's registration is missing its card signing key, so its callback could not be verified"
+    );
     return new Response("agent not verifiable", { status: 401 });
   }
 
@@ -91,6 +116,10 @@ export async function handleAgentNotification(
         agent: row.agentName,
         err: err.message
       });
+      await captureCallbackError(
+        notificationToken,
+        `the callback signature could not be verified (${err.message})`
+      );
       return new Response("invalid callback token", { status: 401 });
     }
     throw err;
@@ -105,6 +134,10 @@ export async function handleAgentNotification(
     task = null;
   }
   if (!task) {
+    await captureCallbackError(
+      notificationToken,
+      "the callback body was not a valid A2A Task"
+    );
     return new Response("expected a Task body", { status: 400 });
   }
 
