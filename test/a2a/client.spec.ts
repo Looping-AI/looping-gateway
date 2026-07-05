@@ -1,6 +1,6 @@
 import { describe, it, expect, afterEach, vi } from "vitest";
 import type { Message, Task } from "@a2a-js/sdk";
-import { acceptA2ARemote, sanitizeRemoteReply } from "@/a2a/client";
+import { sendA2ARemote, sanitizeRemoteReply } from "@/a2a/client";
 import { buildAgentCard } from "@/a2a/card";
 
 const ENDPOINT = "https://remote.example.com/a2a";
@@ -89,12 +89,12 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-describe("acceptA2ARemote — async remote accept", () => {
+describe("sendA2ARemote — async remote accept", () => {
   it("injects the gateway JWT as a Bearer header and sends the push config", async () => {
     const calls: Captured[] = [];
     stubRemote("task-1", calls);
 
-    const result = await acceptA2ARemote(
+    const result = await sendA2ARemote(
       { endpoint: ENDPOINT, authToken: "tok-123" },
       userMessage("hi"),
       { url: "https://gw.example.com/a2a/notifications", token: "ntok-9" }
@@ -145,7 +145,7 @@ describe("acceptA2ARemote — async remote accept", () => {
     );
     void calls;
 
-    const result = await acceptA2ARemote(
+    const result = await sendA2ARemote(
       { endpoint: ENDPOINT, authToken: "t" },
       userMessage("hi"),
       { url: "https://gw.example.com/a2a/notifications", token: "n" }

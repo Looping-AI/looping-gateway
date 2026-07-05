@@ -19,7 +19,7 @@ import { extractText } from "./parts";
  *   Local agents reply *synchronously* — {@link sendA2ALocal} returns their text.
  * - `remote` — a base URL; the card is discovered over real HTTP, every request
  *   carries the gateway identity JWT (`authToken`). Remote agents reply
- *   *asynchronously* via push notification — {@link acceptA2ARemote} only waits
+ *   *asynchronously* via push notification — {@link sendA2ARemote} only waits
  *   for the accept (a Task ack), never for generation.
  */
 export interface A2ALocalTarget {
@@ -152,7 +152,7 @@ export type RemoteAccept =
  * required Task acceptance (including a non-empty Task id), we log and return a
  * contract-violation outcome for the caller to surface.
  */
-export async function acceptA2ARemote(
+export async function sendA2ARemote(
   target: A2ARemoteTarget,
   message: Message,
   pushNotificationConfig: PushNotificationConfig

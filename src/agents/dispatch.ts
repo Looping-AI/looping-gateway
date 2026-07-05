@@ -4,7 +4,7 @@ import { env } from "cloudflare:workers";
 import { signGatewayToken, type RemoteIdentity } from "@/auth/agent-jwt";
 import type { AgentRow } from "@/db/models/agents";
 import { buildAgentCard } from "@/a2a/card";
-import { sendA2ALocal, acceptA2ARemote } from "@/a2a/client";
+import { sendA2ALocal, sendA2ARemote } from "@/a2a/client";
 import { originOf, validateRemoteEndpoint } from "@/a2a/endpoint";
 import {
   getAllowedRemoteAgentDomains,
@@ -266,7 +266,7 @@ export async function dispatchToAgent(
     // task (A2A §13.2); the webhook still verifies the remote's signature against
     // its pinned card key (that JWT is the real authenticator — this token is the
     // correlation/dedupe key, stable across retries so they collapse to one row).
-    const accept = await acceptA2ARemote(
+    const accept = await sendA2ARemote(
       { endpoint: agent.a2aEndpoint, authToken: gatewayToken },
       remoteMessage,
       { url: `${issuer}/a2a/notifications`, token: dispatchId }
