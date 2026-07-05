@@ -141,6 +141,14 @@ export async function handleAgentNotification(
     return new Response("expected a Task body", { status: 400 });
   }
 
+  if (task.status.state !== "completed") {
+    await captureCallbackError(
+      notificationToken,
+      `unexpected task state: ${task.status.state}`
+    );
+    return new Response("only completed tasks are accepted", { status: 400 });
+  }
+
   const text = sanitizeRemoteReply(extractText(task));
   const displayName = agent.displayName ?? agent.name;
   const iconUrl = agent.iconUrl ?? null;

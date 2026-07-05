@@ -241,6 +241,26 @@ describe("handleAgentNotification", () => {
     expect(row?.lastError).toContain("not a valid A2A Task");
   });
 
+  it("400s and records the reason when the task state is not completed", async () => {
+    const posts: SlackPost[] = [];
+    stubFetch(key, posts);
+    const bearer = await signCallback(key);
+    const workingTask: Task = {
+      ...makeTask("partial"),
+      status: { state: "working" }
+    };
+
+    const res = await handleAgentNotification(
+      callbackRequest(bearer, NTOK, workingTask)
+    );
+
+    expect(res.status).toBe(400);
+    expect(posts).toHaveLength(0);
+    const row = await getAgentTaskByToken(NTOK);
+    expect(row?.status).toBe("pending");
+    expect(row?.lastError).toContain("working");
+  });
+
   it("404s an unknown notification token", async () => {
     const posts: SlackPost[] = [];
     stubFetch(key, posts);
