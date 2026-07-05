@@ -112,7 +112,7 @@ describe("acceptA2ARemote — async remote accept", () => {
     expect(push?.token).toBe("ntok-9");
   });
 
-  it("returns contract_violation when the remote replies with a Message", async () => {
+  it("returns contract_violation when required Task acceptance/id is missing", async () => {
     const calls: Captured[] = [];
     const card = buildAgentCard({
       name: "Remote",

@@ -300,7 +300,7 @@ describe("dispatchToAgent (local Durable Object)", () => {
     });
   });
 
-  it("returns contract_violation when remote accepts with Message instead of Task", async () => {
+  it("returns contract_violation when required Task acceptance/id is missing", async () => {
     await setPublicUrl("https://gateway.test");
     await setAllowedRemoteAgentDomains(["example.com"]);
     const posts: RemotePost[] = [];

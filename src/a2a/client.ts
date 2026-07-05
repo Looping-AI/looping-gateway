@@ -139,7 +139,7 @@ export type RemoteAccept =
       taskId: string;
     }
   | {
-      /** Remote violated async accept contract by returning a Message. */
+      /** Remote omitted the required async Task acceptance/id. */
       kind: "contract_violation";
     };
 
@@ -148,9 +148,9 @@ export type RemoteAccept =
  * gateway supplies a `pushNotificationConfig` (webhook URL + validation token);
  * the remote MUST return immediately with a `submitted`/`working` Task and later
  * POST the terminal Task back to the webhook. We only wait for — and return — the
- * accept, never the generation. A remote that replies with a `Message` instead of
- * a Task is honoring neither the async contract nor the push config; we log and
- * return a contract-violation outcome for the caller to surface.
+ * accept, never the generation. If the remote response does not contain the
+ * required Task acceptance (including a non-empty Task id), we log and return a
+ * contract-violation outcome for the caller to surface.
  */
 export async function acceptA2ARemote(
   target: A2ARemoteTarget,
@@ -163,10 +163,13 @@ export async function acceptA2ARemote(
     configuration: { pushNotificationConfig }
   };
   const result = await client.sendMessage(params);
-  if (result.kind === "task") return { kind: "accepted", taskId: result.id };
+  if (result.kind === "task" && result.id.trim().length > 0) {
+    return { kind: "accepted", taskId: result.id };
+  }
   console.error(
-    "[a2a] remote agent returned a Message, not a Task — push-notification " +
-      "contract not honored; reply (if any) dropped",
+    "[a2a] remote agent accept response missing required Task acceptance " +
+      "(submitted/working Task with non-empty id); push-notification contract " +
+      "not honored",
     { contextId: message.contextId }
   );
   return { kind: "contract_violation" };
