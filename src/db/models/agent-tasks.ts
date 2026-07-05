@@ -6,7 +6,7 @@ const ONE_MONTH_SECONDS = 30 * 24 * 60 * 60;
 
 export type AgentTaskRow = typeof schema.agentTasks.$inferSelect;
 
-/** Everything captured at dispatch so the async callback can post + render without re-resolving. */
+/** Everything captured at dispatch so the async callback can correlate, route, and collect. */
 export interface CreateAgentTaskInput {
   /** Gateway-generated push-notification validation token (PK, echoed by the remote). */
   token: string;
@@ -17,9 +17,6 @@ export interface CreateAgentTaskInput {
   /** Thread to reply into; null = post at channel top-level. */
   replyThreadTs: string | null;
   eventId: string;
-  displayName: string;
-  iconUrl: string | null;
-  workspaceId: number;
 }
 
 /**
@@ -39,10 +36,7 @@ export async function createAgentTask(
       agentName: input.agentName,
       channelId: input.channelId,
       replyThreadTs: input.replyThreadTs,
-      eventId: input.eventId,
-      displayName: input.displayName,
-      iconUrl: input.iconUrl,
-      workspaceId: input.workspaceId
+      eventId: input.eventId
     })
     .onConflictDoNothing();
 }

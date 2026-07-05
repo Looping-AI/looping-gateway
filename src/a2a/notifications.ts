@@ -109,6 +109,8 @@ export async function handleAgentNotification(
   }
 
   const text = sanitizeRemoteReply(extractText(task));
+  const displayName = agent.displayName ?? agent.name;
+  const iconUrl = agent.iconUrl ?? null;
 
   // Post BEFORE marking complete so a postMessage failure leaves the row pending
   // for the remote to retry (a retry after success sees `completed` → no-op). An
@@ -119,8 +121,8 @@ export async function handleAgentNotification(
       row.channelId,
       row.replyThreadTs,
       text,
-      row.displayName,
-      row.iconUrl
+      displayName,
+      iconUrl
     );
   }
 

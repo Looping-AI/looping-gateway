@@ -210,7 +210,7 @@ export class MessageWorkflow extends WorkflowEntrypoint<
           if (result.kind === "accepted") {
             // Remote agent accepted the turn; the real reply arrives later via
             // /a2a/notifications. Persist the correlation so the callback knows
-            // where to post, which ⏳ to clear, and how to render.
+            // where to post and which ⏳ to clear.
             await step.do(`record-task:${plan.agent.name}`, () =>
               createAgentTask({
                 token: result.token,
@@ -218,10 +218,7 @@ export class MessageWorkflow extends WorkflowEntrypoint<
                 agentName: plan.agent.name,
                 channelId: p.channelId,
                 replyThreadTs: threadTs,
-                eventId: p.eventId,
-                displayName: plan.displayName,
-                iconUrl: plan.iconUrl,
-                workspaceId: plan.agent.workspaceId
+                eventId: p.eventId
               })
             );
             return true;

@@ -154,8 +154,8 @@ export const agentChannels = sqliteTable(
  * longer blocks for the reply: it sends a per-dispatch validation `token` in the
  * A2A `pushNotificationConfig`, the remote returns a Task immediately, and later
  * POSTs the terminal Task back to `/a2a/notifications`. This row is how the
- * callback recovers where to post (channel/thread), which ⏳ to clear (`eventId`),
- * and how to render (display name + avatar) — none of which the remote knows.
+ * callback recovers where to post (channel/thread) and which ⏳ to clear
+ * (`eventId`). Callback rendering identity is read from the current `agents` row.
  *
  * Keyed by the gateway-generated `token` (the value the remote echoes back).
  * Rows are marked `completed` by the callback and swept when stale by reconcile.
@@ -177,12 +177,6 @@ export const agentTasks = sqliteTable(
     replyThreadTs: text("reply_thread_ts"),
     // Slack event id of the triggering message — used to collect the ⏳ reaction.
     eventId: text("event_id").notNull(),
-    // Rendering identity captured at dispatch (never re-resolved on callback).
-    displayName: text("display_name").notNull(),
-    iconUrl: text("icon_url"),
-    workspaceId: integer("workspace_id")
-      .notNull()
-      .references(() => workspaces.id),
     // `pending` until a terminal callback posts (or classifies no-reply) and marks it.
     status: text("status", { enum: ["pending", "completed"] })
       .notNull()

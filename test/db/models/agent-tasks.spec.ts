@@ -12,8 +12,7 @@ import {
 
 const db = getDb();
 
-// agent_tasks.agent_name / workspace_id are FKs; seed a real agent (workspace 0
-// is migration-seeded) so inserts satisfy them.
+// agent_tasks.agent_name is an FK; seed a real agent so inserts satisfy it.
 beforeEach(async () => {
   await registerAgent({
     name: "remoteagent",
@@ -32,9 +31,6 @@ function input(token: string, over: Partial<CreateAgentTaskInput> = {}) {
     channelId: "C1",
     replyThreadTs: null,
     eventId: "Ev1",
-    displayName: "Remote",
-    iconUrl: null,
-    workspaceId: 0,
     ...over
   } satisfies CreateAgentTaskInput;
 }

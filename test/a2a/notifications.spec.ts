@@ -148,10 +148,7 @@ beforeEach(async () => {
     agentName: "remoteagent",
     channelId: "C1",
     replyThreadTs: null,
-    eventId: "Ev1",
-    displayName: "Remote",
-    iconUrl: null,
-    workspaceId: 0
+    eventId: "Ev1"
   });
 });
 
