@@ -13,7 +13,7 @@ import {
 import {
   verifyAgentCallbackToken,
   AgentCallbackAuthError
-} from "@/auth/agent-jwt";
+} from "@/auth/agent-inbound";
 import { extractText } from "@/a2a/parts";
 import { sanitizeRemoteReply } from "@/a2a/client";
 import { postReply } from "@/wrappers/slack";

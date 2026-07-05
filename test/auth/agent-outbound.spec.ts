@@ -5,7 +5,7 @@ import {
   IDENTITY_CLAIM,
   getPublicJwks,
   signGatewayToken
-} from "@/auth/agent-jwt";
+} from "@/auth/agent-outbound";
 
 const AUD = "https://agent.example.com";
 const PUBLIC_URL = "https://gateway.test";

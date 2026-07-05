@@ -1,5 +1,5 @@
 import { handleSlackEvent } from "@/slack-webhook-handler";
-import { getPublicJwks } from "@/auth/agent-jwt";
+import { getPublicJwks } from "@/auth/agent-outbound";
 import {
   handleAgentNotification,
   NOTIFICATIONS_PATH

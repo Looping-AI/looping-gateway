@@ -1,7 +1,7 @@
 import type { Message } from "@a2a-js/sdk";
 import type { UserAuthContext } from "@/auth";
 import { env } from "cloudflare:workers";
-import { signGatewayToken, type RemoteIdentity } from "@/auth/agent-jwt";
+import { signGatewayToken, type RemoteIdentity } from "@/auth/agent-outbound";
 import type { AgentRow } from "@/db/models/agents";
 import { buildAgentCard } from "@/a2a/card";
 import { sendA2ALocal, sendA2ARemote } from "@/a2a/client";

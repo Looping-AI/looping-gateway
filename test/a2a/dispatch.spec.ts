@@ -9,7 +9,7 @@ import {
 } from "@/agents/dispatch";
 import { slackTsToIso } from "@/agents/shared/messages";
 import type { UserAuthContext } from "@/auth";
-import { getPublicJwks, IDENTITY_CLAIM } from "@/auth/agent-jwt";
+import { getPublicJwks, IDENTITY_CLAIM } from "@/auth/agent-outbound";
 import { buildAgentCard } from "@/a2a/card";
 import { getDb } from "@/db/client";
 import {

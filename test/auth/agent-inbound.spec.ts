@@ -3,7 +3,7 @@ import { SignJWT, exportJWK, generateKeyPair, type JWK } from "jose";
 import {
   verifyAgentCallbackToken,
   AgentCallbackAuthError
-} from "@/auth/agent-jwt";
+} from "@/auth/agent-inbound";
 
 const JKU = "https://agent.example.com/.well-known/jwks.json";
 const KID = "cb1";
