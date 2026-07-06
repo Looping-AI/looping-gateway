@@ -18,10 +18,12 @@ import {
 import {
   ORG_WORKSPACE_ID,
   getWorkspace,
+  getWorkspaceByAdminChannel,
   listWorkspaces,
   createWorkspace,
   setWorkspaceAdminChannel
 } from "@/db/models/workspaces";
+import { isDmChannel } from "@/router/resolve";
 import {
   getAllowedRemoteAgentDomains,
   setAllowedRemoteAgentDomains,
@@ -278,6 +280,16 @@ export async function agentsWrite(
     case "add_channel": {
       const target = await requireWritableAgent(deps, args.name);
       if ("error" in target) return target;
+      if (isDmChannel(args.channelId)) {
+        return {
+          error:
+            "DM channels are reserved for the onboarding agent and cannot be assigned to custom agents."
+        };
+      }
+      const adminWs = await getWorkspaceByAdminChannel(args.channelId);
+      if (adminWs) {
+        return { error: "Admin channels cannot be assigned to custom agents." };
+      }
       await attachAgentChannel({
         agentName: args.name,
         channelId: args.channelId,

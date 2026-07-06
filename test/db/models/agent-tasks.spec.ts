@@ -6,6 +6,8 @@ import {
   createAgentTask,
   getAgentTaskByToken,
   completeAgentTask,
+  updateAgentTaskTaskId,
+  deleteAgentTask,
   sweepStaleAgentTasks,
   type CreateAgentTaskInput
 } from "@/db/models/agent-tasks";
@@ -61,6 +63,30 @@ describe("agent-tasks model", () => {
     const row = await getAgentTaskByToken("tok-c");
     expect(row?.status).toBe("completed");
     expect(row?.completedAt).not.toBeNull();
+  });
+
+  it("backfills the remote task id on a pending row, not a completed one", async () => {
+    await createAgentTask(input("tok-upd", { taskId: null }));
+    await updateAgentTaskTaskId("tok-upd", "task-remote-9");
+    expect((await getAgentTaskByToken("tok-upd"))?.taskId).toBe(
+      "task-remote-9"
+    );
+
+    // Once completed, the callback owns the row — a late backfill must not touch it.
+    expect(await completeAgentTask("tok-upd")).toBe(true);
+    await updateAgentTaskTaskId("tok-upd", "task-remote-late");
+    expect((await getAgentTaskByToken("tok-upd"))?.taskId).toBe(
+      "task-remote-9"
+    );
+  });
+
+  it("deletes a row by token, and is a no-op on an unknown token", async () => {
+    await createAgentTask(input("tok-del"));
+    expect(await getAgentTaskByToken("tok-del")).not.toBeNull();
+    await deleteAgentTask("tok-del");
+    expect(await getAgentTaskByToken("tok-del")).toBeNull();
+    // Deleting a token that was never written (or already gone) must not throw.
+    await expect(deleteAgentTask("tok-nope")).resolves.toBeUndefined();
   });
 
   it("sweeps only rows older than the cutoff", async () => {

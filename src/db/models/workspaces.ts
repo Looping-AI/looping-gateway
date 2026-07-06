@@ -7,6 +7,25 @@ export type WorkspaceRow = typeof schema.workspaces.$inferSelect;
 /** Workspace 0 — the org-level workspace sentinel. */
 export const ORG_WORKSPACE_ID = 0;
 
+export interface CreateWorkspaceInput {
+  name: string;
+  adminChannelId?: string | null;
+}
+
+export async function createWorkspace(
+  input: CreateWorkspaceInput
+): Promise<WorkspaceRow> {
+  const db = getDb();
+  const rows = await db
+    .insert(schema.workspaces)
+    .values({
+      name: input.name,
+      adminChannelId: input.adminChannelId ?? null
+    })
+    .returning();
+  return rows[0];
+}
+
 export interface UpsertWorkspaceInput {
   id: number;
   name: string;
@@ -34,25 +53,6 @@ export async function upsertWorkspace(
         updatedAt: sql`(unixepoch())`
       }
     });
-}
-
-export interface CreateWorkspaceInput {
-  name: string;
-  adminChannelId?: string | null;
-}
-
-export async function createWorkspace(
-  input: CreateWorkspaceInput
-): Promise<WorkspaceRow> {
-  const db = getDb();
-  const rows = await db
-    .insert(schema.workspaces)
-    .values({
-      name: input.name,
-      adminChannelId: input.adminChannelId ?? null
-    })
-    .returning();
-  return rows[0];
 }
 
 export async function getWorkspace(id: number): Promise<WorkspaceRow | null> {

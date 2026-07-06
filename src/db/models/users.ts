@@ -62,17 +62,6 @@ export async function getSlackUser(
   return rows[0] ?? null;
 }
 
-export async function markUserDeleted(
-  slackUserId: string,
-  deleted: boolean
-): Promise<void> {
-  const db = getDb();
-  await db
-    .update(schema.slackUsers)
-    .set({ deleted, updatedAt: sql`(unixepoch())` })
-    .where(eq(schema.slackUsers.slackUserId, slackUserId));
-}
-
 /**
  * Currently-active user ids (deleted = false). Used for reconcile's
  * deactivation sweep so we mark each user deleted at most once, rather than
@@ -85,4 +74,15 @@ export async function listActiveSlackUserIds(): Promise<Set<string>> {
     .from(schema.slackUsers)
     .where(eq(schema.slackUsers.deleted, false));
   return new Set(rows.map((r) => r.id));
+}
+
+export async function markUserDeleted(
+  slackUserId: string,
+  deleted: boolean
+): Promise<void> {
+  const db = getDb();
+  await db
+    .update(schema.slackUsers)
+    .set({ deleted, updatedAt: sql`(unixepoch())` })
+    .where(eq(schema.slackUsers.slackUserId, slackUserId));
 }

@@ -29,7 +29,11 @@ afterEach(() => {
 // Returns the spy so tests can assert on it. Because the handler now reads the
 // workflow bindings off the global `env`, the spy replaces the real create.
 function spyWorkflow(
-  binding: "MESSAGE_WORKFLOW" | "REACTION_WORKFLOW" | "LIFECYCLE_WORKFLOW"
+  binding:
+    | "LOCAL_MESSAGE_WORKFLOW"
+    | "REMOTE_MESSAGE_WORKFLOW"
+    | "REACTION_WORKFLOW"
+    | "LIFECYCLE_WORKFLOW"
 ) {
   return vi
     .spyOn(env[binding], "create")
@@ -111,7 +115,7 @@ describe("url_verification", () => {
 
 describe("message events", () => {
   it("triggers the Message Workflow for an app_mention, keyed by event_id", async () => {
-    const create = spyWorkflow("MESSAGE_WORKFLOW");
+    const create = spyWorkflow("REMOTE_MESSAGE_WORKFLOW");
     const body = JSON.stringify({
       type: "event_callback",
       event_id: "EvMention",
@@ -139,7 +143,7 @@ describe("message events", () => {
   });
 
   it("triggers the Message Workflow for a direct message", async () => {
-    const create = spyWorkflow("MESSAGE_WORKFLOW");
+    const create = spyWorkflow("LOCAL_MESSAGE_WORKFLOW");
     const body = JSON.stringify({
       type: "event_callback",
       event_id: "EvDm",
@@ -161,7 +165,7 @@ describe("message events", () => {
   });
 
   it("ignores a bot's own DM (no workflow triggered)", async () => {
-    const create = spyWorkflow("MESSAGE_WORKFLOW");
+    const create = spyWorkflow("LOCAL_MESSAGE_WORKFLOW");
     const body = JSON.stringify({
       type: "event_callback",
       event_id: "EvBot",
@@ -252,7 +256,7 @@ describe("reaction workflow", () => {
   });
 
   it("still acks 200 when adding the reaction fails (best-effort)", async () => {
-    const messageCreate = spyWorkflow("MESSAGE_WORKFLOW");
+    const messageCreate = spyWorkflow("REMOTE_MESSAGE_WORKFLOW");
     captureAddReactions(() => ({ ok: false, error: "missing_scope" }));
     const body = JSON.stringify({
       type: "event_callback",
@@ -273,7 +277,7 @@ describe("reaction workflow", () => {
   });
 
   it("still acks 200 when starting the removal workflow fails (best-effort)", async () => {
-    const messageCreate = spyWorkflow("MESSAGE_WORKFLOW");
+    const messageCreate = spyWorkflow("REMOTE_MESSAGE_WORKFLOW");
     const reactionCreate = vi
       .spyOn(env.REACTION_WORKFLOW, "create")
       .mockImplementation(() => {
@@ -370,7 +374,7 @@ describe("lifecycle events", () => {
   });
 
   it("routes message_changed edits to the Message Workflow", async () => {
-    const create = spyWorkflow("MESSAGE_WORKFLOW");
+    const create = spyWorkflow("REMOTE_MESSAGE_WORKFLOW");
     const body = JSON.stringify({
       type: "event_callback",
       event_id: "EvEdit",
@@ -393,7 +397,7 @@ describe("lifecycle events", () => {
   });
 
   it("extracts userId from message.edited.user when message.user is absent (channel message_changed)", async () => {
-    const create = spyWorkflow("MESSAGE_WORKFLOW");
+    const create = spyWorkflow("REMOTE_MESSAGE_WORKFLOW");
     const body = JSON.stringify({
       type: "event_callback",
       event_id: "EvEditedUser",
@@ -423,7 +427,7 @@ describe("lifecycle events", () => {
   });
 
   it("ignores a channel message_deleted when no user id is available", async () => {
-    const create = spyWorkflow("MESSAGE_WORKFLOW");
+    const create = spyWorkflow("REMOTE_MESSAGE_WORKFLOW");
     const body = JSON.stringify({
       type: "event_callback",
       event_id: "EvDelNoUser",
@@ -443,7 +447,7 @@ describe("lifecycle events", () => {
   });
 
   it("ignores a DM message_changed when no user id is available", async () => {
-    const create = spyWorkflow("MESSAGE_WORKFLOW");
+    const create = spyWorkflow("LOCAL_MESSAGE_WORKFLOW");
     const body = JSON.stringify({
       type: "event_callback",
       event_id: "EvDmEditNoUser",
@@ -463,7 +467,7 @@ describe("lifecycle events", () => {
   });
 
   it("ignores a DM message_deleted when no user id is available", async () => {
-    const create = spyWorkflow("MESSAGE_WORKFLOW");
+    const create = spyWorkflow("LOCAL_MESSAGE_WORKFLOW");
     const body = JSON.stringify({
       type: "event_callback",
       event_id: "EvDmDelNoUser",
@@ -483,7 +487,7 @@ describe("lifecycle events", () => {
   });
 
   it("routes a DM message_deleted to the Message Workflow when user id is present", async () => {
-    const create = spyWorkflow("MESSAGE_WORKFLOW");
+    const create = spyWorkflow("LOCAL_MESSAGE_WORKFLOW");
     const body = JSON.stringify({
       type: "event_callback",
       event_id: "EvDmDel",
@@ -514,7 +518,7 @@ describe("lifecycle events", () => {
       "INSERT OR IGNORE INTO agent_channels (channel_id, agent_name) VALUES ('C1', 'del-agent')"
     ).run();
 
-    const create = spyWorkflow("MESSAGE_WORKFLOW");
+    const create = spyWorkflow("REMOTE_MESSAGE_WORKFLOW");
     const body = JSON.stringify({
       type: "event_callback",
       event_id: "EvChDel",
@@ -556,7 +560,7 @@ describe("lifecycle events", () => {
       "INSERT OR IGNORE INTO agent_channels (channel_id, agent_name) VALUES ('C_QUIET', 'quiet-agent')"
     ).run();
 
-    const create = spyWorkflow("MESSAGE_WORKFLOW");
+    const create = spyWorkflow("REMOTE_MESSAGE_WORKFLOW");
     const body = JSON.stringify({
       type: "event_callback",
       event_id: "EvChDelNoMention",
@@ -585,7 +589,7 @@ describe("lifecycle events", () => {
 
 describe("ignored events", () => {
   it("routes a bare channel message to the Message Workflow", async () => {
-    const message = spyWorkflow("MESSAGE_WORKFLOW");
+    const message = spyWorkflow("REMOTE_MESSAGE_WORKFLOW");
     const lifecycle = spyWorkflow("LIFECYCLE_WORKFLOW");
     const body = JSON.stringify({
       type: "event_callback",
@@ -621,7 +625,7 @@ describe("ignored events", () => {
 
 describe("error handling", () => {
   it("acks 200 when the workflow instance already exists (Slack retry)", async () => {
-    vi.spyOn(env.MESSAGE_WORKFLOW, "create").mockRejectedValue(
+    vi.spyOn(env.REMOTE_MESSAGE_WORKFLOW, "create").mockRejectedValue(
       new Error("instance with id EvMention already exists")
     );
     const body = JSON.stringify({
@@ -640,7 +644,7 @@ describe("error handling", () => {
   });
 
   it("still returns 200 on an unexpected Workflow failure (error is logged, Slack does not retry)", async () => {
-    vi.spyOn(env.MESSAGE_WORKFLOW, "create").mockRejectedValue(
+    vi.spyOn(env.REMOTE_MESSAGE_WORKFLOW, "create").mockRejectedValue(
       new Error("transient network error")
     );
     const body = JSON.stringify({

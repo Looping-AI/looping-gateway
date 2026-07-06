@@ -331,8 +331,8 @@ async function addPendingReaction(
 /**
  * Kick off the parallel ReactionWorkflow that removes the ⏳ reaction once a
  * reply is posted (or on its timeout backstop). Best-effort and cosmetic: any
- * failure here is logged but never affects the Slack ack — the MessageWorkflow
- * remains authoritative. Duplicate Slack deliveries are deduped by the
+ * failure here is logged but never affects the Slack ack — the message
+ * workflows remain authoritative. Duplicate Slack deliveries are deduped by the
  * deterministic instance id.
  */
 async function triggerReactionWorkflow(
@@ -508,10 +508,33 @@ export async function handleSlackEvent(
             });
             return;
           }
+          // Local (admin/onboarding) and remote (custom) agents are registered
+          // on separate channel types, so these arrays are mutually exclusive
+          // in practice. Each workflow runs independently and owns its own
+          // collect-reaction signal for the events it handles.
+          const localTargets = targets.filter((t) => t.agent.kind !== "custom");
+          const remoteTargets = targets.filter(
+            (t) => t.agent.kind === "custom"
+          );
           await Promise.allSettled([
             addPendingReaction(base),
             triggerReactionWorkflow(env.REACTION_WORKFLOW, base),
-            triggerWorkflow(env.MESSAGE_WORKFLOW, { ...base, targets })
+            ...(localTargets.length > 0
+              ? [
+                  triggerWorkflow(env.LOCAL_MESSAGE_WORKFLOW, {
+                    ...base,
+                    targets: localTargets
+                  })
+                ]
+              : []),
+            ...(remoteTargets.length > 0
+              ? [
+                  triggerWorkflow(env.REMOTE_MESSAGE_WORKFLOW, {
+                    ...base,
+                    targets: remoteTargets
+                  })
+                ]
+              : [])
           ]);
         })()
       );

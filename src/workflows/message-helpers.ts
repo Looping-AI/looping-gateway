@@ -1,5 +1,4 @@
-import { WorkflowEntrypoint } from "cloudflare:workers";
-import type { WorkflowEvent, WorkflowStep } from "cloudflare:workers";
+import type { WorkflowStep } from "cloudflare:workers";
 import { env } from "cloudflare:workers";
 import type { MessageWorkflowParams } from "@/slack/types";
 import { buildUserAuthContext } from "@/auth";
@@ -11,7 +10,6 @@ import {
 } from "@/agents/dispatch";
 import { InvalidEndpointError } from "@/a2a/endpoint";
 import { postReply } from "@/wrappers/slack";
-import { createAgentTask } from "@/db/models/agent-tasks";
 import {
   REACTION_COLLECT_EVENT,
   reactionInstanceId
@@ -43,7 +41,8 @@ export interface AgentPlan {
 }
 
 // ---------------------------------------------------------------------------
-// Pure steps — called directly by MessageWorkflow.run() and exported for tests.
+// Pure steps — called by LocalMessageWorkflow / RemoteMessageWorkflow and
+// exported for tests.
 // ---------------------------------------------------------------------------
 
 /**
@@ -122,7 +121,11 @@ export async function dispatchMessage(
   } else if (plan.agent.kind === "onboarding") {
     metadata = { agentKind: "onboarding" };
   } else {
-    metadata = { agentKind: "custom", workspaceId: plan.workspaceId };
+    const { workspaceId } = plan;
+    if (workspaceId == null) {
+      throw new Error("BUG: custom agent resolved without a workspaceId");
+    }
+    metadata = { agentKind: "custom", workspaceId };
   }
 
   try {
@@ -172,146 +175,46 @@ export async function signalReactionCollect(eventId: string): Promise<void> {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Workflow — durable orchestration over the steps above.
-// ---------------------------------------------------------------------------
+/**
+ * Result of running one agent's dispatch + reply within the fan-out. The task
+ * catches every *expected* failure and reports it here (rather than rejecting)
+ * so the workflow can react precisely instead of collapsing everything into a
+ * single "dispatch failed" notice.
+ *
+ * - `accepted`      — a remote agent took the turn and will push its reply later;
+ *                     the ⏳ must linger until its callback (or backstop) clears it.
+ * - `done`          — handled fully now (sync reply posted, silence, or a policy
+ *                     error notice posted); nothing is still working.
+ * - `unreachable`   — the `dispatch` step itself exhausted retries; the user
+ *                     should see AGENT_UNREACHABLE_TEXT.
+ * - `internal_error`— the agent responded but a later step (usually the Slack
+ *                     post) exhausted retries; distinct from unreachable.
+ */
+export type TaskOutcome =
+  | { kind: "accepted" }
+  | { kind: "done" }
+  | { kind: "unreachable" }
+  | { kind: "internal_error"; error: string };
 
 /**
- * Durable, retriable handler for a Slack message. One instance per Slack
- * `event_id`. The Gateway no longer picks a single agent — the woken agents are
- * resolved up front in the webhook handler and passed in on `params.targets`
- * (proactive `channel_messages` + any named `mention` agents); each agent
- * classifies internally and may stay silent.
- *
- * Steps: `resolve` (build auth + plans from targets) → one `dispatch:{name}` per
- * agent (A2A) → one `reply:{name}` per non-empty reply (chat.postMessage). Agents
- * run in parallel; allSettled isolates per-agent failures so one agent's
- * exhausted retries never blocks the others or aborts the run, and silence
- * (empty reply) posts nothing.
+ * Post the "agent unreachable" notice and dispatch-failed error handling shared
+ * by both local and remote workflows when a task returns `{ kind: "unreachable" }`.
  */
-export class MessageWorkflow extends WorkflowEntrypoint<
-  Env,
-  MessageWorkflowParams
-> {
-  async run(event: WorkflowEvent<MessageWorkflowParams>, step: WorkflowStep) {
-    const p = event.payload;
-    const threadTs = replyThreadTs(p);
-
-    // Wrap the whole run so a failing step surfaces with detail. Without this,
-    // a step whose retries are exhausted bubbles up as Cloudflare's opaque
-    // "workflow" exception log (just the workflow name, no cause). The agent
-    // dispatch (A2A) and the Slack post (chat.postMessage) throw on transient
-    // errors that are otherwise invisible. We log the real cause, then rethrow
-    // to preserve retry/backoff.
-    try {
-      const plans = await step.do("resolve", () => resolveMessage(p));
-
-      // Fan out to every agent in parallel; allSettled isolates failures so one
-      // agent's exhausted retries never blocks the others or aborts the run. Each
-      // task resolves to `true` when it left a remote agent working asynchronously
-      // (an accepted push-notification task), so we know whether the ⏳ must linger.
-      const results = await Promise.allSettled(
-        plans.map(async (plan) => {
-          const result = await step.do(`dispatch:${plan.agent.name}`, () =>
-            dispatchMessage(p, plan)
-          );
-
-          if (result.kind === "accepted") {
-            // Remote agent accepted the turn; the real reply arrives later via
-            // /a2a/notifications. Persist the correlation so the callback knows
-            // where to post and which ⏳ to clear.
-            await step.do(`record-task:${plan.agent.name}`, () =>
-              createAgentTask({
-                token: result.token,
-                taskId: result.taskId,
-                agentName: plan.agent.name,
-                channelId: p.channelId,
-                replyThreadTs: threadTs,
-                eventId: p.eventId
-              })
-            );
-            return true;
-          }
-
-          if (result.kind === "error_reply") {
-            // Gateway error notice (policy rejection, etc.) — use app branding,
-            // not the agent's, since this is the gateway speaking, not the agent.
-            if (result.text.trim()) {
-              await step.do(`error-reply:${plan.agent.name}`, () =>
-                postReply(p.channelId, threadTs, result.text, null, null)
-              );
-            }
-            return false;
-          }
-
-          // Synchronous local reply (empty = silence, posts nothing).
-          if (result.text.trim()) {
-            await step.do(`reply:${plan.agent.name}`, () =>
-              postReply(
-                p.channelId,
-                threadTs,
-                result.text,
-                plan.displayName,
-                plan.iconUrl
-              )
-            );
-          }
-          return false;
-        })
-      );
-
-      let anyAccepted = false;
-      for (const [i, r] of results.entries()) {
-        if (r.status === "rejected") {
-          const plan = plans[i];
-          console.error("[message] agent dispatch failed", {
-            agent: plan.agent.name,
-            error:
-              r.reason instanceof Error ? r.reason.message : String(r.reason)
-          });
-          // Retries are exhausted (not transient anymore) — tell the user the
-          // agent couldn't be reached instead of silently clearing the ⏳ below.
-          // Best-effort: a failed post here must not abort the run or block the
-          // collect-reaction step, so isolate it (the cause is already logged).
-          try {
-            await step.do(`dispatch-failed:${plan.agent.name}`, () =>
-              postReply(
-                p.channelId,
-                threadTs,
-                AGENT_UNREACHABLE_TEXT,
-                null,
-                null
-              )
-            );
-          } catch (postErr) {
-            console.error("[message] failed to post unreachable notice", {
-              agent: plan.agent.name,
-              error:
-                postErr instanceof Error ? postErr.message : String(postErr)
-            });
-          }
-        } else if (r.value === true) {
-          anyAccepted = true;
-        }
-      }
-
-      // Clear the ⏳ now only when no agent is still working. A pending remote
-      // task keeps it until its push-notification callback collects it (or the
-      // ReactionWorkflow backstop times out) — so the hourglass reflects reality.
-      if (!anyAccepted) {
-        await step.do("collect-reaction", () =>
-          signalReactionCollect(p.eventId)
-        );
-      }
-    } catch (err) {
-      console.error("[message] workflow run failed", {
-        instanceId: event.instanceId,
-        eventId: p.eventId,
-        channelId: p.channelId,
-        error: err instanceof Error ? err.message : String(err),
-        stack: err instanceof Error ? err.stack : undefined
-      });
-      throw err;
-    }
+export async function handleUnreachable(
+  step: WorkflowStep,
+  p: MessageWorkflowParams,
+  threadTs: string | null,
+  agentName: string
+): Promise<void> {
+  console.error("[message] agent dispatch failed", { agent: agentName });
+  try {
+    await step.do(`dispatch-failed:${agentName}`, () =>
+      postReply(p.channelId, threadTs, AGENT_UNREACHABLE_TEXT, null, null)
+    );
+  } catch (postErr) {
+    console.error("[message] failed to post unreachable notice", {
+      agent: agentName,
+      error: postErr instanceof Error ? postErr.message : String(postErr)
+    });
   }
 }

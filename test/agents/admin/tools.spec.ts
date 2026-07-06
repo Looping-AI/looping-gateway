@@ -12,7 +12,11 @@ import {
   buildAdminTools,
   type AdminToolDeps
 } from "@/agents/admin/tools";
-import { ORG_WORKSPACE_ID, createWorkspace } from "@/db/models/workspaces";
+import {
+  ORG_WORKSPACE_ID,
+  createWorkspace,
+  setWorkspaceAdminChannel
+} from "@/db/models/workspaces";
 import { getAgent } from "@/db/models/agents";
 import {
   setPublicUrl,
@@ -194,6 +198,43 @@ describe("admin tools — agents_write / agents_read", () => {
         operation: "remove_channel",
         name: "admin",
         channelId: "C_X"
+      })
+    ).toHaveProperty("error");
+  });
+
+  it("rejects add_channel for DM (onboarding) channels", async () => {
+    const wsId = await freshWsId("tools-ws-dm-guard");
+    const d = deps(wsId, ctx({ adminWorkspaces: [wsId] }));
+    await agentsWrite(d, {
+      operation: "register",
+      name: "dm-guard-agent",
+      a2aEndpoint: "https://example.com/dm-guard-agent",
+      notifyOn: "mention"
+    });
+    expect(
+      await agentsWrite(d, {
+        operation: "add_channel",
+        name: "dm-guard-agent",
+        channelId: "DABC123"
+      })
+    ).toHaveProperty("error");
+  });
+
+  it("rejects add_channel for admin channels", async () => {
+    const wsId = await freshWsId("tools-ws-admin-guard");
+    const d = deps(wsId, ctx({ adminWorkspaces: [wsId] }));
+    await agentsWrite(d, {
+      operation: "register",
+      name: "admin-guard-agent",
+      a2aEndpoint: "https://example.com/admin-guard-agent",
+      notifyOn: "mention"
+    });
+    await setWorkspaceAdminChannel(wsId, "C_ADMIN_CH");
+    expect(
+      await agentsWrite(d, {
+        operation: "add_channel",
+        name: "admin-guard-agent",
+        channelId: "C_ADMIN_CH"
       })
     ).toHaveProperty("error");
   });

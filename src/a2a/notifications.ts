@@ -17,7 +17,7 @@ import {
 import { extractText } from "@/a2a/parts";
 import { sanitizeRemoteReply } from "@/a2a/client";
 import { postReply } from "@/wrappers/slack";
-import { signalReactionCollect } from "@/workflows/message";
+import { signalReactionCollect } from "@/workflows/message-helpers";
 
 /** Header carrying the per-task validation token the gateway set in pushNotificationConfig. */
 export const NOTIFICATION_TOKEN_HEADER = "x-a2a-notification-token";

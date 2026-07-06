@@ -56,9 +56,14 @@
   },
   "workflows": [
     {
-      "name": "message-workflow",
-      "binding": "MESSAGE_WORKFLOW",
-      "class_name": "MessageWorkflow"
+      "name": "message-local-workflow",
+      "binding": "LOCAL_MESSAGE_WORKFLOW",
+      "class_name": "LocalMessageWorkflow"
+    },
+    {
+      "name": "message-remote-workflow",
+      "binding": "REMOTE_MESSAGE_WORKFLOW",
+      "class_name": "RemoteMessageWorkflow"
     },
     {
       "name": "lifecycle-workflow",

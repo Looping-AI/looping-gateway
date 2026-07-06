@@ -1,15 +1,16 @@
 import { afterEach, beforeEach, describe, it, expect, vi } from "vitest";
 import { introspectWorkflow } from "cloudflare:test";
 import { env } from "cloudflare:workers";
-import { getDb } from "@/db/client";
 import { setWorkspaceAdminChannel } from "@/db/models/workspaces";
 import { handleSlackEvent } from "@/slack-webhook-handler";
-import { PENDING_REACTION } from "@/workflows/reaction";
-import { AGENT_UNREACHABLE_TEXT } from "@/workflows/message";
+import { AGENT_UNREACHABLE_TEXT } from "@/workflows/message-helpers";
 import { stubSlack } from "../wrappers/slack-stub";
 import { slackHeaders } from "../helpers/slack";
 
-const db = getDb();
+// Tests covering LocalMessageWorkflow execution paths (message-local.ts):
+//   resolve → dispatch → reply     (admin channel, DM)
+//   unreachable notice              (dispatch retries exhausted)
+//   internal_error path             (Slack post retries exhausted)
 
 beforeEach(async () => {
   await setWorkspaceAdminChannel(0, "C_ORGADMIN");
@@ -40,7 +41,7 @@ function captureSlack(): PostCall[] {
 
 let seq = 0;
 function makeAppMentionRequest(channelId: string, text: string) {
-  const eventId = `Ev-wf-${++seq}`;
+  const eventId = `Ev-local-${++seq}`;
   const body = JSON.stringify({
     type: "event_callback",
     event_id: eventId,
@@ -58,7 +59,7 @@ function makeAppMentionRequest(channelId: string, text: string) {
 }
 
 function makeDmRequest(channelId: string, text: string) {
-  const eventId = `Ev-wf-${++seq}`;
+  const eventId = `Ev-local-${++seq}`;
   const body = JSON.stringify({
     type: "event_callback",
     event_id: eventId,
@@ -96,10 +97,10 @@ async function trigger(body: string) {
   return res;
 }
 
-describe("MessageWorkflow (introspectWorkflow)", () => {
+describe("LocalMessageWorkflow", () => {
   it("admin-channel mention: resolve → dispatch → reply steps complete, channel-level reply posted", async () => {
     const calls = captureSlack();
-    const introspector = await introspectWorkflow(env.MESSAGE_WORKFLOW);
+    const introspector = await introspectWorkflow(env.LOCAL_MESSAGE_WORKFLOW);
     try {
       const { body } = makeAppMentionRequest("C_ORGADMIN", "<@UBOT> hello");
       const res = await trigger(body);
@@ -124,7 +125,7 @@ describe("MessageWorkflow (introspectWorkflow)", () => {
 
   it("DM: resolve → dispatch → reply steps complete, channel-level reply posted", async () => {
     const calls = captureSlack();
-    const introspector = await introspectWorkflow(env.MESSAGE_WORKFLOW);
+    const introspector = await introspectWorkflow(env.LOCAL_MESSAGE_WORKFLOW);
     try {
       const { body } = makeDmRequest("D1", "hey there");
       const res = await trigger(body);
@@ -150,7 +151,7 @@ describe("MessageWorkflow (introspectWorkflow)", () => {
 
   it("posts an unreachable notice when a dispatch's retries are exhausted", async () => {
     const calls = captureSlack();
-    const introspector = await introspectWorkflow(env.MESSAGE_WORKFLOW);
+    const introspector = await introspectWorkflow(env.LOCAL_MESSAGE_WORKFLOW);
     try {
       // Force the admin dispatch to fail on every attempt (a persistent failure,
       // e.g. connection refused), with retry backoff disabled so we don't wait.
@@ -181,95 +182,31 @@ describe("MessageWorkflow (introspectWorkflow)", () => {
     }
   });
 
-  it("no-match channel: no agent woken, no workflow created, nothing posted", async () => {
+  it("a failed reply post is NOT reported as unreachable", async () => {
     const calls = captureSlack();
-    const introspector = await introspectWorkflow(env.MESSAGE_WORKFLOW);
+    const introspector = await introspectWorkflow(env.LOCAL_MESSAGE_WORKFLOW);
     try {
-      const { body } = makeAppMentionRequest(
-        "C_UNCONFIGURED",
-        "<@UBOT> anyone?"
-      );
-      const res = await trigger(body);
-      expect(res.status).toBe(200);
-
-      // Gate skips the workflow entirely when no agent resolves — no flicker.
-      expect(await introspector.get()).toHaveLength(0);
-      expect(calls).toHaveLength(0);
-    } finally {
-      await introspector.dispose();
-    }
-  });
-});
-
-interface ReactionCall {
-  method: string;
-  channel: string;
-  timestamp: string;
-  name: string;
-}
-
-/** Capture replies and reaction calls together; all Slack calls resolve ok. */
-function captureSlackWithReactions(): {
-  post: PostCall[];
-  reactions: ReactionCall[];
-} {
-  const post: PostCall[] = [];
-  const reactions: ReactionCall[] = [];
-  stubSlack((method, body) => {
-    if (method === "chat.postMessage") {
-      post.push({
-        channel: body.get("channel") ?? "",
-        thread_ts: body.get("thread_ts") ?? undefined,
-        text: body.get("text") ?? ""
+      // The agent replies fine, but posting it to Slack exhausts retries. This is
+      // an internal-error, not a dispatch failure — the user must not be told the
+      // agent "couldn't be reached" (and the run must still complete cleanly).
+      await introspector.modifyAll(async (m) => {
+        await m.disableRetryDelays([{ name: "reply:admin" }]);
+        await m.mockStepError({ name: "reply:admin" }, new Error("slack 503"));
       });
-    } else if (method === "reactions.add" || method === "reactions.remove") {
-      reactions.push({
-        method,
-        channel: body.get("channel") ?? "",
-        timestamp: body.get("timestamp") ?? "",
-        name: body.get("name") ?? ""
-      });
-    }
-    return { ok: true, ts: "1700.2" };
-  });
-  return { post, reactions };
-}
 
-describe("parallel ReactionWorkflow (via webhook handler)", () => {
-  it("adds ⏳ on the trigger message and collects it after the reply is posted", async () => {
-    const { reactions } = captureSlackWithReactions();
-    const msgIntrospector = await introspectWorkflow(env.MESSAGE_WORKFLOW);
-    const reactionIntrospector = await introspectWorkflow(
-      env.REACTION_WORKFLOW
-    );
-    try {
       const { body } = makeAppMentionRequest("C_ORGADMIN", "<@UBOT> hello");
       const res = await trigger(body);
       expect(res.status).toBe(200);
 
-      // The handler adds the ⏳ reaction inline and creates the removal workflow
-      // in parallel with the message one.
-      const [reaction] = await reactionIntrospector.get();
-      expect(reaction).toBeDefined();
+      const [instance] = await introspector.get();
+      await instance.waitForStatus("complete");
 
-      // The MessageWorkflow's collect-reaction step sends the real `reply_posted`
-      // event, which resolves the reaction workflow's wait and triggers removal.
-      const [msg] = await msgIntrospector.get();
-      await msg.waitForStatus("complete");
-      await reaction.waitForStatus("complete");
-
-      expect(reactions.map((r) => r.method)).toEqual([
-        "reactions.add",
-        "reactions.remove"
-      ]);
-      expect(reactions[0]).toMatchObject({
-        channel: "C_ORGADMIN",
-        timestamp: "1700.1",
-        name: PENDING_REACTION
-      });
+      // No unreachable notice, and nothing else posted (the only post — the reply —
+      // is the step we forced to fail).
+      expect(calls.map((c) => c.text)).not.toContain(AGENT_UNREACHABLE_TEXT);
+      expect(calls).toHaveLength(0);
     } finally {
-      await reactionIntrospector.dispose();
-      await msgIntrospector.dispose();
+      await introspector.dispose();
     }
   });
 });

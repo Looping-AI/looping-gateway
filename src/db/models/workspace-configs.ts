@@ -66,28 +66,6 @@ export type SystemConfigKey =
 // ---------------------------------------------------------------------------
 
 /**
- * Read a config value for a workspace+key pair.
- * Returns `null` when the row does not exist (absence = unset).
- */
-export async function getConfig(
-  workspaceId: number,
-  key: string
-): Promise<string | null> {
-  const db = getDb();
-  const rows = await db
-    .select({ value: schema.workspaceConfigs.value })
-    .from(schema.workspaceConfigs)
-    .where(
-      and(
-        eq(schema.workspaceConfigs.workspaceId, workspaceId),
-        eq(schema.workspaceConfigs.key, key)
-      )
-    )
-    .limit(1);
-  return rows[0]?.value ?? null;
-}
-
-/**
  * Upsert a config value for a workspace+key pair.
  * Calling this on a system key from outside internal code is intentional only
  * for deliberate operator overrides (e.g. resetting the team anchor after an
@@ -109,6 +87,28 @@ export async function setConfig(
       ],
       set: { value, updatedAt: sql`(unixepoch())` }
     });
+}
+
+/**
+ * Read a config value for a workspace+key pair.
+ * Returns `null` when the row does not exist (absence = unset).
+ */
+export async function getConfig(
+  workspaceId: number,
+  key: string
+): Promise<string | null> {
+  const db = getDb();
+  const rows = await db
+    .select({ value: schema.workspaceConfigs.value })
+    .from(schema.workspaceConfigs)
+    .where(
+      and(
+        eq(schema.workspaceConfigs.workspaceId, workspaceId),
+        eq(schema.workspaceConfigs.key, key)
+      )
+    )
+    .limit(1);
+  return rows[0]?.value ?? null;
 }
 
 /**

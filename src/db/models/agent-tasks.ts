@@ -71,6 +71,28 @@ export async function getPendingAgentTasksByEventId(
 }
 
 /**
+ * Fill in the remote-assigned A2A Task id once the accept response is known.
+ * The row is written before dispatch (with `taskId` null) to close the
+ * accept→record race, so this best-effort update backfills the id afterwards.
+ * Conditional on `pending` so a task the callback already completed is untouched.
+ */
+export async function updateAgentTaskTaskId(
+  token: string,
+  taskId: string
+): Promise<void> {
+  const db = getDb();
+  await db
+    .update(schema.agentTasks)
+    .set({ taskId })
+    .where(
+      and(
+        eq(schema.agentTasks.token, token),
+        eq(schema.agentTasks.status, "pending")
+      )
+    );
+}
+
+/**
  * Record why a callback was rejected, so the reaction backstop can surface the
  * reason instead of silence. Conditional on `pending` so a completed task is
  * never reopened. `message` must be a gateway-controlled string — never remote
@@ -110,6 +132,17 @@ export async function completeAgentTask(token: string): Promise<boolean> {
     )
     .returning({ token: schema.agentTasks.token });
   return rows.length > 0;
+}
+
+/**
+ * Delete a task row by its token PK. Used to clean up a row written *before*
+ * dispatch when the dispatch does not end in `accepted` (policy rejection or
+ * exhausted retries) — no remote callback will ever arrive for it, so it must
+ * not linger as a stale `pending` row for the reaction backstop to scan.
+ */
+export async function deleteAgentTask(token: string): Promise<void> {
+  const db = getDb();
+  await db.delete(schema.agentTasks).where(eq(schema.agentTasks.token, token));
 }
 
 /**

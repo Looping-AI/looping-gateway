@@ -39,6 +39,45 @@ export interface AgentChannelEntry {
   workspaceId: number | null;
 }
 
+/** Insert a new agent row. Caller is responsible for uniqueness checks. */
+export async function registerAgent(
+  input: RegisterAgentInput
+): Promise<AgentRow> {
+  const db = getDb();
+  const rows = await db
+    .insert(schema.agents)
+    .values({
+      name: input.name.trim().toLowerCase(),
+      kind: input.kind,
+      displayName: input.displayName?.trim() || null,
+      iconUrl: input.iconUrl?.trim() || null,
+      a2aEndpoint: input.a2aEndpoint,
+      notifyOn: input.notifyOn,
+      workspaceId: input.workspaceId,
+      cardSigningJku: input.cardSigningJku ?? null,
+      cardSigningKid: input.cardSigningKid ?? null
+    })
+    .returning();
+  return rows[0];
+}
+
+/** Attach an agent to a channel (idempotent). */
+export async function attachAgentChannel(input: {
+  agentName: string;
+  channelId: string;
+  workspaceId: number | null;
+}): Promise<void> {
+  const db = getDb();
+  await db
+    .insert(schema.agentChannels)
+    .values({
+      agentName: input.agentName,
+      channelId: input.channelId,
+      workspaceId: input.workspaceId
+    })
+    .onConflictDoNothing();
+}
+
 export async function getAgent(name: string): Promise<AgentRow | null> {
   const db = getDb();
   const rows = await db
@@ -141,28 +180,6 @@ export async function listChannelsForAgents(
     .where(inArray(schema.agentChannels.agentName, agentNames));
 }
 
-/** Insert a new agent row. Caller is responsible for uniqueness checks. */
-export async function registerAgent(
-  input: RegisterAgentInput
-): Promise<AgentRow> {
-  const db = getDb();
-  const rows = await db
-    .insert(schema.agents)
-    .values({
-      name: input.name.trim().toLowerCase(),
-      kind: input.kind,
-      displayName: input.displayName?.trim() || null,
-      iconUrl: input.iconUrl?.trim() || null,
-      a2aEndpoint: input.a2aEndpoint,
-      notifyOn: input.notifyOn,
-      workspaceId: input.workspaceId,
-      cardSigningJku: input.cardSigningJku ?? null,
-      cardSigningKid: input.cardSigningKid ?? null
-    })
-    .returning();
-  return rows[0];
-}
-
 /** Update mutable fields of an agent. Only provided patch fields are written. */
 export async function updateAgent(
   name: string,
@@ -206,23 +223,6 @@ export async function unregisterAgent(name: string): Promise<void> {
     .delete(schema.agentChannels)
     .where(eq(schema.agentChannels.agentName, name));
   await db.delete(schema.agents).where(eq(schema.agents.name, name));
-}
-
-/** Attach an agent to a channel (idempotent). */
-export async function attachAgentChannel(input: {
-  agentName: string;
-  channelId: string;
-  workspaceId: number | null;
-}): Promise<void> {
-  const db = getDb();
-  await db
-    .insert(schema.agentChannels)
-    .values({
-      agentName: input.agentName,
-      channelId: input.channelId,
-      workspaceId: input.workspaceId
-    })
-    .onConflictDoNothing();
 }
 
 /** Detach an agent from a channel. */

@@ -29,7 +29,7 @@ export interface DispatchAgentRef {
 export type DispatchMetadata =
   | { agentKind: "admin"; adminWorkspaceId: number }
   | { agentKind: "onboarding" }
-  | { agentKind: "custom"; workspaceId: number | null };
+  | { agentKind: "custom"; workspaceId: number };
 
 /**
  * What rides on the A2A `message.metadata` and what the executor reads back.

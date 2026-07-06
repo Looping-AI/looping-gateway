@@ -41,6 +41,14 @@ https://developers.cloudflare.com/workers/runtime-apis/nodejs/
 Retrieve API references and limits from:
 `/kv/` · `/r2/` · `/d1/` · `/durable-objects/` · `/queues/` · `/vectorize/` · `/workers-ai/` · `/agents/`
 
+## Code Conventions
+
+### `src/db/models/`
+
+Order exported functions in CRUD sequence: **Create → Read → Update → Delete**.
+Upserts count as Create. Helpers that delegate to a core CRUD function follow their
+own thematic grouping but the core operations must appear in CRUD order first.
+
 ## Best Practices (conditional)
 
 If the application uses Durable Objects or Workflows, refer to the relevant best practices:
