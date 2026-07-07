@@ -21,9 +21,24 @@ import {
 export const AGENT_UNREACHABLE_BASE_TEXT =
   "This agent couldn't be reached after several attempts. It may be down or misconfigured, please contact the agent developer.";
 
-export function agentUnreachableText(agentName?: string): string {
-  if (!agentName) return AGENT_UNREACHABLE_BASE_TEXT;
-  return `${AGENT_UNREACHABLE_BASE_TEXT} (Agent: *${agentName}*.)`;
+function unreachableErrorText(error?: string): string {
+  const normalized = error?.replace(/\s+/g, " ").trim();
+  if (!normalized) return "";
+  const maxLen = 240;
+  return normalized.length <= maxLen
+    ? normalized
+    : `${normalized.slice(0, maxLen - 3)}...`;
+}
+
+export function agentUnreachableText(
+  agentName?: string,
+  error?: string
+): string {
+  const base = agentName
+    ? `${AGENT_UNREACHABLE_BASE_TEXT} (Agent: *${agentName}*.)`
+    : AGENT_UNREACHABLE_BASE_TEXT;
+  const reason = unreachableErrorText(error);
+  return reason ? `${base} Last error: ${reason}` : base;
 }
 
 // One agent's resolved dispatch target (must be Rpc.Serializable).
@@ -198,7 +213,7 @@ export async function signalReactionCollect(eventId: string): Promise<void> {
 export type TaskOutcome =
   | { kind: "accepted" }
   | { kind: "done" }
-  | { kind: "unreachable" }
+  | { kind: "unreachable"; error?: string }
   | { kind: "internal_error"; error: string };
 
 /**
@@ -209,15 +224,19 @@ export async function handleUnreachable(
   step: WorkflowStep,
   p: MessageWorkflowParams,
   threadTs: string | null,
-  agentName: string
+  agentName: string,
+  error?: string
 ): Promise<void> {
-  console.error("[message] agent dispatch failed", { agent: agentName });
+  console.error("[message] agent dispatch failed", {
+    agent: agentName,
+    error
+  });
   try {
     await step.do(`dispatch-failed:${agentName}`, () =>
       postReply(
         p.channelId,
         threadTs,
-        agentUnreachableText(agentName),
+        agentUnreachableText(agentName, error),
         null,
         null
       )

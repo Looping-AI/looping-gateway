@@ -57,13 +57,16 @@ async function runRemoteAgentTask(
     result = await step.do(`dispatch:${plan.agent.name}`, () =>
       dispatchMessage(p, plan)
     );
-  } catch {
+  } catch (err) {
     // Dispatch retries exhausted — genuinely unreachable. Remove the pre-written
     // row since no push callback will ever arrive.
     await step.do(`unrecord-task:${plan.agent.name}`, () =>
       deleteAgentTask(token)
     );
-    return { kind: "unreachable" };
+    return {
+      kind: "unreachable",
+      error: err instanceof Error ? err.message : String(err)
+    };
   }
 
   if (result.kind === "accepted") {
@@ -166,7 +169,13 @@ export class RemoteMessageWorkflow extends WorkflowEntrypoint<
         if (outcome.kind === "accepted") {
           anyAccepted = true;
         } else if (outcome.kind === "unreachable") {
-          await handleUnreachable(step, p, threadTs, plan.agent.name);
+          await handleUnreachable(
+            step,
+            p,
+            threadTs,
+            plan.agent.name,
+            outcome.error
+          );
         } else if (outcome.kind === "internal_error") {
           console.error("[message-remote] agent reply step failed", {
             agent: plan.agent.name,

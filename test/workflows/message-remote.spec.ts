@@ -259,6 +259,7 @@ describe("RemoteMessageWorkflow", () => {
       expect(slackPosts[0].channel).toBe(REMOTE_CHANNEL);
       expect(slackPosts[0].text).toContain(AGENT_UNREACHABLE_BASE_TEXT);
       expect(slackPosts[0].text).toContain(AGENT_NAME);
+      expect(slackPosts[0].text).toContain("connection refused");
     } finally {
       await introspector.dispose();
     }
