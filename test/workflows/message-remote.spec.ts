@@ -178,8 +178,8 @@ beforeEach(async () => {
      VALUES ('${AGENT_NAME}', 'custom', 1, 'channel_messages', '${REMOTE_ENDPOINT}', 0)`
   ).run();
   await env.DB.prepare(
-    `INSERT OR IGNORE INTO agent_channels (channel_id, agent_name)
-     VALUES ('${REMOTE_CHANNEL}', '${AGENT_NAME}')`
+    `INSERT OR IGNORE INTO agent_channels (channel_id, agent_name, workspace_id)
+     VALUES ('${REMOTE_CHANNEL}', '${AGENT_NAME}', 0)`
   ).run();
   await setPublicUrl("https://gateway.test");
   await setAllowedRemoteAgentDomains(["remote.example.com"]);

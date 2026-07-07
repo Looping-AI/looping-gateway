@@ -202,7 +202,7 @@ describe("dispatchMessage", () => {
         a2aEndpoint: "https://notapproved.example.com/a2a",
         workspaceId: 1
       },
-      workspaceId: null,
+      workspaceId: 1,
       text: "hello",
       channelName: null,
       displayName: "Blocked Agent",
