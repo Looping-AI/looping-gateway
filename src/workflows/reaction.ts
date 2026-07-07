@@ -37,8 +37,8 @@ export function reactionInstanceId(eventId: string): string {
  * tense on purpose — it stays truthful even if the remote retries and succeeds
  * later (the row is never terminalized here).
  */
-function rejectedDeliveryText(reason: string): string {
-  return `An attempt to deliver this agent's reply was rejected: ${reason}. If you don't hear back, please contact the agent developer.`;
+function rejectedDeliveryText(agentName: string, reason: string): string {
+  return `An attempt to deliver *${agentName}*'s reply was rejected: ${reason}. If you don't hear back, please contact the agent developer.`;
 }
 
 /**
@@ -59,7 +59,7 @@ async function surfaceRejectedDeliveries(eventId: string): Promise<void> {
         await postReply(
           row.channelId,
           row.replyThreadTs,
-          rejectedDeliveryText(row.lastError),
+          rejectedDeliveryText(row.agentName, row.lastError),
           null,
           null
         );

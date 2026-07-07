@@ -21,6 +21,10 @@ import {
 export const AGENT_UNREACHABLE_TEXT =
   "This agent couldn't be reached after several attempts. It may be down or misconfigured, please contact the agent developer.";
 
+function agentUnreachableText(agentName: string): string {
+  return `${AGENT_UNREACHABLE_TEXT} (Agent: *${agentName}*.)`;
+}
+
 // One agent's resolved dispatch target (must be Rpc.Serializable).
 export interface AgentPlan {
   agent: DispatchAgentRef;
@@ -209,7 +213,13 @@ export async function handleUnreachable(
   console.error("[message] agent dispatch failed", { agent: agentName });
   try {
     await step.do(`dispatch-failed:${agentName}`, () =>
-      postReply(p.channelId, threadTs, AGENT_UNREACHABLE_TEXT, null, null)
+      postReply(
+        p.channelId,
+        threadTs,
+        agentUnreachableText(agentName),
+        null,
+        null
+      )
     );
   } catch (postErr) {
     console.error("[message] failed to post unreachable notice", {

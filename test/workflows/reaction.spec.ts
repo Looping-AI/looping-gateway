@@ -186,6 +186,7 @@ describe("ReactionWorkflow", () => {
       expect(posts).toHaveLength(1);
       expect(posts[0].channel).toBe("C1");
       expect(posts[0].text).toContain("rejected");
+      expect(posts[0].text).toContain(token);
       expect(posts[0].text).toContain("signature could not be verified");
       // ...and the reaction is still removed.
       expect(reactions.map((c) => c.method)).toEqual(["reactions.remove"]);

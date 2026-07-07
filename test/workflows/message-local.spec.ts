@@ -173,10 +173,9 @@ describe("LocalMessageWorkflow", () => {
       // Instead of silently clearing the ⏳, the user is told the agent couldn't
       // be reached — posted under the agent's identity in the same channel.
       expect(calls).toHaveLength(1);
-      expect(calls[0]).toMatchObject({
-        channel: "C_ORGADMIN",
-        text: AGENT_UNREACHABLE_TEXT
-      });
+      expect(calls[0].channel).toBe("C_ORGADMIN");
+      expect(calls[0].text).toContain(AGENT_UNREACHABLE_TEXT);
+      expect(calls[0].text).toContain("admin");
     } finally {
       await introspector.dispose();
     }
