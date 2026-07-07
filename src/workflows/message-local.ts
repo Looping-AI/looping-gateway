@@ -30,8 +30,11 @@ async function runLocalAgentTask(
     result = await step.do(`dispatch:${plan.agent.name}`, () =>
       dispatchMessage(p, plan)
     );
-  } catch {
-    return { kind: "unreachable" };
+  } catch (err) {
+    return {
+      kind: "unreachable",
+      error: err instanceof Error ? err.message : String(err)
+    };
   }
 
   try {
@@ -106,7 +109,13 @@ export class LocalMessageWorkflow extends WorkflowEntrypoint<
 
         const outcome = r.value;
         if (outcome.kind === "unreachable") {
-          await handleUnreachable(step, p, threadTs, plan.agent.name);
+          await handleUnreachable(
+            step,
+            p,
+            threadTs,
+            plan.agent.name,
+            outcome.error
+          );
         } else if (outcome.kind === "internal_error") {
           console.error("[message-local] agent reply step failed", {
             agent: plan.agent.name,

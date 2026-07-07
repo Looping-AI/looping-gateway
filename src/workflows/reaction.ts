@@ -38,7 +38,7 @@ export function reactionInstanceId(eventId: string): string {
  * later (the row is never terminalized here).
  */
 function rejectedDeliveryText(agentName: string, reason: string): string {
-  return `An attempt to deliver *${agentName}*'s reply was rejected: ${reason}. If you don't hear back, please contact the agent developer.`;
+  return `*Agent ${agentName}* failed to deliver a reply: ${reason}. If you don't hear back, please contact the agent developer.`;
 }
 
 /**

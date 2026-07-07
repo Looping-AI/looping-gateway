@@ -22,18 +22,15 @@ export const AGENT_UNREACHABLE_BASE_TEXT =
   "This agent couldn't be reached after several attempts. It may be down or misconfigured, please contact the agent developer.";
 const MAX_UNREACHABLE_ERROR_TEXT_LENGTH = 240;
 
-function unreachableErrorText(error?: string): string {
-  const normalized = error?.replace(/\s+/g, " ").trim();
+function unreachableErrorText(error: string): string {
+  const normalized = error.replace(/\s+/g, " ").trim();
   if (!normalized) return "";
   return normalized.length <= MAX_UNREACHABLE_ERROR_TEXT_LENGTH
     ? normalized
     : `${normalized.slice(0, MAX_UNREACHABLE_ERROR_TEXT_LENGTH - 3)}...`;
 }
 
-export function agentUnreachableText(
-  agentName?: string,
-  error?: string
-): string {
+export function agentUnreachableText(agentName: string, error: string): string {
   const base = agentName
     ? `${AGENT_UNREACHABLE_BASE_TEXT} (Agent: *${agentName}*.)`
     : AGENT_UNREACHABLE_BASE_TEXT;
@@ -213,7 +210,7 @@ export async function signalReactionCollect(eventId: string): Promise<void> {
 export type TaskOutcome =
   | { kind: "accepted" }
   | { kind: "done" }
-  | { kind: "unreachable"; error?: string }
+  | { kind: "unreachable"; error: string }
   | { kind: "internal_error"; error: string };
 
 /**
@@ -225,7 +222,7 @@ export async function handleUnreachable(
   p: MessageWorkflowParams,
   threadTs: string | null,
   agentName: string,
-  error?: string
+  error: string
 ): Promise<void> {
   console.error("[message] agent dispatch failed", {
     agent: agentName,
