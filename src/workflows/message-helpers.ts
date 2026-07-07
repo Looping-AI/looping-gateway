@@ -20,14 +20,14 @@ import {
 // the time we get here, so the user should know rather than see silence.
 export const AGENT_UNREACHABLE_BASE_TEXT =
   "This agent couldn't be reached after several attempts. It may be down or misconfigured, please contact the agent developer.";
+const MAX_UNREACHABLE_ERROR_TEXT_LENGTH = 240;
 
 function unreachableErrorText(error?: string): string {
   const normalized = error?.replace(/\s+/g, " ").trim();
   if (!normalized) return "";
-  const maxLen = 240;
-  return normalized.length <= maxLen
+  return normalized.length <= MAX_UNREACHABLE_ERROR_TEXT_LENGTH
     ? normalized
-    : `${normalized.slice(0, maxLen - 3)}...`;
+    : `${normalized.slice(0, MAX_UNREACHABLE_ERROR_TEXT_LENGTH - 3)}...`;
 }
 
 export function agentUnreachableText(
