@@ -3,7 +3,7 @@ import { introspectWorkflow } from "cloudflare:test";
 import { env } from "cloudflare:workers";
 import { setWorkspaceAdminChannel } from "@/db/models/workspaces";
 import { handleSlackEvent } from "@/slack-webhook-handler";
-import { AGENT_UNREACHABLE_TEXT } from "@/workflows/message-helpers";
+import { AGENT_UNREACHABLE_BASE_TEXT } from "@/workflows/message-helpers";
 import { stubSlack } from "../wrappers/slack-stub";
 import { slackHeaders } from "../helpers/slack";
 
@@ -11,6 +11,7 @@ import { slackHeaders } from "../helpers/slack";
 //   resolve → dispatch → reply     (admin channel, DM)
 //   unreachable notice              (dispatch retries exhausted)
 //   internal_error path             (Slack post retries exhausted)
+const ADMIN_AGENT_NAME = "admin";
 
 beforeEach(async () => {
   await setWorkspaceAdminChannel(0, "C_ORGADMIN");
@@ -158,7 +159,7 @@ describe("LocalMessageWorkflow", () => {
       await introspector.modifyAll(async (m) => {
         await m.disableRetryDelays([{ name: "dispatch:admin" }]);
         await m.mockStepError(
-          { name: "dispatch:admin" },
+          { name: `dispatch:${ADMIN_AGENT_NAME}` },
           new Error("connection refused")
         );
       });
@@ -174,8 +175,8 @@ describe("LocalMessageWorkflow", () => {
       // be reached — posted under the agent's identity in the same channel.
       expect(calls).toHaveLength(1);
       expect(calls[0].channel).toBe("C_ORGADMIN");
-      expect(calls[0].text).toContain(AGENT_UNREACHABLE_TEXT);
-      expect(calls[0].text).toContain("admin");
+      expect(calls[0].text).toContain(AGENT_UNREACHABLE_BASE_TEXT);
+      expect(calls[0].text).toContain(ADMIN_AGENT_NAME);
     } finally {
       await introspector.dispose();
     }
@@ -202,7 +203,9 @@ describe("LocalMessageWorkflow", () => {
 
       // No unreachable notice, and nothing else posted (the only post — the reply —
       // is the step we forced to fail).
-      expect(calls.map((c) => c.text)).not.toContain(AGENT_UNREACHABLE_TEXT);
+      expect(calls.map((c) => c.text)).not.toContain(
+        AGENT_UNREACHABLE_BASE_TEXT
+      );
       expect(calls).toHaveLength(0);
     } finally {
       await introspector.dispose();

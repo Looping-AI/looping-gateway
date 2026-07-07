@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, it, expect, vi } from "vitest";
 import { introspectWorkflow } from "cloudflare:test";
 import { env } from "cloudflare:workers";
 import { handleSlackEvent } from "@/slack-webhook-handler";
-import { AGENT_UNREACHABLE_TEXT } from "@/workflows/message-helpers";
+import { AGENT_UNREACHABLE_BASE_TEXT } from "@/workflows/message-helpers";
 import { PENDING_REACTION } from "@/workflows/reaction";
 import { buildDispatchId, _resetIssuerCacheForTest } from "@/agents/dispatch";
 import { getAgentTaskByToken } from "@/db/models/agent-tasks";
@@ -257,7 +257,7 @@ describe("RemoteMessageWorkflow", () => {
       // User gets an explicit notice instead of silence.
       expect(slackPosts).toHaveLength(1);
       expect(slackPosts[0].channel).toBe(REMOTE_CHANNEL);
-      expect(slackPosts[0].text).toContain(AGENT_UNREACHABLE_TEXT);
+      expect(slackPosts[0].text).toContain(AGENT_UNREACHABLE_BASE_TEXT);
       expect(slackPosts[0].text).toContain(AGENT_NAME);
     } finally {
       await introspector.dispose();

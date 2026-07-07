@@ -18,11 +18,12 @@ import {
 // Shown when a dispatch's retries are fully exhausted (persistently unreachable
 // endpoint, TLS/DNS failure, persistent 5xx, accept timeout). Not transient by
 // the time we get here, so the user should know rather than see silence.
-export const AGENT_UNREACHABLE_TEXT =
+export const AGENT_UNREACHABLE_BASE_TEXT =
   "This agent couldn't be reached after several attempts. It may be down or misconfigured, please contact the agent developer.";
 
-function agentUnreachableText(agentName: string): string {
-  return `${AGENT_UNREACHABLE_TEXT} (Agent: *${agentName}*.)`;
+export function agentUnreachableText(agentName?: string): string {
+  if (!agentName) return AGENT_UNREACHABLE_BASE_TEXT;
+  return `${AGENT_UNREACHABLE_BASE_TEXT} (Agent: *${agentName}*.)`;
 }
 
 // One agent's resolved dispatch target (must be Rpc.Serializable).
@@ -190,7 +191,7 @@ export async function signalReactionCollect(eventId: string): Promise<void> {
  * - `done`          — handled fully now (sync reply posted, silence, or a policy
  *                     error notice posted); nothing is still working.
  * - `unreachable`   — the `dispatch` step itself exhausted retries; the user
- *                     should see AGENT_UNREACHABLE_TEXT.
+ *                     should see `agentUnreachableText(...)`.
  * - `internal_error`— the agent responded but a later step (usually the Slack
  *                     post) exhausted retries; distinct from unreachable.
  */
