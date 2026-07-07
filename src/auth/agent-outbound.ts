@@ -1,4 +1,5 @@
 import { SignJWT, importJWK, type JWK } from "jose";
+import { env } from "cloudflare:workers";
 
 /**
  * Gateway outbound identity for remote (custom) A2A agents.
@@ -55,10 +56,8 @@ interface SignGatewayTokenArgs {
   identity: RemoteIdentity;
 }
 
-type GatewayJwtEnv = Pick<Env, "GATEWAY_JWT_PRIVATE_KEY">;
-
 /** Parse + validate the configured private JWK (throws if misconfigured). */
-function privateJwk(env: GatewayJwtEnv): JWK & { kid: string } {
+function privateJwk(): JWK & { kid: string } {
   const raw = env.GATEWAY_JWT_PRIVATE_KEY;
   if (!raw) {
     throw new Error("GATEWAY_JWT_PRIVATE_KEY is not configured");
@@ -86,10 +85,9 @@ function privateJwk(env: GatewayJwtEnv): JWK & { kid: string } {
  * identity claim. The remote agent verifies it against the gateway's public JWKS.
  */
 export async function signGatewayToken(
-  env: GatewayJwtEnv,
   args: SignGatewayTokenArgs
 ): Promise<string> {
-  const jwk = privateJwk(env);
+  const jwk = privateJwk();
   const { issuer } = args;
   const jwksUrl = `${issuer}/.well-known/jwks.json`;
   const key = await importJWK(jwk, ALG);
@@ -121,10 +119,8 @@ export async function signGatewayToken(
  * the configured private JWK by dropping the private component (`d`). Served at
  * `/.well-known/jwks.json` for remote agents to fetch and cache.
  */
-export function getPublicJwks(env: Pick<Env, "GATEWAY_JWT_PRIVATE_KEY">): {
-  keys: JWK[];
-} {
-  const jwk = privateJwk(env as GatewayJwtEnv);
+export function getPublicJwks(): { keys: JWK[] } {
+  const jwk = privateJwk();
   // Strip the private scalar; publish only the public point.
   const { d: _d, ...pub } = jwk;
   void _d;

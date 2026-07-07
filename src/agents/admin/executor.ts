@@ -3,7 +3,6 @@ import type {
   ExecutionEventBus,
   RequestContext
 } from "@a2a-js/sdk/server";
-import { getDb } from "@/db/client";
 import { createModelPair, type ModelOverrides } from "@/agents/model";
 import {
   buildAgentSession,
@@ -54,10 +53,9 @@ export class AdminAgentExecutor implements AgentExecutor {
 
   constructor(
     private readonly agent: SessionHost,
-    private readonly env: Env,
     private readonly options: AdminExecutorOptions = {}
   ) {
-    this.models = createModelPair(this.env, this.options);
+    this.models = createModelPair(this.options);
   }
 
   /** Lazily build the one Session for this DO; `wsId` is fixed per instance. */
@@ -73,7 +71,7 @@ export class AdminAgentExecutor implements AgentExecutor {
               "Durable facts about this workspace — who the admins are, conventions, and decisions. Keep it concise.",
             memoryMaxTokens: 1200,
             compactAfterTokens: COMPACT_AFTER_TOKENS,
-            onArchive: (msgs) => archiveMessages(this.env, namespace, msgs)
+            onArchive: (msgs) => archiveMessages(namespace, msgs)
           });
     }
     return this.session;
@@ -110,19 +108,16 @@ export class AdminAgentExecutor implements AgentExecutor {
           systemSuffix: callerContext(ctx, { workspaceId: wsId }),
           tools: {
             ...buildAdminTools({
-              db: getDb(this.env),
               ctx,
               wsId,
               verifyEndpoint: async (endpoint) => {
-                const allowedDomains = await getAllowedRemoteAgentDomains(
-                  getDb(this.env)
-                );
+                const allowedDomains = await getAllowedRemoteAgentDomains();
                 return verifyRemoteAgentEndpoint(endpoint, allowedDomains);
               },
-              generateImage: (prompt) => generateAvatar(this.env, prompt),
+              generateImage: (prompt) => generateAvatar(prompt),
               storeIcon: this.options.storeIcon
             }),
-            ...recallTools(this.env, namespace, hasArchive)
+            ...recallTools(namespace, hasArchive)
           }
         };
       }

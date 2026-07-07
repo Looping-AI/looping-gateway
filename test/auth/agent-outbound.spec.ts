@@ -5,14 +5,14 @@ import {
   IDENTITY_CLAIM,
   getPublicJwks,
   signGatewayToken
-} from "@/auth/agent-jwt";
+} from "@/auth/agent-outbound";
 
 const AUD = "https://agent.example.com";
 const PUBLIC_URL = "https://gateway.test";
 const EXPECTED_JKU = `${PUBLIC_URL}/.well-known/jwks.json`;
 
 async function publicKey() {
-  const { keys } = getPublicJwks(env);
+  const { keys } = getPublicJwks();
   return importJWK(keys[0], "EdDSA");
 }
 
@@ -22,7 +22,7 @@ afterEach(() => {
 
 describe("getPublicJwks", () => {
   it("publishes only the public Ed25519 key (no private scalar)", () => {
-    const { keys } = getPublicJwks(env);
+    const { keys } = getPublicJwks();
     expect(keys).toHaveLength(1);
     const k = keys[0] as JWK & { d?: string };
     expect(k.kty).toBe("OKP");
@@ -37,7 +37,7 @@ describe("getPublicJwks", () => {
 
 describe("signGatewayToken", () => {
   it("round-trips: verifies against the public JWKS with correct claims", async () => {
-    const token = await signGatewayToken(env, {
+    const token = await signGatewayToken({
       audience: AUD,
       issuer: PUBLIC_URL,
       identity: {
@@ -75,7 +75,7 @@ describe("signGatewayToken", () => {
   });
 
   it("carries gateway-agent identity only, not user auth fields", async () => {
-    const token = await signGatewayToken(env, {
+    const token = await signGatewayToken({
       audience: AUD,
       issuer: PUBLIC_URL,
       identity: {
@@ -97,7 +97,7 @@ describe("signGatewayToken", () => {
   });
 
   it("rejects a token presented to the wrong audience", async () => {
-    const token = await signGatewayToken(env, {
+    const token = await signGatewayToken({
       audience: AUD,
       issuer: PUBLIC_URL,
       identity: {
@@ -117,7 +117,7 @@ describe("signGatewayToken", () => {
   });
 
   it("rejects a tampered signature", async () => {
-    const token = await signGatewayToken(env, {
+    const token = await signGatewayToken({
       audience: AUD,
       issuer: PUBLIC_URL,
       identity: {
@@ -142,7 +142,7 @@ describe("signGatewayToken", () => {
   it("rejects an expired token", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2025-01-01T00:00:00Z"));
-    const token = await signGatewayToken(env, {
+    const token = await signGatewayToken({
       audience: AUD,
       issuer: PUBLIC_URL,
       identity: {

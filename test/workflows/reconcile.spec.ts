@@ -23,7 +23,7 @@ import {
 } from "@/db/models/workspace-configs";
 import { _resetBotInfoCacheForTest } from "@/wrappers/slack";
 
-const db = getDb(env);
+const db = getDb();
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -50,17 +50,16 @@ describe("anchorTeamId", () => {
         return { ok: true, user_id: "UBOT", team_id: "T_FIRST" };
       return baseStub(method);
     });
-    const r = await anchorTeamId(env, db);
+    const r = await anchorTeamId();
     expect(r.teamIdBootstrapped).toBe(true);
     expect(r.drifted).toBe(false);
     expect(
-      await getConfig(db, ORG_WORKSPACE_ID, SystemConfigKeys.SLACK_TEAM_ID)
+      await getConfig(ORG_WORKSPACE_ID, SystemConfigKeys.SLACK_TEAM_ID)
     ).toBe("T_FIRST");
   });
 
   it("is a no-op on a subsequent call with the same team_id", async () => {
     await setConfig(
-      db,
       ORG_WORKSPACE_ID,
       SystemConfigKeys.SLACK_TEAM_ID,
       "T_STABLE"
@@ -70,17 +69,16 @@ describe("anchorTeamId", () => {
         return { ok: true, user_id: "UBOT", team_id: "T_STABLE" };
       return baseStub(method);
     });
-    const r = await anchorTeamId(env, db);
+    const r = await anchorTeamId();
     expect(r.teamIdBootstrapped).toBe(false);
     expect(r.drifted).toBe(false);
     expect(
-      await getConfig(db, ORG_WORKSPACE_ID, SystemConfigKeys.SLACK_TEAM_ID)
+      await getConfig(ORG_WORKSPACE_ID, SystemConfigKeys.SLACK_TEAM_ID)
     ).toBe("T_STABLE");
   });
 
   it("reports drift and does NOT overwrite the anchor on mismatch", async () => {
     await setConfig(
-      db,
       ORG_WORKSPACE_ID,
       SystemConfigKeys.SLACK_TEAM_ID,
       "T_ORIGINAL"
@@ -93,12 +91,12 @@ describe("anchorTeamId", () => {
       return { ok: true, members: [], channels: [] };
     });
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-    const r = await anchorTeamId(env, db);
+    const r = await anchorTeamId();
     expect(r.drifted).toBe(true);
     expect(r.teamIdBootstrapped).toBe(false);
     // Anchor is preserved — never overwritten
     expect(
-      await getConfig(db, ORG_WORKSPACE_ID, SystemConfigKeys.SLACK_TEAM_ID)
+      await getConfig(ORG_WORKSPACE_ID, SystemConfigKeys.SLACK_TEAM_ID)
     ).toBe("T_ORIGINAL");
     // anchorTeamId only calls auth.test — no further Slack calls
     expect(calledMethods.filter((m) => m !== "auth.test")).toHaveLength(0);
@@ -114,11 +112,11 @@ describe("anchorTeamId", () => {
       if (method === "auth.test") return { ok: true, user_id: "UBOT" };
       return baseStub(method);
     });
-    const r = await anchorTeamId(env, db);
+    const r = await anchorTeamId();
     expect(r.teamIdBootstrapped).toBe(false);
     expect(r.drifted).toBe(false);
     expect(
-      await getConfig(db, ORG_WORKSPACE_ID, SystemConfigKeys.SLACK_TEAM_ID)
+      await getConfig(ORG_WORKSPACE_ID, SystemConfigKeys.SLACK_TEAM_ID)
     ).toBeNull();
   });
 });
@@ -139,21 +137,21 @@ describe("syncChannels", () => {
             response_metadata: { next_cursor: "c2" }
           };
     });
-    const r = await syncChannels(env, db);
+    const r = await syncChannels();
     expect(r.channelsUpserted).toBe(2);
-    expect(await getSlackChannelName(db, "C1")).toBe("general");
-    expect(await getSlackChannelName(db, "C2")).toBe("random");
+    expect(await getSlackChannelName("C1")).toBe("general");
+    expect(await getSlackChannelName("C2")).toBe("random");
   });
 
   it("refreshes the name on a rename", async () => {
-    await upsertSlackChannel(db, { channelId: "C_re", name: "old" });
+    await upsertSlackChannel({ channelId: "C_re", name: "old" });
     stubSlack((method) =>
       method === "conversations.list"
         ? { ok: true, channels: [{ id: "C_re", name: "new" }] }
         : { ok: true }
     );
-    await syncChannels(env, db);
-    expect(await getSlackChannelName(db, "C_re")).toBe("new");
+    await syncChannels();
+    expect(await getSlackChannelName("C_re")).toBe("new");
   });
 });
 
@@ -163,16 +161,16 @@ describe("syncChannels", () => {
 
 describe("resolveOrgChannel", () => {
   it("returns null when looping-org-admin channel is absent", async () => {
-    const result = await resolveOrgChannel(db);
+    const result = await resolveOrgChannel();
     expect(result.channelId).toBeNull();
   });
 
   it("returns the channel id when present in D1", async () => {
-    await upsertSlackChannel(db, {
+    await upsertSlackChannel({
       channelId: "CORG",
       name: "looping-org-admin"
     });
-    const result = await resolveOrgChannel(db);
+    const result = await resolveOrgChannel();
     expect(result.channelId).toBe("CORG");
   });
 });
@@ -198,10 +196,10 @@ describe("syncUsers", () => {
         };
       return { ok: true };
     });
-    const r = await syncUsers(env, db, null);
-    expect((await getSlackUser(db, "U1"))?.isPrimaryOwner).toBe(true);
-    expect((await getSlackUser(db, "U1"))?.displayName).toBe("One");
-    expect((await getSlackUser(db, "U2"))?.isPrimaryOwner).toBe(false);
+    const r = await syncUsers(null);
+    expect((await getSlackUser("U1"))?.isPrimaryOwner).toBe(true);
+    expect((await getSlackUser("U1"))?.displayName).toBe("One");
+    expect((await getSlackUser("U2"))?.isPrimaryOwner).toBe(false);
     expect(r.usersUpserted).toBe(2);
   });
 
@@ -223,20 +221,20 @@ describe("syncUsers", () => {
           : { ok: true, members: [] };
       return { ok: true };
     });
-    await syncUsers(env, db, "CORG");
-    expect((await getSlackUser(db, "U1"))?.isOrgAdmin).toBe(false);
-    expect((await getSlackUser(db, "U2"))?.isOrgAdmin).toBe(true);
+    await syncUsers("CORG");
+    expect((await getSlackUser("U1"))?.isOrgAdmin).toBe(false);
+    expect((await getSlackUser("U2"))?.isOrgAdmin).toBe(true);
   });
 
   it("marks a registry user absent from users.list as deleted", async () => {
-    await upsertSlackUser(db, { slackUserId: "U_gone_recon" });
+    await upsertSlackUser({ slackUserId: "U_gone_recon" });
     stubSlack((method) => {
       if (method === "users.list")
         return { ok: true, members: [{ id: "U_present" }] };
       return { ok: true };
     });
-    const r = await syncUsers(env, db, null);
-    expect((await getSlackUser(db, "U_gone_recon"))?.deleted).toBe(true);
+    const r = await syncUsers(null);
+    expect((await getSlackUser("U_gone_recon"))?.deleted).toBe(true);
     expect(r.usersDeactivated).toBeGreaterThanOrEqual(1);
   });
 
@@ -249,8 +247,8 @@ describe("syncUsers", () => {
           : { ok: true, members: [] };
       return { ok: true };
     });
-    await syncUsers(env, db, "CORG");
-    const r2 = await syncUsers(env, db, "CORG");
+    await syncUsers("CORG");
+    const r2 = await syncUsers("CORG");
     expect(r2.usersDeactivated).toBe(0);
     expect(r2.usersUpserted).toBe(1);
   });
@@ -262,8 +260,8 @@ describe("syncUsers", () => {
 
 describe("syncAdminMemberships", () => {
   it("adds desired members and removes stale ones (bot excluded)", async () => {
-    await upsertWorkspace(db, { id: 60, name: "w60", adminChannelId: "C60" });
-    await addWorkspaceAdmin(db, 60, "U_stale");
+    await upsertWorkspace({ id: 60, name: "w60", adminChannelId: "C60" });
+    await addWorkspaceAdmin(60, "U_stale");
     stubSlack((method, body) => {
       if (method === "auth.test") return { ok: true, user_id: "UBOT" };
       if (method === "conversations.members")
@@ -272,8 +270,8 @@ describe("syncAdminMemberships", () => {
           : { ok: true, members: [] };
       return { ok: true };
     });
-    const r = await syncAdminMemberships(env, db);
-    expect([...(await listWorkspaceAdminIds(db, 60))].sort()).toEqual([
+    const r = await syncAdminMemberships();
+    expect([...(await listWorkspaceAdminIds(60))].sort()).toEqual([
       "U_keep",
       "U_new"
     ]);
@@ -282,7 +280,7 @@ describe("syncAdminMemberships", () => {
   });
 
   it("is idempotent on a second run", async () => {
-    await upsertWorkspace(db, { id: 62, name: "w62", adminChannelId: "C62" });
+    await upsertWorkspace({ id: 62, name: "w62", adminChannelId: "C62" });
     stubSlack((method, body) => {
       if (method === "auth.test") return { ok: true, user_id: "UBOT" };
       if (method === "conversations.members")
@@ -291,19 +289,19 @@ describe("syncAdminMemberships", () => {
           : { ok: true, members: [] };
       return { ok: true };
     });
-    await syncAdminMemberships(env, db);
-    const r2 = await syncAdminMemberships(env, db);
+    await syncAdminMemberships();
+    const r2 = await syncAdminMemberships();
     expect(r2.adminsAdded).toBe(0);
     expect(r2.adminsRemoved).toBe(0);
   });
 
   it("skips workspaces with no admin channel configured", async () => {
-    await upsertWorkspace(db, { id: 63, name: "w63" });
+    await upsertWorkspace({ id: 63, name: "w63" });
     stubSlack((method) => {
       if (method === "auth.test") return { ok: true, user_id: "UBOT" };
       return { ok: true };
     });
-    const r = await syncAdminMemberships(env, db);
+    const r = await syncAdminMemberships();
     expect(r.adminsAdded).toBe(0);
     expect(r.adminsRemoved).toBe(0);
   });

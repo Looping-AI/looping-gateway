@@ -2,10 +2,14 @@ import { describe, it, expect, afterEach, vi } from "vitest";
 import { env } from "cloudflare:workers";
 import type { Message } from "@a2a-js/sdk";
 import { importJWK, jwtVerify } from "jose";
-import { _resetIssuerCacheForTest, dispatchToAgent } from "@/agents/dispatch";
+import {
+  _resetIssuerCacheForTest,
+  dispatchToAgent,
+  buildDispatchId
+} from "@/agents/dispatch";
 import { slackTsToIso } from "@/agents/shared/messages";
 import type { UserAuthContext } from "@/auth";
-import { getPublicJwks, IDENTITY_CLAIM } from "@/auth/agent-jwt";
+import { getPublicJwks, IDENTITY_CLAIM } from "@/auth/agent-outbound";
 import { buildAgentCard } from "@/a2a/card";
 import { getDb } from "@/db/client";
 import {
@@ -29,11 +33,49 @@ interface RemotePost {
 }
 
 async function publicKey() {
-  const { keys } = getPublicJwks(env);
+  const { keys } = getPublicJwks();
   return importJWK(keys[0], "EdDSA");
 }
 
 function stubRemote(posts: RemotePost[]) {
+  const card = buildAgentCard({
+    name: "Remote",
+    description: "remote dispatch test agent",
+    url: ENDPOINT
+  });
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const request =
+        input instanceof Request ? input : new Request(input, init);
+      const method = request.method.toUpperCase();
+      if (method === "POST") {
+        const rpc = (await request.clone().json()) as {
+          id?: unknown;
+          params?: { message?: Message };
+        };
+        posts.push({
+          authorization: request.headers.get("authorization"),
+          message: rpc.params?.message as Message
+        });
+        // Async contract: a remote returns a Task ack immediately, not a reply.
+        return Response.json({
+          jsonrpc: "2.0",
+          id: rpc.id ?? 1,
+          result: {
+            kind: "task",
+            id: "task-remote-1",
+            contextId: "reply",
+            status: { state: "submitted" }
+          }
+        });
+      }
+      return Response.json(card);
+    })
+  );
+}
+
+function stubRemoteContractViolation(posts: RemotePost[]) {
   const card = buildAgentCard({
     name: "Remote",
     description: "remote dispatch test agent",
@@ -59,9 +101,9 @@ function stubRemote(posts: RemotePost[]) {
           id: rpc.id ?? 1,
           result: {
             kind: "message",
-            messageId: "reply-1",
+            messageId: "r1",
             role: "agent",
-            parts: [{ kind: "text", text: "ok" }],
+            parts: [{ kind: "text", text: "sync reply" }],
             contextId: "reply"
           }
         });
@@ -74,9 +116,9 @@ function stubRemote(posts: RemotePost[]) {
 afterEach(async () => {
   vi.unstubAllGlobals();
   _resetIssuerCacheForTest();
-  const db = getDb(env);
-  await setPublicUrl(db, "https://gateway.test");
-  await setAllowedRemoteAgentDomains(db, []);
+  const db = getDb();
+  await setPublicUrl("https://gateway.test");
+  await setAllowedRemoteAgentDomains([]);
 });
 
 // End-to-end of the local A2A path: client (official SDK) → DO stub.fetch →
@@ -89,8 +131,7 @@ describe("dispatchToAgent (local Durable Object)", () => {
     // the AI loop over its Session/SQLite). Workers AI is unavailable offline, so
     // the executor's graceful fallback reply comes back — but the round-trip
     // proves card discovery + JSON-RPC + the DO executor are wired correctly.
-    const reply = await dispatchToAgent(
-      env,
+    const result = await dispatchToAgent(
       {
         name: "admin",
         kind: "admin",
@@ -98,6 +139,7 @@ describe("dispatchToAgent (local Durable Object)", () => {
         workspaceId: 0
       },
       {
+        eventId: "Ev-admin",
         text: "ping",
         channelId: "C1",
         channelName: null,
@@ -107,15 +149,15 @@ describe("dispatchToAgent (local Durable Object)", () => {
         metadata: { agentKind: "admin", adminWorkspaceId: 0 }
       }
     );
-    expect(reply.length).toBeGreaterThan(0);
+    expect(result.kind).toBe("reply");
+    if (result.kind === "reply") expect(result.text.length).toBeGreaterThan(0);
   });
 
   it("routes the onboarding kind to its per-user OnboardingAgent instance", async () => {
     // The onboarding instance is keyed by the caller's slackUserId (read from
     // metadata.user); the round-trip into the real DO proves wiring even though
     // the offline fallback reply comes back.
-    const reply = await dispatchToAgent(
-      env,
+    const result = await dispatchToAgent(
       {
         name: "onboarding",
         kind: "onboarding",
@@ -123,6 +165,7 @@ describe("dispatchToAgent (local Durable Object)", () => {
         workspaceId: 0
       },
       {
+        eventId: "Ev-onb",
         text: "hi",
         channelId: "D1",
         channelName: null,
@@ -132,18 +175,18 @@ describe("dispatchToAgent (local Durable Object)", () => {
         metadata: { agentKind: "onboarding" }
       }
     );
-    expect(reply.length).toBeGreaterThan(0);
+    expect(result.kind).toBe("reply");
+    if (result.kind === "reply") expect(result.text.length).toBeGreaterThan(0);
   });
 
   it("namespaces remote identity and context per logical agent instance", async () => {
-    const db = getDb(env);
-    await setPublicUrl(db, "https://gateway.test");
-    await setAllowedRemoteAgentDomains(db, ["example.com"]);
+    const db = getDb();
+    await setPublicUrl("https://gateway.test");
+    await setAllowedRemoteAgentDomains(["example.com"]);
     const posts: RemotePost[] = [];
     stubRemote(posts);
 
     await dispatchToAgent(
-      env,
       {
         name: "alpha",
         kind: "custom",
@@ -151,6 +194,7 @@ describe("dispatchToAgent (local Durable Object)", () => {
         workspaceId: 7
       },
       {
+        eventId: "Ev-alpha",
         text: "first",
         channelId: "C_SHARED",
         channelName: "general",
@@ -162,7 +206,6 @@ describe("dispatchToAgent (local Durable Object)", () => {
     );
 
     await dispatchToAgent(
-      env,
       {
         name: "beta",
         kind: "custom",
@@ -170,6 +213,7 @@ describe("dispatchToAgent (local Durable Object)", () => {
         workspaceId: 7
       },
       {
+        eventId: "Ev-beta",
         text: "second",
         channelId: "C_SHARED",
         channelName: null,
@@ -190,6 +234,20 @@ describe("dispatchToAgent (local Durable Object)", () => {
     expect(posts[1].message.contextId).toContain(
       encodeURIComponent("custom:7:beta")
     );
+    // messageId is the deterministic dispatch id — a compact 19-char base36 hash
+    // of {eventId}:{instanceKey}, so a retried dispatch is dedupable by the remote
+    // rather than appended twice, and it leaks neither the event id nor the key.
+    expect(posts[0].message.messageId).toMatch(/^[0-9a-z]{19}$/);
+    expect(posts[1].message.messageId).toMatch(/^[0-9a-z]{19}$/);
+    expect(posts[0].message.messageId).not.toBe(posts[1].message.messageId);
+    // Determinism: recomputing from the same inputs yields the same id.
+    expect(
+      await buildDispatchId("Ev-alpha", {
+        name: "alpha",
+        kind: "custom",
+        workspaceId: 7
+      })
+    ).toBe(posts[0].message.messageId);
     // No structured provenance on the wire — who/where/when is inlined into the
     // turn text by the Gateway. Metadata carries only routing extras.
     expect(posts[0].message.metadata).toMatchObject({
@@ -240,5 +298,37 @@ describe("dispatchToAgent (local Durable Object)", () => {
       kind: "custom",
       workspaceId: 7
     });
+  });
+
+  it("returns contract_violation when required Task acceptance/id is missing", async () => {
+    await setPublicUrl("https://gateway.test");
+    await setAllowedRemoteAgentDomains(["example.com"]);
+    const posts: RemotePost[] = [];
+    stubRemoteContractViolation(posts);
+
+    const result = await dispatchToAgent(
+      {
+        name: "remote-bad",
+        kind: "custom",
+        a2aEndpoint: ENDPOINT,
+        workspaceId: 7
+      },
+      {
+        eventId: "Ev-bad-remote",
+        text: "hello",
+        channelId: "C1",
+        channelName: "general",
+        threadTs: "171813.100",
+        messageTs: "171813.100",
+        user: user("U1"),
+        metadata: { agentKind: "custom", workspaceId: 7 }
+      }
+    );
+
+    expect(result.kind).toBe("error_reply");
+    if (result.kind === "error_reply") {
+      expect(result.text).toContain("required task acknowledgment");
+    }
+    expect(posts).toHaveLength(1);
   });
 });

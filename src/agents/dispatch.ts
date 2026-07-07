@@ -1,11 +1,11 @@
 import type { Message } from "@a2a-js/sdk";
 import type { UserAuthContext } from "@/auth";
-import { signGatewayToken, type RemoteIdentity } from "@/auth/agent-jwt";
+import { env } from "cloudflare:workers";
+import { signGatewayToken, type RemoteIdentity } from "@/auth/agent-outbound";
 import type { AgentRow } from "@/db/models/agents";
 import { buildAgentCard } from "@/a2a/card";
-import { sendA2AMessage } from "@/a2a/client";
+import { sendA2ALocal, sendA2ARemote } from "@/a2a/client";
 import { originOf, validateRemoteEndpoint } from "@/a2a/endpoint";
-import { getDb } from "@/db/client";
 import {
   getAllowedRemoteAgentDomains,
   getPublicUrl
@@ -29,7 +29,7 @@ export interface DispatchAgentRef {
 export type DispatchMetadata =
   | { agentKind: "admin"; adminWorkspaceId: number }
   | { agentKind: "onboarding" }
-  | { agentKind: "custom"; workspaceId: number | null };
+  | { agentKind: "custom"; workspaceId: number };
 
 /**
  * What rides on the A2A `message.metadata` and what the executor reads back.
@@ -40,6 +40,14 @@ export type DispatchMetadata =
 export type AgentTurnMetadata = { user: UserAuthContext } & DispatchMetadata;
 
 export interface DispatchPayload {
+  /**
+   * Slack `event_id` of the triggering delivery — the idempotency anchor. Folded
+   * with the agent instance into a deterministic {@link buildDispatchId} so a
+   * re-dispatch (workflow-step retry) carries the same A2A `messageId` and push
+   * `token`; a conformant remote dedupes on the `messageId` instead of appending
+   * the turn twice.
+   */
+  eventId: string;
   /** Original user text. */
   text: string;
   /** Slack channel id — combined with `threadTs` into the A2A `contextId`. */
@@ -70,9 +78,9 @@ export function _resetIssuerCacheForTest(): void {
 }
 
 /** Read (and memoize) the gateway issuer origin from D1. */
-async function resolveIssuer(env: Env): Promise<string | null> {
+async function resolveIssuer(): Promise<string | null> {
   if (cachedIssuer !== null) return cachedIssuer;
-  const issuer = await getPublicUrl(getDb(env));
+  const issuer = await getPublicUrl();
   if (issuer) cachedIssuer = issuer;
   return issuer;
 }
@@ -80,6 +88,33 @@ async function resolveIssuer(env: Env): Promise<string | null> {
 /** Stable per-thread A2A context id, e.g. `"{channelId}:{threadTs}"`. */
 export const buildContextId = (channelId: string, threadTs: string): string =>
   `${channelId}:${threadTs}`;
+
+/** Encode bytes as a fixed-length lowercase-alphanumeric (base36) id. */
+function base36Id(bytes: Uint8Array, length: number): string {
+  let n = 0n;
+  for (const b of bytes) n = (n << 8n) | BigInt(b);
+  return n.toString(36).padStart(length, "0").slice(-length);
+}
+
+/**
+ * Deterministic per-dispatch id: `SHA-256({eventId}:{kind}:{workspaceId}:{name})`
+ * truncated to 96 bits and base36-encoded → a compact 19-char alphanumeric token
+ * (e.g. `k3n7p2q9x4m8r5t6w1a`). Used verbatim as the A2A `messageId` (a conformant
+ * remote dedupes on it) and the push `token` (so a retried dispatch reuses one
+ * `agent_tasks` row and one callback target). Same inputs ⇒ same id ⇒ safe to
+ * re-send; 96 bits makes a collision within the short-lived task set negligible,
+ * and hashing means the id exposes neither the Slack event id nor the agent key.
+ */
+export async function buildDispatchId(
+  eventId: string,
+  agent: Pick<DispatchAgentRef, "kind" | "workspaceId" | "name">
+): Promise<string> {
+  const input = `${eventId}:${buildAgentInstanceKey(agent)}`;
+  const digest = new Uint8Array(
+    await crypto.subtle.digest("SHA-256", new TextEncoder().encode(input))
+  );
+  return base36Id(digest.subarray(0, 12), 19);
+}
 
 /**
  * Stable remote caller key derived from the registered agent row. The endpoint
@@ -148,17 +183,36 @@ export function instanceNameFor(metadata: AgentTurnMetadata): string {
 }
 
 /**
- * Dispatch a user message to an agent over A2A and return its reply text.
- * Routing is by `agent.kind`: built-in local agents are reached in-process via
- * their DO `stub.fetch`; custom agents go over real HTTP at their `a2aEndpoint`.
+ * The outcome of a dispatch. Local agents reply synchronously, so their text is
+ * returned inline for the workflow to post. Remote agents are asynchronous: they
+ * only *accept* the message here (returning a Task) and push the real reply later
+ * to `/a2a/notifications`, so all the gateway gets now is the correlation `token`
+ * (echoed back on the callback) and the remote-assigned `taskId`. A remote may
+ * violate this async contract by returning a Message; that outcome is surfaced
+ * separately so the workflow can post a visible failure.
+ */
+export type DispatchResult =
+  | { kind: "reply"; text: string }
+  | { kind: "error_reply"; text: string }
+  | { kind: "accepted"; token: string; taskId: string };
+
+/**
+ * Dispatch a user message to an agent over A2A. Routing is by `agent.kind`:
+ * built-in local agents are reached in-process via their DO `stub.fetch` and
+ * reply synchronously (`{ kind: "reply" }`); custom agents go over real HTTP at
+ * their `a2aEndpoint` and reply asynchronously via push notification
+ * (`{ kind: "accepted" }`) — the gateway never blocks on their generation.
  */
 export async function dispatchToAgent(
-  env: Env,
   agent: DispatchAgentRef,
   payload: DispatchPayload
-): Promise<string> {
+): Promise<DispatchResult> {
   const localContextId = buildContextId(payload.channelId, payload.threadTs);
   const bindingName = LOCAL_BINDINGS[agent.kind];
+
+  // Deterministic per-dispatch id → the A2A `messageId` (dedupe key) and, for
+  // remotes, the push `token`. Stable across retries so re-delivery is idempotent.
+  const dispatchId = await buildDispatchId(payload.eventId, agent);
 
   // The Gateway owns provenance: who/where/when is inlined into the turn text via
   // the `<turn>` wrapper, once, identically for local and remote agents. Nothing
@@ -171,18 +225,18 @@ export async function dispatchToAgent(
     // EdDSA-signed gateway JWT (verified by the remote against our public JWKS),
     // NOT as plaintext `message.metadata` — so a remote agent can neither read
     // the full `UserAuthContext` nor forge the caller's permissions.
-    const allowedDomains = await getAllowedRemoteAgentDomains(getDb(env));
+    const allowedDomains = await getAllowedRemoteAgentDomains();
     validateRemoteEndpoint(agent.a2aEndpoint, allowedDomains); // SSRF + approved-domain defense-in-depth
 
     const identity = buildRemoteIdentity(agent);
-    const issuer = await resolveIssuer(env);
+    const issuer = await resolveIssuer();
     if (!issuer) {
       throw new Error(
         "Gateway public URL has not been discovered yet. " +
           "Ensure the worker has received at least one Slack event before registering remote agents."
       );
     }
-    const token = await signGatewayToken(env, {
+    const gatewayToken = await signGatewayToken({
       audience: originOf(agent.a2aEndpoint),
       issuer,
       identity
@@ -190,7 +244,9 @@ export async function dispatchToAgent(
 
     const remoteMessage: Message = {
       kind: "message",
-      messageId: crypto.randomUUID(),
+      // Deterministic id so a retried dispatch is dedupable by the remote rather
+      // than appended as a fresh turn (A2A `messageId` is the sender-set dedupe key).
+      messageId: dispatchId,
       role: "user",
       parts: [{ kind: "text", text }],
       contextId: buildRemoteContextId(
@@ -204,10 +260,24 @@ export async function dispatchToAgent(
       // context ever crosses this boundary.
       metadata: { ...payload.metadata }
     };
-    return sendA2AMessage(
-      { kind: "remote", endpoint: agent.a2aEndpoint, authToken: token },
-      remoteMessage
+
+    // Push-notification validation token = the same deterministic dispatch id. The
+    // remote echoes it on the callback so the gateway correlates it to the pending
+    // task (A2A §13.2); the webhook still verifies the remote's signature against
+    // its pinned card key (that JWT is the real authenticator — this token is the
+    // correlation/dedupe key, stable across retries so they collapse to one row).
+    const accept = await sendA2ARemote(
+      { endpoint: agent.a2aEndpoint, authToken: gatewayToken },
+      remoteMessage,
+      { url: `${issuer}/a2a/notifications`, token: dispatchId }
     );
+    if (accept.kind === "accepted") {
+      return { kind: "accepted", token: dispatchId, taskId: accept.taskId };
+    }
+    return {
+      kind: "error_reply",
+      text: "Remote agent did not provide the required task acknowledgment."
+    };
   }
 
   // Local agent → in-process via DO stub.fetch. Trusted same-worker dispatch, so
@@ -219,7 +289,8 @@ export async function dispatchToAgent(
   };
   const message: Message = {
     kind: "message",
-    messageId: crypto.randomUUID(),
+    // Deterministic id (same dedupe rationale as the remote path).
+    messageId: dispatchId,
     role: "user",
     parts: [{ kind: "text", text }],
     contextId: localContextId,
@@ -228,7 +299,9 @@ export async function dispatchToAgent(
 
   const instanceName = instanceNameFor(metadata);
 
-  const ns = env[bindingName] as DurableObjectNamespace;
+  const ns = (env as unknown as Record<string, unknown>)[
+    bindingName
+  ] as DurableObjectNamespace;
   const stub = ns.get(ns.idFromName(instanceName));
   const fetchImpl = ((input: RequestInfo | URL, init?: RequestInit) =>
     stub.fetch(input as RequestInfo, init)) as typeof fetch;
@@ -237,9 +310,6 @@ export async function dispatchToAgent(
     description: `Local ${agent.kind} agent`
   });
 
-  const reply = await sendA2AMessage(
-    { kind: "local", card, fetchImpl },
-    message
-  );
-  return reply;
+  const reply = await sendA2ALocal({ card, fetchImpl }, message);
+  return { kind: "reply", text: reply };
 }

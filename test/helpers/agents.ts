@@ -31,22 +31,19 @@ export class FakeSession implements SessionLike {
   }
 }
 
-/** Spread real env but replace AI + VECTORIZE with spies (no network needed). */
+/**
+ * Spy on the global `env` AI + VECTORIZE bindings (no network needed). Recall
+ * code reads them off `cloudflare:workers`, so tests stub the real bindings.
+ * Restore with `vi.restoreAllMocks()` in an `afterEach`.
+ */
 export function fakeRecallEnv() {
-  const run = vi.fn(async () => ({ data: [Array(1024).fill(0.1)] }));
-  // Typed at the type level (not via named params) so `query.mock.calls[0][1]`
-  // — the options object the executor passes — stays inspectable in assertions.
-  const query = vi.fn<
-    (
-      vector: number[],
-      opts: unknown
-    ) => Promise<{ count: number; matches: unknown[] }>
-  >(async () => ({ count: 0, matches: [] }));
-  return {
-    env: { ...env, AI: { run }, VECTORIZE: { query } } as unknown as Env,
-    run,
-    query
-  };
+  const run = vi.spyOn(env.AI, "run").mockImplementation((async () => ({
+    data: [Array(1024).fill(0.1)]
+  })) as never);
+  const query = vi
+    .spyOn(env.VECTORIZE, "query")
+    .mockImplementation((async () => ({ count: 0, matches: [] })) as never);
+  return { run, query };
 }
 
 // Minimal valid LanguageModelV3 generate result.

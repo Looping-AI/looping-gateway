@@ -1,6 +1,5 @@
 import { WorkflowEntrypoint } from "cloudflare:workers";
 import type { WorkflowEvent, WorkflowStep } from "cloudflare:workers";
-import { getDb, type Db } from "@/db/client";
 import { ORG_ADMIN_CHANNEL_NAME } from "@/config";
 import {
   upsertSlackUser,
@@ -30,8 +29,6 @@ import {
   getBotUserId,
   getBotInfo
 } from "@/wrappers/slack";
-
-type ReconcileEnv = Pick<Env, "DB" | "SLACK_BOT_TOKEN">;
 
 export interface ReconcileResult {
   channelsUpserted: number;
@@ -72,21 +69,18 @@ type ReconcileWorkflowPayload = Record<string, never>;
  * Team-id anchor — Trust-On-First-Use (TOFU). On mismatch, log loudly and
  * abort reconcile without throwing so Workflow retries are not wasted.
  */
-export async function anchorTeamId(
-  env: ReconcileEnv,
-  db: Db
-): Promise<TeamIdAnchorResult> {
+export async function anchorTeamId(): Promise<TeamIdAnchorResult> {
   const result: TeamIdAnchorResult = {
     teamIdBootstrapped: false,
     drifted: false
   };
 
-  const { teamId: liveTeamId } = await getBotInfo(env);
+  const { teamId: liveTeamId } = await getBotInfo();
   if (!liveTeamId) return result;
 
-  const pinned = await getSlackTeamId(db);
+  const pinned = await getSlackTeamId();
   if (pinned === null) {
-    await setSlackTeamId(db, liveTeamId);
+    await setSlackTeamId(liveTeamId);
     result.teamIdBootstrapped = true;
     console.log("[reconcile] Slack team_id anchored (first run)", {
       teamId: liveTeamId
@@ -110,13 +104,10 @@ export async function anchorTeamId(
 }
 
 /** Upsert every named Slack channel into D1 from a single conversations.list pass. */
-export async function syncChannels(
-  env: ReconcileEnv,
-  db: Db
-): Promise<ChannelSyncResult> {
+export async function syncChannels(): Promise<ChannelSyncResult> {
   let channelsUpserted = 0;
-  for await (const c of iterateSlackChannels(env)) {
-    await upsertSlackChannel(db, { channelId: c.id, name: c.name });
+  for await (const c of iterateSlackChannels()) {
+    await upsertSlackChannel({ channelId: c.id, name: c.name });
     channelsUpserted++;
   }
   return { channelsUpserted };
@@ -126,19 +117,17 @@ export async function syncChannels(
  * Resolve org admin channel from the D1 channel registry (populated by
  * syncChannels in the prior step). Writes only on change.
  */
-export async function resolveOrgChannel(db: Db): Promise<OrgChannelResult> {
-  const org = await getWorkspace(db, ORG_WORKSPACE_ID);
-  const channelId = await getSlackChannelIdByName(db, ORG_ADMIN_CHANNEL_NAME);
+export async function resolveOrgChannel(): Promise<OrgChannelResult> {
+  const org = await getWorkspace(ORG_WORKSPACE_ID);
+  const channelId = await getSlackChannelIdByName(ORG_ADMIN_CHANNEL_NAME);
   if (channelId && channelId !== org?.adminChannelId) {
-    await setWorkspaceAdminChannel(db, ORG_WORKSPACE_ID, channelId);
+    await setWorkspaceAdminChannel(ORG_WORKSPACE_ID, channelId);
   }
   return { channelId: channelId ?? null };
 }
 
 /** Sync users + owner/admin flags + deactivation sweep. */
 export async function syncUsers(
-  env: ReconcileEnv,
-  db: Db,
   orgAdminChannelId: string | null
 ): Promise<UserSyncResult> {
   const result: UserSyncResult = {
@@ -147,14 +136,14 @@ export async function syncUsers(
   };
 
   const orgAdminIds = orgAdminChannelId
-    ? await fetchChannelMemberIds(env, orgAdminChannelId)
+    ? await fetchChannelMemberIds(orgAdminChannelId)
     : new Set<string>();
 
-  const activeBefore = await listActiveSlackUserIds(db);
+  const activeBefore = await listActiveSlackUserIds();
   const seen = new Set<string>();
-  for await (const u of iterateSlackUsers(env)) {
+  for await (const u of iterateSlackUsers()) {
     seen.add(u.id);
-    await upsertSlackUser(db, {
+    await upsertSlackUser({
       slackUserId: u.id,
       displayName: u.displayName,
       isPrimaryOwner: u.isPrimaryOwner,
@@ -166,7 +155,7 @@ export async function syncUsers(
 
   for (const id of activeBefore) {
     if (!seen.has(id)) {
-      await markUserDeleted(db, id, true);
+      await markUserDeleted(id, true);
       result.usersDeactivated++;
     }
   }
@@ -175,31 +164,28 @@ export async function syncUsers(
 }
 
 /** Sync admin-channel membership diffs for all workspaces. */
-export async function syncAdminMemberships(
-  env: ReconcileEnv,
-  db: Db
-): Promise<AdminMembershipSyncResult> {
+export async function syncAdminMemberships(): Promise<AdminMembershipSyncResult> {
   const result: AdminMembershipSyncResult = {
     adminsAdded: 0,
     adminsRemoved: 0
   };
 
-  const botUserId = await getBotUserId(env);
-  for (const ws of await listWorkspaces(db)) {
+  const botUserId = await getBotUserId();
+  for (const ws of await listWorkspaces()) {
     if (!ws.adminChannelId) continue;
-    const desired = await fetchChannelMemberIds(env, ws.adminChannelId);
+    const desired = await fetchChannelMemberIds(ws.adminChannelId);
     if (botUserId) desired.delete(botUserId);
-    const current = await listWorkspaceAdminIds(db, ws.id);
+    const current = await listWorkspaceAdminIds(ws.id);
 
     for (const id of desired) {
       if (!current.has(id)) {
-        await addWorkspaceAdmin(db, ws.id, id, "membership");
+        await addWorkspaceAdmin(ws.id, id, "membership");
         result.adminsAdded++;
       }
     }
     for (const id of current) {
       if (!desired.has(id)) {
-        await removeWorkspaceAdmin(db, ws.id, id);
+        await removeWorkspaceAdmin(ws.id, id);
         result.adminsRemoved++;
       }
     }
@@ -217,7 +203,6 @@ export class ReconcileWorkflow extends WorkflowEntrypoint<
     event: WorkflowEvent<ReconcileWorkflowPayload>,
     step: WorkflowStep
   ) {
-    const db = getDb(this.env);
     const result: ReconcileResult = {
       channelsUpserted: 0,
       usersUpserted: 0,
@@ -234,28 +219,22 @@ export class ReconcileWorkflow extends WorkflowEntrypoint<
     // and on missing scopes — those are the usual culprits and are otherwise
     // invisible. We log the real cause, then rethrow to preserve retry/backoff.
     try {
-      const anchor = await step.do("anchor-team-id", () =>
-        anchorTeamId(this.env, db)
-      );
+      const anchor = await step.do("anchor-team-id", () => anchorTeamId());
       result.teamIdBootstrapped = anchor.teamIdBootstrapped;
       if (anchor.drifted) return result;
 
-      const channels = await step.do("sync-channels", () =>
-        syncChannels(this.env, db)
-      );
+      const channels = await step.do("sync-channels", () => syncChannels());
       result.channelsUpserted = channels.channelsUpserted;
 
       const org = await step.do("resolve-org-channel", () =>
-        resolveOrgChannel(db)
+        resolveOrgChannel()
       );
-      const users = await step.do("sync-users", () =>
-        syncUsers(this.env, db, org.channelId)
-      );
+      const users = await step.do("sync-users", () => syncUsers(org.channelId));
       result.usersUpserted = users.usersUpserted;
       result.usersDeactivated = users.usersDeactivated;
 
       const admins = await step.do("sync-admin-memberships", () =>
-        syncAdminMemberships(this.env, db)
+        syncAdminMemberships()
       );
       result.adminsAdded = admins.adminsAdded;
       result.adminsRemoved = admins.adminsRemoved;

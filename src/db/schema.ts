@@ -149,6 +149,48 @@ export const agentChannels = sqliteTable(
 );
 
 /**
+ * Pending remote-agent tasks — the correlation store for async A2A push
+ * notifications. When the gateway dispatches to a remote (custom) agent it no
+ * longer blocks for the reply: it sends a per-dispatch validation `token` in the
+ * A2A `pushNotificationConfig`, the remote returns a Task immediately, and later
+ * POSTs the terminal Task back to `/a2a/notifications`. This row is how the
+ * callback recovers where to post (channel/thread) and which ⏳ to clear
+ * (`eventId`). Callback rendering identity is read from the current `agents` row.
+ *
+ * Keyed by the gateway-generated `token` (the value the remote echoes back).
+ * Rows are marked `completed` by the callback and swept in the maintenance workflow.
+ */
+export const agentTasks = sqliteTable(
+  "agent_tasks",
+  {
+    // Gateway-generated per-dispatch push-notification validation token (PK) —
+    // the value the remote echoes back so we can correlate the callback.
+    token: text("token").primaryKey(),
+    // Remote-assigned A2A Task id captured from the accept response (null until
+    // the accept returns / for observability + callback dedupe).
+    taskId: text("task_id"),
+    agentName: text("agent_name")
+      .notNull()
+      .references(() => agents.name),
+    channelId: text("channel_id").notNull(),
+    // Thread to reply into; null = post at channel top-level (mirrors replyThreadTs).
+    replyThreadTs: text("reply_thread_ts"),
+    // Slack event id of the triggering message — used to collect the ⏳ reaction.
+    eventId: text("event_id").notNull(),
+    // `pending` until a terminal callback posts (or classifies no-reply) and marks it.
+    status: text("status", { enum: ["pending", "completed"] })
+      .notNull()
+      .default("pending"),
+    // Last gateway-controlled reason a callback was rejected (auth/malformed),
+    // captured for the reaction backstop to surface. Never holds remote payload.
+    lastError: text("last_error"),
+    createdAt: timestamp("created_at"),
+    completedAt: integer("completed_at")
+  },
+  (t) => [index("idx_agent_tasks_created_at").on(t.createdAt)]
+);
+
+/**
  * Per-workspace key/value configuration store. The composite PK
  * `(workspace_id, key)` allows each workspace to hold independent values for
  * the same key (e.g. ws0 stores the global Slack team anchor). The value

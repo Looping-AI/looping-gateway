@@ -1,7 +1,7 @@
 import { tool, type ToolSet } from "ai";
 import { z } from "zod";
+import { env } from "cloudflare:workers";
 import type { UserAuthContext } from "@/auth";
-import type { Db } from "@/db/client";
 import {
   type AgentRow,
   listAgents,
@@ -28,9 +28,7 @@ import { getSlackUser } from "@/db/models/users";
  * Logic is split from the AI-SDK wiring so it unit-tests without an LLM.
  */
 export interface OnboardingToolDeps {
-  db: Db;
   ctx: UserAuthContext | null;
-  reconcileWorkflow: Env["RECONCILE_WORKFLOW"];
 }
 
 type ToolResult = Record<string, unknown>;
@@ -69,12 +67,9 @@ function shapeWorkspace(ws: WorkspaceRow): ToolResult {
  * only routes in a channel an admin already allowed, so showing the directory is
  * what lets the concierge route members to the right place.
  */
-export async function directoryAgents(
-  deps: OnboardingToolDeps
-): Promise<ToolResult> {
-  const enabled = (await listAgents(deps.db)).filter((a) => a.enabled);
+export async function directoryAgents(): Promise<ToolResult> {
+  const enabled = (await listAgents()).filter((a) => a.enabled);
   const channelsByAgent = await listChannelsForAgents(
-    deps.db,
     enabled.map((a) => a.name)
   );
   const byAgent = new Map<string, string[]>();
@@ -94,11 +89,11 @@ export async function directoryWorkspaces(
 ): Promise<ToolResult> {
   if (!deps.ctx) return { workspaces: [] };
   if (seesAllWorkspaces(deps.ctx)) {
-    return { workspaces: (await listWorkspaces(deps.db)).map(shapeWorkspace) };
+    return { workspaces: (await listWorkspaces()).map(shapeWorkspace) };
   }
   const rows: ToolResult[] = [];
   for (const id of deps.ctx.adminWorkspaces) {
-    const ws = await getWorkspace(deps.db, id);
+    const ws = await getWorkspace(id);
     if (ws) rows.push(shapeWorkspace(ws));
   }
   return { workspaces: rows };
@@ -114,15 +109,15 @@ export async function directoryHealth(
       note: "I can't identify your Slack user yet. Try again shortly — new users are picked up by the next directory sync."
     };
   }
-  const user = await getSlackUser(deps.db, deps.ctx.slackUserId);
+  const user = await getSlackUser(deps.ctx.slackUserId);
   const registered = user != null && !user.deleted;
-  const enabledAgentCount = (await listAgents(deps.db)).filter(
+  const enabledAgentCount = (await listAgents()).filter(
     (a) => a.enabled
   ).length;
 
   const myWorkspaces: ToolResult[] = [];
   for (const id of deps.ctx.adminWorkspaces) {
-    const ws = await getWorkspace(deps.db, id);
+    const ws = await getWorkspace(id);
     if (ws)
       myWorkspaces.push({
         id: ws.id,
@@ -155,7 +150,7 @@ export async function directoryRead(
 ): Promise<ToolResult> {
   switch (args.operation) {
     case "agents":
-      return directoryAgents(deps);
+      return directoryAgents();
     case "workspaces":
       return directoryWorkspaces(deps);
     case "health":
@@ -175,7 +170,7 @@ export async function triggerReconcile(
     };
   }
 
-  const instance = await deps.reconcileWorkflow.create({});
+  const instance = await env.RECONCILE_WORKFLOW.create({});
   return {
     triggered: true,
     instanceId: instance.id

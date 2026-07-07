@@ -51,14 +51,19 @@
     }
   ],
   "triggers": {
-    // Reconciliation backstop: sync Slack reality → registry every 24h.
+    // Nightly reconciliation + maintenance at midnight UTC.
     "crons": ["0 0 * * *"]
   },
   "workflows": [
     {
-      "name": "message-workflow",
-      "binding": "MESSAGE_WORKFLOW",
-      "class_name": "MessageWorkflow"
+      "name": "message-local-workflow",
+      "binding": "LOCAL_MESSAGE_WORKFLOW",
+      "class_name": "LocalMessageWorkflow"
+    },
+    {
+      "name": "message-remote-workflow",
+      "binding": "REMOTE_MESSAGE_WORKFLOW",
+      "class_name": "RemoteMessageWorkflow"
     },
     {
       "name": "lifecycle-workflow",
@@ -74,6 +79,11 @@
       "name": "reaction-workflow",
       "binding": "REACTION_WORKFLOW",
       "class_name": "ReactionWorkflow"
+    },
+    {
+      "name": "maintenance-workflow",
+      "binding": "MAINTENANCE_WORKFLOW",
+      "class_name": "MaintenanceWorkflow"
     }
   ],
   "secrets": {
@@ -86,12 +96,12 @@
   "observability": {
     "enabled": true
   },
-  "upload_source_maps": true
+  "upload_source_maps": true,
   /**
    * Smart Placement
    * https://developers.cloudflare.com/workers/configuration/smart-placement/#smart-placement
    */
-  // "placement": { "mode": "smart" }
+  "placement": { "mode": "smart" }
   /**
    * Environment Variables
    * https://developers.cloudflare.com/workers/wrangler/configuration/#environment-variables

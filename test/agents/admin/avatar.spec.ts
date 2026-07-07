@@ -1,9 +1,12 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, afterEach, vi } from "vitest";
+import { env } from "cloudflare:workers";
 import {
   buildAvatarPrompt,
   buildAgentAvatarPrompt,
   generateAvatar
 } from "@/agents/admin/avatar";
+
+afterEach(() => vi.restoreAllMocks());
 
 describe("buildAvatarPrompt", () => {
   it("includes the workspace name and the caller's art direction", () => {
@@ -49,17 +52,16 @@ describe("generateAvatar", () => {
     let model: string | undefined;
     let input:
       { multipart?: { body?: unknown; contentType?: string } } | undefined;
-    const fakeEnv = {
-      AI: {
-        run: async (m: string, i: typeof input) => {
-          model = m;
-          input = i;
-          return { image: b64 };
-        }
-      }
-    } as unknown as Env;
+    vi.spyOn(env.AI, "run").mockImplementation((async (
+      m: string,
+      i: typeof input
+    ) => {
+      model = m;
+      input = i;
+      return { image: b64 };
+    }) as never);
 
-    const img = await generateAvatar(fakeEnv, "a prompt");
+    const img = await generateAvatar("a prompt");
     expect(img.contentType).toBe("image/jpeg");
     expect([...img.data]).toEqual([...bytes]);
 
@@ -71,7 +73,7 @@ describe("generateAvatar", () => {
   });
 
   it("throws when the model returns no image data", async () => {
-    const fakeEnv = { AI: { run: async () => ({}) } } as unknown as Env;
-    await expect(generateAvatar(fakeEnv, "a prompt")).rejects.toThrow();
+    vi.spyOn(env.AI, "run").mockImplementation((async () => ({})) as never);
+    await expect(generateAvatar("a prompt")).rejects.toThrow();
   });
 });

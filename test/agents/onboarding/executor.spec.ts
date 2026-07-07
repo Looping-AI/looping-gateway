@@ -1,5 +1,4 @@
-import { describe, it, expect } from "vitest";
-import { env } from "cloudflare:workers";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import { MockLanguageModelV3 } from "ai/test";
 import { OnboardingAgentExecutor } from "@/agents/onboarding/executor";
 import type { SessionHost } from "@/agents/shared/session";
@@ -29,6 +28,8 @@ const onboardingRequest = () =>
     metadata: { user: caller, agentKind: "onboarding" }
   });
 
+afterEach(() => vi.restoreAllMocks());
+
 describe("OnboardingAgentExecutor", () => {
   it("runs the loop and publishes the model's reply", async () => {
     const session = new FakeSession();
@@ -36,7 +37,7 @@ describe("OnboardingAgentExecutor", () => {
       doGenerate: async () =>
         okResult("Looping routes work through Slack.") as never
     });
-    const exec = new OnboardingAgentExecutor(sqlHost, env, {
+    const exec = new OnboardingAgentExecutor(sqlHost, {
       model,
       createSession: () => session
     });
@@ -62,7 +63,7 @@ describe("OnboardingAgentExecutor", () => {
     const model = new MockLanguageModelV3({
       doGenerate: async () => okResult("unused") as never
     });
-    const exec = new OnboardingAgentExecutor(sqlHost, env, {
+    const exec = new OnboardingAgentExecutor(sqlHost, {
       model,
       createSession: () => new ThrowingSession()
     });
@@ -77,7 +78,7 @@ describe("OnboardingAgentExecutor", () => {
 
   it("offers recall and routes it through the user namespace", async () => {
     const session = new FakeSession([{ id: "c1" }]); // hasArchive=true
-    const { env: fenv, query } = fakeRecallEnv();
+    const { query } = fakeRecallEnv();
     let call = 0;
     const model = new MockLanguageModelV3({
       doGenerate: async () =>
@@ -85,7 +86,7 @@ describe("OnboardingAgentExecutor", () => {
           ? toolCallResult("recall", { query: "what did I set up before?" })
           : okResult("Found it in past context.")) as never
     });
-    const exec = new OnboardingAgentExecutor(sqlHost, fenv, {
+    const exec = new OnboardingAgentExecutor(sqlHost, {
       model,
       createSession: () => session
     });
@@ -110,7 +111,7 @@ describe("OnboardingAgentExecutor", () => {
         return okResult("unused") as never;
       }
     });
-    const exec = new OnboardingAgentExecutor(sqlHost, env, {
+    const exec = new OnboardingAgentExecutor(sqlHost, {
       model,
       createSession: () => session
     });

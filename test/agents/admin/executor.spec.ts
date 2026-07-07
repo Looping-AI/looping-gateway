@@ -1,5 +1,4 @@
-import { describe, it, expect } from "vitest";
-import { env } from "cloudflare:workers";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import { MockLanguageModelV3 } from "ai/test";
 import { AdminAgentExecutor, type SessionHost } from "@/agents/admin/executor";
 import type { UserAuthContext } from "@/auth";
@@ -28,13 +27,15 @@ const adminRequest = () =>
     metadata: { user: caller, agentKind: "admin", adminWorkspaceId: 0 }
   });
 
+afterEach(() => vi.restoreAllMocks());
+
 describe("AdminAgentExecutor", () => {
   it("runs the loop and publishes the model's reply", async () => {
     const session = new FakeSession();
     const model = new MockLanguageModelV3({
       doGenerate: async () => okResult("Here are your agents.") as never
     });
-    const exec = new AdminAgentExecutor(sqlHost, env, {
+    const exec = new AdminAgentExecutor(sqlHost, {
       model,
       createSession: () => session
     });
@@ -60,7 +61,7 @@ describe("AdminAgentExecutor", () => {
     const model = new MockLanguageModelV3({
       doGenerate: async () => okResult("unused") as never
     });
-    const exec = new AdminAgentExecutor(sqlHost, env, {
+    const exec = new AdminAgentExecutor(sqlHost, {
       model,
       createSession: () => new ThrowingSession()
     });
@@ -82,7 +83,7 @@ describe("AdminAgentExecutor", () => {
         return okResult("done") as never;
       }
     });
-    const exec = new AdminAgentExecutor(sqlHost, env, {
+    const exec = new AdminAgentExecutor(sqlHost, {
       model,
       createSession: () => session
     });
@@ -96,7 +97,7 @@ describe("AdminAgentExecutor", () => {
 
   it("offers recall and routes it through the workspace namespace", async () => {
     const session = new FakeSession([{ id: "c1" }]); // hasArchive=true
-    const { env: fenv, query } = fakeRecallEnv();
+    const { query } = fakeRecallEnv();
     let call = 0;
     const model = new MockLanguageModelV3({
       doGenerate: async () =>
@@ -106,7 +107,7 @@ describe("AdminAgentExecutor", () => {
             })
           : okResult("Found it in past context.")) as never
     });
-    const exec = new AdminAgentExecutor(sqlHost, fenv, {
+    const exec = new AdminAgentExecutor(sqlHost, {
       model,
       createSession: () => session
     });

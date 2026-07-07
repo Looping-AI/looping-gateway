@@ -11,15 +11,15 @@ import {
   setAdminDisplayName
 } from "@/db/models/workspace-configs";
 
-const db = getDb(env);
+const db = getDb();
 
 const names = (ts: Awaited<ReturnType<typeof resolveTargets>>) =>
   ts.map((t) => t.agent.name).sort();
 
 beforeEach(async () => {
   // Org (ws 0) admin channel + a second workspace.
-  await setWorkspaceAdminChannel(db, 0, "C_ORGADMIN");
-  await upsertWorkspace(db, {
+  await setWorkspaceAdminChannel(0, "C_ORGADMIN");
+  await upsertWorkspace({
     id: 1,
     name: "ws1",
     adminChannelId: "C_WS1ADMIN"
@@ -50,29 +50,25 @@ beforeEach(async () => {
 
 describe("resolveTargets — built-in context routing", () => {
   it("admin channel always includes the admin agent (workspace 0)", async () => {
-    const t = await resolveTargets(db, { channelId: "C_ORGADMIN", text: "hi" });
+    const t = await resolveTargets({ channelId: "C_ORGADMIN", text: "hi" });
     expect(t.map((x) => x.agent.name)).toContain("admin");
     expect(t.find((x) => x.agent.name === "admin")?.workspaceId).toBe(0);
   });
 
   it("scopes the admin agent to the channel's workspace", async () => {
-    const t = await resolveTargets(db, { channelId: "C_WS1ADMIN", text: "hi" });
+    const t = await resolveTargets({ channelId: "C_WS1ADMIN", text: "hi" });
     expect(t.find((x) => x.agent.name === "admin")?.workspaceId).toBe(1);
   });
 
   it("overrides the admin iconUrl with the per-workspace avatar when set", async () => {
-    await setAdminIconUrl(
-      db,
-      1,
-      "https://gw.example.com/icons/1/admin/abc.jpg"
-    );
-    const t = await resolveTargets(db, { channelId: "C_WS1ADMIN", text: "hi" });
+    await setAdminIconUrl(1, "https://gw.example.com/icons/1/admin/abc.jpg");
+    const t = await resolveTargets({ channelId: "C_WS1ADMIN", text: "hi" });
     const admin = t.find((x) => x.agent.name === "admin");
     expect(admin?.agent.iconUrl).toBe(
       "https://gw.example.com/icons/1/admin/abc.jpg"
     );
     // Other workspaces are unaffected (seeded admin row has no icon).
-    const org = await resolveTargets(db, {
+    const org = await resolveTargets({
       channelId: "C_ORGADMIN",
       text: "hi"
     });
@@ -82,12 +78,12 @@ describe("resolveTargets — built-in context routing", () => {
   });
 
   it("overrides the admin displayName with the per-workspace value when set", async () => {
-    await setAdminDisplayName(db, 1, "Ops Bot");
-    const t = await resolveTargets(db, { channelId: "C_WS1ADMIN", text: "hi" });
+    await setAdminDisplayName(1, "Ops Bot");
+    const t = await resolveTargets({ channelId: "C_WS1ADMIN", text: "hi" });
     const admin = t.find((x) => x.agent.name === "admin");
     expect(admin?.agent.displayName).toBe("Ops Bot");
     // Other workspaces keep the seeded admin displayName.
-    const org = await resolveTargets(db, {
+    const org = await resolveTargets({
       channelId: "C_ORGADMIN",
       text: "hi"
     });
@@ -97,19 +93,19 @@ describe("resolveTargets — built-in context routing", () => {
   });
 
   it("a DM always includes onboarding (DM is an implicit mention)", async () => {
-    const t = await resolveTargets(db, { channelId: "D999", text: "hello" });
+    const t = await resolveTargets({ channelId: "D999", text: "hello" });
     expect(names(t)).toEqual(["onboarding"]);
   });
 });
 
 describe("resolveTargets — fan-out (mention vs channel_messages)", () => {
   it("channel_messages agents are always included; mention agents are not", async () => {
-    const t = await resolveTargets(db, { channelId: "C_MULTI", text: "help" });
+    const t = await resolveTargets({ channelId: "C_MULTI", text: "help" });
     expect(names(t)).toEqual(["sales"]); // weather is mention-only, not named
   });
 
   it("a named mention agent is added alongside proactive agents", async () => {
-    const t = await resolveTargets(db, {
+    const t = await resolveTargets({
       channelId: "C_MULTI",
       text: "weather forecast"
     });
@@ -117,7 +113,7 @@ describe("resolveTargets — fan-out (mention vs channel_messages)", () => {
   });
 
   it("mention-only agent stays silent without a mention", async () => {
-    const t = await resolveTargets(db, {
+    const t = await resolveTargets({
       channelId: "C_WEATHER",
       text: "forecast"
     });
@@ -125,7 +121,7 @@ describe("resolveTargets — fan-out (mention vs channel_messages)", () => {
   });
 
   it("mention-only agent fires when named", async () => {
-    const t = await resolveTargets(db, {
+    const t = await resolveTargets({
       channelId: "C_WEATHER",
       text: "weather what is the forecast?"
     });
@@ -133,7 +129,7 @@ describe("resolveTargets — fan-out (mention vs channel_messages)", () => {
   });
 
   it("returns empty for an unconfigured channel", async () => {
-    const t = await resolveTargets(db, { channelId: "C_NOWHERE", text: "?" });
+    const t = await resolveTargets({ channelId: "C_NOWHERE", text: "?" });
     expect(t).toHaveLength(0);
   });
 
@@ -141,7 +137,7 @@ describe("resolveTargets — fan-out (mention vs channel_messages)", () => {
     await env.DB.prepare(
       "INSERT OR IGNORE INTO agent_channels (channel_id, agent_name) VALUES ('C_OFF','off')"
     ).run();
-    const t = await resolveTargets(db, { channelId: "C_OFF", text: "hi" });
+    const t = await resolveTargets({ channelId: "C_OFF", text: "hi" });
     expect(t).toHaveLength(0);
   });
 
@@ -149,7 +145,7 @@ describe("resolveTargets — fan-out (mention vs channel_messages)", () => {
     await env.DB.prepare(
       "UPDATE agents SET display_name = 'Forecast Service' WHERE name = 'weather'"
     ).run();
-    const t = await resolveTargets(db, {
+    const t = await resolveTargets({
       channelId: "C_MULTI",
       text: "Forecast Service what's up"
     });

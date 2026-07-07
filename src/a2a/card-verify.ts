@@ -124,8 +124,12 @@ export async function fetchAgentCard(
   return card;
 }
 
-/** Resolve the public key referenced by a JWS `jku` + `kid`. */
-async function resolveSigningKey(
+/**
+ * Resolve the public key referenced by a JWS `jku` + `kid`. Exported so the
+ * push-notification callback verifier can reuse the same SSRF-guarded fetch +
+ * Ed25519 shape check against a remote's pinned JWKS.
+ */
+export async function resolveSigningKey(
   jku: string,
   kid: string,
   allowedDomains: string[]

@@ -20,7 +20,25 @@ import { stubSlack } from "./wrappers/slack-stub";
 // test needs global fetch stubbed. Tests that assert on the reaction re-stub
 // with a capturing handler; this default keeps the rest benign.
 beforeEach(() => stubSlack(() => ({ ok: true })));
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => {
+  vi.unstubAllGlobals();
+  vi.restoreAllMocks();
+});
+
+// Spy on a workflow binding's `create`, resolving to a throwaway instance.
+// Returns the spy so tests can assert on it. Because the handler now reads the
+// workflow bindings off the global `env`, the spy replaces the real create.
+function spyWorkflow(
+  binding:
+    | "LOCAL_MESSAGE_WORKFLOW"
+    | "REMOTE_MESSAGE_WORKFLOW"
+    | "REACTION_WORKFLOW"
+    | "LIFECYCLE_WORKFLOW"
+) {
+  return vi
+    .spyOn(env[binding], "create")
+    .mockResolvedValue({} as WorkflowInstance);
+}
 
 // A channel_messages agent on C1 so the handler's target gate resolves ≥1 agent
 // and still fires the message/reaction workflows (app_mention, edits, plain msgs).
@@ -33,33 +51,7 @@ beforeEach(async () => {
   ).run();
 });
 
-type FakeEnv = Pick<
-  Env,
-  | "DB"
-  | "SLACK_SIGNING_SECRET"
-  | "SLACK_BOT_TOKEN"
-  | "MESSAGE_WORKFLOW"
-  | "LIFECYCLE_WORKFLOW"
-  | "REACTION_WORKFLOW"
->;
-
-function makeEnv(overrides: Partial<FakeEnv> = {}): FakeEnv {
-  return {
-    DB: env.DB,
-    SLACK_SIGNING_SECRET: env.SLACK_SIGNING_SECRET,
-    SLACK_BOT_TOKEN: env.SLACK_BOT_TOKEN,
-    MESSAGE_WORKFLOW: { create: vi.fn() } as unknown as Workflow,
-    LIFECYCLE_WORKFLOW: { create: vi.fn() } as unknown as Workflow,
-    REACTION_WORKFLOW: { create: vi.fn() } as unknown as Workflow,
-    ...overrides
-  };
-}
-
-async function post(
-  body: string,
-  fakeEnv: FakeEnv,
-  headers?: Record<string, string>
-) {
+async function post(body: string, headers?: Record<string, string>) {
   const waitUntilPromises: Promise<unknown>[] = [];
   const ctx = {
     waitUntil: (p: Promise<unknown>) => {
@@ -73,7 +65,6 @@ async function post(
       headers: headers ?? (await slackHeaders(body)),
       body
     }),
-    fakeEnv,
     ctx
   );
   await Promise.allSettled(waitUntilPromises);
@@ -88,13 +79,13 @@ describe("verification", () => {
   it("rejects a missing / wrong signature with 401", async () => {
     const body = JSON.stringify({ type: "url_verification", challenge: "x" });
     const bad = await slackHeaders(body, "wrong-secret");
-    const res = await post(body, makeEnv(), bad);
+    const res = await post(body, bad);
     expect(res.status).toBe(401);
   });
 
   it("rejects missing signature headers with 401", async () => {
     const body = JSON.stringify({ type: "url_verification", challenge: "x" });
-    const res = await post(body, makeEnv(), {
+    const res = await post(body, {
       "Content-Type": "application/json"
     });
     expect(res.status).toBe(401);
@@ -111,7 +102,7 @@ describe("url_verification", () => {
       type: "url_verification",
       challenge: "abc123"
     });
-    const res = await post(body, makeEnv());
+    const res = await post(body);
     expect(res.status).toBe(200);
     const json: { challenge: string } = await res.json();
     expect(json.challenge).toBe("abc123");
@@ -124,7 +115,7 @@ describe("url_verification", () => {
 
 describe("message events", () => {
   it("triggers the Message Workflow for an app_mention, keyed by event_id", async () => {
-    const create = vi.fn();
+    const create = spyWorkflow("REMOTE_MESSAGE_WORKFLOW");
     const body = JSON.stringify({
       type: "event_callback",
       event_id: "EvMention",
@@ -137,10 +128,7 @@ describe("message events", () => {
         channel: "C1"
       }
     });
-    const res = await post(
-      body,
-      makeEnv({ MESSAGE_WORKFLOW: { create } as unknown as Workflow })
-    );
+    const res = await post(body);
     expect(res.status).toBe(200);
     expect(create).toHaveBeenCalledOnce();
     expect(create).toHaveBeenCalledWith({
@@ -155,7 +143,7 @@ describe("message events", () => {
   });
 
   it("triggers the Message Workflow for a direct message", async () => {
-    const create = vi.fn();
+    const create = spyWorkflow("LOCAL_MESSAGE_WORKFLOW");
     const body = JSON.stringify({
       type: "event_callback",
       event_id: "EvDm",
@@ -168,10 +156,7 @@ describe("message events", () => {
         channel: "D1"
       }
     });
-    const res = await post(
-      body,
-      makeEnv({ MESSAGE_WORKFLOW: { create } as unknown as Workflow })
-    );
+    const res = await post(body);
     expect(res.status).toBe(200);
     expect(create).toHaveBeenCalledOnce();
     expect(create).toHaveBeenCalledWith(
@@ -180,7 +165,7 @@ describe("message events", () => {
   });
 
   it("ignores a bot's own DM (no workflow triggered)", async () => {
-    const create = vi.fn();
+    const create = spyWorkflow("LOCAL_MESSAGE_WORKFLOW");
     const body = JSON.stringify({
       type: "event_callback",
       event_id: "EvBot",
@@ -193,10 +178,7 @@ describe("message events", () => {
         channel: "D1"
       }
     });
-    const res = await post(
-      body,
-      makeEnv({ MESSAGE_WORKFLOW: { create } as unknown as Workflow })
-    );
+    const res = await post(body);
     expect(res.status).toBe(200);
     expect(create).not.toHaveBeenCalled();
   });
@@ -235,7 +217,7 @@ function captureAddReactions(
 
 describe("reaction workflow", () => {
   it("adds the ⏳ reaction inline and starts the removal workflow", async () => {
-    const reactionCreate = vi.fn();
+    const reactionCreate = spyWorkflow("REACTION_WORKFLOW");
     const adds = captureAddReactions();
     const body = JSON.stringify({
       type: "event_callback",
@@ -249,12 +231,7 @@ describe("reaction workflow", () => {
         channel: "C1"
       }
     });
-    const res = await post(
-      body,
-      makeEnv({
-        REACTION_WORKFLOW: { create: reactionCreate } as unknown as Workflow
-      })
-    );
+    const res = await post(body);
     expect(res.status).toBe(200);
 
     // The ⏳ reaction is added inline on the trigger message (not by the workflow).
@@ -279,7 +256,7 @@ describe("reaction workflow", () => {
   });
 
   it("still acks 200 when adding the reaction fails (best-effort)", async () => {
-    const messageCreate = vi.fn();
+    const messageCreate = spyWorkflow("REMOTE_MESSAGE_WORKFLOW");
     captureAddReactions(() => ({ ok: false, error: "missing_scope" }));
     const body = JSON.stringify({
       type: "event_callback",
@@ -293,22 +270,19 @@ describe("reaction workflow", () => {
         channel: "C1"
       }
     });
-    const res = await post(
-      body,
-      makeEnv({
-        MESSAGE_WORKFLOW: { create: messageCreate } as unknown as Workflow
-      })
-    );
+    const res = await post(body);
     expect(res.status).toBe(200);
     // The message workflow is authoritative and still runs.
     expect(messageCreate).toHaveBeenCalledOnce();
   });
 
   it("still acks 200 when starting the removal workflow fails (best-effort)", async () => {
-    const messageCreate = vi.fn();
-    const reactionCreate = vi.fn(() => {
-      throw new Error("reaction boom");
-    });
+    const messageCreate = spyWorkflow("REMOTE_MESSAGE_WORKFLOW");
+    const reactionCreate = vi
+      .spyOn(env.REACTION_WORKFLOW, "create")
+      .mockImplementation(() => {
+        throw new Error("reaction boom");
+      });
     const body = JSON.stringify({
       type: "event_callback",
       event_id: "EvReactFail",
@@ -321,20 +295,15 @@ describe("reaction workflow", () => {
         channel: "C1"
       }
     });
-    const res = await post(
-      body,
-      makeEnv({
-        MESSAGE_WORKFLOW: { create: messageCreate } as unknown as Workflow,
-        REACTION_WORKFLOW: { create: reactionCreate } as unknown as Workflow
-      })
-    );
+    const res = await post(body);
     expect(res.status).toBe(200);
     // The message workflow is authoritative and still runs.
     expect(messageCreate).toHaveBeenCalledOnce();
+    expect(reactionCreate).toHaveBeenCalledOnce();
   });
 
   it("does not react or start a removal workflow for lifecycle events", async () => {
-    const reactionCreate = vi.fn();
+    const reactionCreate = spyWorkflow("REACTION_WORKFLOW");
     const adds = captureAddReactions();
     const body = JSON.stringify({
       type: "event_callback",
@@ -342,12 +311,7 @@ describe("reaction workflow", () => {
       team_id: "T1",
       event: { type: "member_joined_channel", user: "U2", channel: "C1" }
     });
-    const res = await post(
-      body,
-      makeEnv({
-        REACTION_WORKFLOW: { create: reactionCreate } as unknown as Workflow
-      })
-    );
+    const res = await post(body);
     expect(res.status).toBe(200);
     expect(adds).toEqual([]);
     expect(reactionCreate).not.toHaveBeenCalled();
@@ -360,17 +324,14 @@ describe("reaction workflow", () => {
 
 describe("lifecycle events", () => {
   it("triggers the Lifecycle Workflow for member_joined_channel", async () => {
-    const create = vi.fn();
+    const create = spyWorkflow("LIFECYCLE_WORKFLOW");
     const body = JSON.stringify({
       type: "event_callback",
       event_id: "EvJoin",
       team_id: "T1",
       event: { type: "member_joined_channel", user: "U2", channel: "C1" }
     });
-    const res = await post(
-      body,
-      makeEnv({ LIFECYCLE_WORKFLOW: { create } as unknown as Workflow })
-    );
+    const res = await post(body);
     expect(res.status).toBe(200);
     expect(create).toHaveBeenCalledOnce();
     expect(create).toHaveBeenCalledWith({
@@ -380,32 +341,26 @@ describe("lifecycle events", () => {
   });
 
   it("triggers the Lifecycle Workflow for member_left_channel", async () => {
-    const create = vi.fn();
+    const create = spyWorkflow("LIFECYCLE_WORKFLOW");
     const body = JSON.stringify({
       type: "event_callback",
       event_id: "EvLeft",
       event: { type: "member_left_channel", user: "U2", channel: "C1" }
     });
-    const res = await post(
-      body,
-      makeEnv({ LIFECYCLE_WORKFLOW: { create } as unknown as Workflow })
-    );
+    const res = await post(body);
     expect(res.status).toBe(200);
     expect(create).toHaveBeenCalledOnce();
   });
 
   it("triggers the Lifecycle Workflow for team_join", async () => {
-    const create = vi.fn();
+    const create = spyWorkflow("LIFECYCLE_WORKFLOW");
     const body = JSON.stringify({
       type: "event_callback",
       event_id: "EvTeam",
       team_id: "T1",
       event: { type: "team_join", user: { id: "U9", name: "newbie" } }
     });
-    const res = await post(
-      body,
-      makeEnv({ LIFECYCLE_WORKFLOW: { create } as unknown as Workflow })
-    );
+    const res = await post(body);
     expect(res.status).toBe(200);
     expect(create).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -419,7 +374,7 @@ describe("lifecycle events", () => {
   });
 
   it("routes message_changed edits to the Message Workflow", async () => {
-    const create = vi.fn();
+    const create = spyWorkflow("REMOTE_MESSAGE_WORKFLOW");
     const body = JSON.stringify({
       type: "event_callback",
       event_id: "EvEdit",
@@ -432,10 +387,7 @@ describe("lifecycle events", () => {
         previous_message: { ts: "1700000000.1", user: "U1", text: "old" }
       }
     });
-    const res = await post(
-      body,
-      makeEnv({ MESSAGE_WORKFLOW: { create } as unknown as Workflow })
-    );
+    const res = await post(body);
     expect(res.status).toBe(200);
     expect(create).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -445,7 +397,7 @@ describe("lifecycle events", () => {
   });
 
   it("extracts userId from message.edited.user when message.user is absent (channel message_changed)", async () => {
-    const create = vi.fn();
+    const create = spyWorkflow("REMOTE_MESSAGE_WORKFLOW");
     const body = JSON.stringify({
       type: "event_callback",
       event_id: "EvEditedUser",
@@ -462,10 +414,7 @@ describe("lifecycle events", () => {
         previous_message: { ts: "1700000000.1", text: "old" }
       }
     });
-    const res = await post(
-      body,
-      makeEnv({ MESSAGE_WORKFLOW: { create } as unknown as Workflow })
-    );
+    const res = await post(body);
     expect(res.status).toBe(200);
     expect(create).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -478,7 +427,7 @@ describe("lifecycle events", () => {
   });
 
   it("ignores a channel message_deleted when no user id is available", async () => {
-    const create = vi.fn();
+    const create = spyWorkflow("REMOTE_MESSAGE_WORKFLOW");
     const body = JSON.stringify({
       type: "event_callback",
       event_id: "EvDelNoUser",
@@ -492,16 +441,13 @@ describe("lifecycle events", () => {
         // no user on previous_message
       }
     });
-    const res = await post(
-      body,
-      makeEnv({ MESSAGE_WORKFLOW: { create } as unknown as Workflow })
-    );
+    const res = await post(body);
     expect(res.status).toBe(200);
     expect(create).not.toHaveBeenCalled();
   });
 
   it("ignores a DM message_changed when no user id is available", async () => {
-    const create = vi.fn();
+    const create = spyWorkflow("LOCAL_MESSAGE_WORKFLOW");
     const body = JSON.stringify({
       type: "event_callback",
       event_id: "EvDmEditNoUser",
@@ -515,16 +461,13 @@ describe("lifecycle events", () => {
         // no user anywhere
       }
     });
-    const res = await post(
-      body,
-      makeEnv({ MESSAGE_WORKFLOW: { create } as unknown as Workflow })
-    );
+    const res = await post(body);
     expect(res.status).toBe(200);
     expect(create).not.toHaveBeenCalled();
   });
 
   it("ignores a DM message_deleted when no user id is available", async () => {
-    const create = vi.fn();
+    const create = spyWorkflow("LOCAL_MESSAGE_WORKFLOW");
     const body = JSON.stringify({
       type: "event_callback",
       event_id: "EvDmDelNoUser",
@@ -538,16 +481,13 @@ describe("lifecycle events", () => {
         // no user on previous_message
       }
     });
-    const res = await post(
-      body,
-      makeEnv({ MESSAGE_WORKFLOW: { create } as unknown as Workflow })
-    );
+    const res = await post(body);
     expect(res.status).toBe(200);
     expect(create).not.toHaveBeenCalled();
   });
 
   it("routes a DM message_deleted to the Message Workflow when user id is present", async () => {
-    const create = vi.fn();
+    const create = spyWorkflow("LOCAL_MESSAGE_WORKFLOW");
     const body = JSON.stringify({
       type: "event_callback",
       event_id: "EvDmDel",
@@ -560,10 +500,7 @@ describe("lifecycle events", () => {
         previous_message: { ts: "1700000000.1", user: "U3", text: "gone" }
       }
     });
-    const res = await post(
-      body,
-      makeEnv({ MESSAGE_WORKFLOW: { create } as unknown as Workflow })
-    );
+    const res = await post(body);
     expect(res.status).toBe(200);
     expect(create).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -581,7 +518,7 @@ describe("lifecycle events", () => {
       "INSERT OR IGNORE INTO agent_channels (channel_id, agent_name) VALUES ('C1', 'del-agent')"
     ).run();
 
-    const create = vi.fn();
+    const create = spyWorkflow("REMOTE_MESSAGE_WORKFLOW");
     const body = JSON.stringify({
       type: "event_callback",
       event_id: "EvChDel",
@@ -598,10 +535,7 @@ describe("lifecycle events", () => {
         }
       }
     });
-    const res = await post(
-      body,
-      makeEnv({ MESSAGE_WORKFLOW: { create } as unknown as Workflow })
-    );
+    const res = await post(body);
     expect(res.status).toBe(200);
     // The mention-only agent must be woken even though base.text is empty.
     expect(create).toHaveBeenCalledWith(
@@ -626,7 +560,7 @@ describe("lifecycle events", () => {
       "INSERT OR IGNORE INTO agent_channels (channel_id, agent_name) VALUES ('C_QUIET', 'quiet-agent')"
     ).run();
 
-    const create = vi.fn();
+    const create = spyWorkflow("REMOTE_MESSAGE_WORKFLOW");
     const body = JSON.stringify({
       type: "event_callback",
       event_id: "EvChDelNoMention",
@@ -643,10 +577,7 @@ describe("lifecycle events", () => {
         }
       }
     });
-    const res = await post(
-      body,
-      makeEnv({ MESSAGE_WORKFLOW: { create } as unknown as Workflow })
-    );
+    const res = await post(body);
     expect(res.status).toBe(200);
     expect(create).not.toHaveBeenCalled();
   });
@@ -658,8 +589,8 @@ describe("lifecycle events", () => {
 
 describe("ignored events", () => {
   it("routes a bare channel message to the Message Workflow", async () => {
-    const message = vi.fn();
-    const lifecycle = vi.fn();
+    const message = spyWorkflow("REMOTE_MESSAGE_WORKFLOW");
+    const lifecycle = spyWorkflow("LIFECYCLE_WORKFLOW");
     const body = JSON.stringify({
       type: "event_callback",
       event_id: "EvCh",
@@ -672,13 +603,7 @@ describe("ignored events", () => {
         ts: "1700000000.1"
       }
     });
-    const res = await post(
-      body,
-      makeEnv({
-        MESSAGE_WORKFLOW: { create: message } as unknown as Workflow,
-        LIFECYCLE_WORKFLOW: { create: lifecycle } as unknown as Workflow
-      })
-    );
+    const res = await post(body);
     expect(res.status).toBe(200);
     expect(message).toHaveBeenCalledOnce();
     expect(lifecycle).not.toHaveBeenCalled();
@@ -686,7 +611,7 @@ describe("ignored events", () => {
 
   it("acks 200 for a slash command", async () => {
     const body = "command=%2Ffoo&channel_id=C1&user_id=U1&team_id=T1&text=bar";
-    const res = await post(body, makeEnv(), {
+    const res = await post(body, {
       ...(await slackHeaders(body)),
       "Content-Type": "application/x-www-form-urlencoded"
     });
@@ -700,11 +625,9 @@ describe("ignored events", () => {
 
 describe("error handling", () => {
   it("acks 200 when the workflow instance already exists (Slack retry)", async () => {
-    const create = vi
-      .fn()
-      .mockRejectedValue(
-        new Error("instance with id EvMention already exists")
-      );
+    vi.spyOn(env.REMOTE_MESSAGE_WORKFLOW, "create").mockRejectedValue(
+      new Error("instance with id EvMention already exists")
+    );
     const body = JSON.stringify({
       type: "event_callback",
       event_id: "EvMention",
@@ -716,17 +639,14 @@ describe("error handling", () => {
         channel: "C1"
       }
     });
-    const res = await post(
-      body,
-      makeEnv({ MESSAGE_WORKFLOW: { create } as unknown as Workflow })
-    );
+    const res = await post(body);
     expect(res.status).toBe(200);
   });
 
   it("still returns 200 on an unexpected Workflow failure (error is logged, Slack does not retry)", async () => {
-    const create = vi
-      .fn()
-      .mockRejectedValue(new Error("transient network error"));
+    vi.spyOn(env.REMOTE_MESSAGE_WORKFLOW, "create").mockRejectedValue(
+      new Error("transient network error")
+    );
     const body = JSON.stringify({
       type: "event_callback",
       event_id: "EvBoom",
@@ -738,10 +658,7 @@ describe("error handling", () => {
         channel: "C1"
       }
     });
-    const res = await post(
-      body,
-      makeEnv({ MESSAGE_WORKFLOW: { create } as unknown as Workflow })
-    );
+    const res = await post(body);
     expect(res.status).toBe(200);
   });
 });
@@ -751,7 +668,7 @@ describe("error handling", () => {
 // ---------------------------------------------------------------------------
 
 describe("team guard", () => {
-  const db = getDb(env);
+  const db = getDb();
 
   afterEach(() => {
     // D1 is reset before each test (apply-migrations.ts); only the
@@ -773,13 +690,12 @@ describe("team guard", () => {
         channel: "C1"
       }
     });
-    const res = await post(body, makeEnv());
+    const res = await post(body);
     expect(res.status).toBe(200);
   });
 
   it("passes through when event team_id matches the pinned anchor", async () => {
     await setConfig(
-      db,
       ORG_WORKSPACE_ID,
       SystemConfigKeys.SLACK_TEAM_ID,
       "T_MATCH"
@@ -796,13 +712,12 @@ describe("team guard", () => {
         channel: "C1"
       }
     });
-    const res = await post(body, makeEnv());
+    const res = await post(body);
     expect(res.status).toBe(200);
   });
 
   it("returns 403 when event team_id mismatches the pinned anchor", async () => {
     await setConfig(
-      db,
       ORG_WORKSPACE_ID,
       SystemConfigKeys.SLACK_TEAM_ID,
       "T_RIGHT"
@@ -819,13 +734,12 @@ describe("team guard", () => {
         channel: "C1"
       }
     });
-    const res = await post(body, makeEnv());
+    const res = await post(body);
     expect(res.status).toBe(403);
   });
 
   it("blocks lifecycle events with mismatching team_id", async () => {
     await setConfig(
-      db,
       ORG_WORKSPACE_ID,
       SystemConfigKeys.SLACK_TEAM_ID,
       "T_RIGHT"
@@ -836,14 +750,13 @@ describe("team guard", () => {
       team_id: "T_WRONG",
       event: { type: "member_joined_channel", user: "U2", channel: "C1" }
     });
-    const res = await post(body, makeEnv());
+    const res = await post(body);
     expect(res.status).toBe(403);
   });
 
   it("passes through when the event carries no team_id (skip-check path)", async () => {
     // Anchor is pinned but event has no team_id — should still pass (Q6).
     await setConfig(
-      db,
       ORG_WORKSPACE_ID,
       SystemConfigKeys.SLACK_TEAM_ID,
       "T_RIGHT"
@@ -854,13 +767,12 @@ describe("team guard", () => {
       // no team_id field at the envelope level
       event: { type: "member_left_channel", user: "U2", channel: "C1" }
     });
-    const res = await post(body, makeEnv());
+    const res = await post(body);
     expect(res.status).toBe(200);
   });
 
   it("url_verification challenge is never blocked by the team guard", async () => {
     await setConfig(
-      db,
       ORG_WORKSPACE_ID,
       SystemConfigKeys.SLACK_TEAM_ID,
       "T_RIGHT"
@@ -869,7 +781,7 @@ describe("team guard", () => {
       type: "url_verification",
       challenge: "abc_guard"
     });
-    const res = await post(body, makeEnv());
+    const res = await post(body);
     expect(res.status).toBe(200);
     const json: { challenge: string } = await res.json();
     expect(json.challenge).toBe("abc_guard");
@@ -882,7 +794,7 @@ describe("team guard", () => {
 // ---------------------------------------------------------------------------
 
 describe("public url discovery", () => {
-  const db = getDb(env);
+  const db = getDb();
 
   afterEach(() => {
     _resetPublicUrlCacheForTest();
@@ -891,21 +803,21 @@ describe("public url discovery", () => {
   it("persists the gateway public origin after a verified request", async () => {
     _resetPublicUrlCacheForTest();
     const body = JSON.stringify({ type: "url_verification", challenge: "x" });
-    const res = await post(body, makeEnv());
+    const res = await post(body);
     expect(res.status).toBe(200);
-    expect(
-      await getConfig(db, ORG_WORKSPACE_ID, SystemConfigKeys.PUBLIC_URL)
-    ).toBe("https://example.com");
+    expect(await getConfig(ORG_WORKSPACE_ID, SystemConfigKeys.PUBLIC_URL)).toBe(
+      "https://example.com"
+    );
   });
 
   it("does NOT persist the origin when the signature is invalid", async () => {
     _resetPublicUrlCacheForTest();
     const body = JSON.stringify({ type: "url_verification", challenge: "x" });
     const bad = await slackHeaders(body, "wrong-secret");
-    const res = await post(body, makeEnv(), bad);
+    const res = await post(body, bad);
     expect(res.status).toBe(401);
     expect(
-      await getConfig(db, ORG_WORKSPACE_ID, SystemConfigKeys.PUBLIC_URL)
+      await getConfig(ORG_WORKSPACE_ID, SystemConfigKeys.PUBLIC_URL)
     ).toBeNull();
   });
 });

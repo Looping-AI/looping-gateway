@@ -6,11 +6,11 @@ import { upsertSlackUser } from "@/db/models/users";
 import { upsertWorkspace } from "@/db/models/workspaces";
 import { addWorkspaceAdmin } from "@/db/models/workspace-admins";
 
-const db = getDb(env);
+const db = getDb();
 
 describe("buildUserAuthContext", () => {
   it("returns a zero-permission context for an unknown user", async () => {
-    const c = await buildUserAuthContext(db, "U_unknown");
+    const c = await buildUserAuthContext("U_unknown");
     expect(c).toEqual({
       slackUserId: "U_unknown",
       displayName: null,
@@ -21,17 +21,17 @@ describe("buildUserAuthContext", () => {
   });
 
   it("assembles flags + derived adminWorkspaces from D1", async () => {
-    await upsertWorkspace(db, { id: 40, name: "w40" });
-    await upsertWorkspace(db, { id: 41, name: "w41" });
-    await upsertSlackUser(db, {
+    await upsertWorkspace({ id: 40, name: "w40" });
+    await upsertWorkspace({ id: 41, name: "w41" });
+    await upsertSlackUser({
       slackUserId: "U_ctx",
       displayName: "Ctx User",
       isOrgAdmin: true
     });
-    await addWorkspaceAdmin(db, 40, "U_ctx");
-    await addWorkspaceAdmin(db, 41, "U_ctx");
+    await addWorkspaceAdmin(40, "U_ctx");
+    await addWorkspaceAdmin(41, "U_ctx");
 
-    const c = await buildUserAuthContext(db, "U_ctx");
+    const c = await buildUserAuthContext("U_ctx");
     expect(c.displayName).toBe("Ctx User");
     expect(c.isOrgAdmin).toBe(true);
     expect(c.isPrimaryOwner).toBe(false);
