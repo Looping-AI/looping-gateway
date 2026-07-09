@@ -6,7 +6,6 @@ import {
   _resetPublicUrlCacheForTest
 } from "../src/slack-webhook-handler";
 import { slackHeaders } from "./helpers/slack";
-import { getDb } from "@/db/client";
 import {
   getConfig,
   setConfig,
@@ -714,8 +713,6 @@ describe("error handling", () => {
 // ---------------------------------------------------------------------------
 
 describe("team guard", () => {
-  const db = getDb();
-
   afterEach(() => {
     // D1 is reset before each test (apply-migrations.ts); only the
     // isolate-level memo needs manual clearing.
@@ -840,8 +837,6 @@ describe("team guard", () => {
 // ---------------------------------------------------------------------------
 
 describe("public url discovery", () => {
-  const db = getDb();
-
   afterEach(() => {
     _resetPublicUrlCacheForTest();
   });

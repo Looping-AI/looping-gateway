@@ -1,12 +1,8 @@
 import { describe, it, expect } from "vitest";
-import { env } from "cloudflare:workers";
 import { buildUserAuthContext } from "@/auth/build";
-import { getDb } from "@/db/client";
 import { upsertSlackUser } from "@/db/models/users";
 import { upsertWorkspace } from "@/db/models/workspaces";
 import { addWorkspaceAdmin } from "@/db/models/workspace-admins";
-
-const db = getDb();
 
 describe("buildUserAuthContext", () => {
   it("returns a zero-permission context for an unknown user", async () => {

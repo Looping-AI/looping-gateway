@@ -1,6 +1,5 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { env } from "cloudflare:workers";
-import { getDb } from "@/db/client";
 import { resolveTargets } from "@/router/resolve";
 import {
   setWorkspaceAdminChannel,
@@ -10,8 +9,6 @@ import {
   setAdminIconUrl,
   setAdminDisplayName
 } from "@/db/models/workspace-configs";
-
-const db = getDb();
 
 const names = (ts: Awaited<ReturnType<typeof resolveTargets>>) =>
   ts.map((t) => t.agent.name).sort();

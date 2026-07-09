@@ -1,6 +1,4 @@
 import { describe, it, expect } from "vitest";
-import { env } from "cloudflare:workers";
-import { getDb } from "@/db/client";
 import { upsertWorkspace } from "@/db/models/workspaces";
 import { getSlackUser } from "@/db/models/users";
 import {
@@ -9,8 +7,6 @@ import {
   listWorkspaceAdminIds,
   getAdminWorkspaces
 } from "@/db/models/workspace-admins";
-
-const db = getDb();
 
 describe("workspace_admins", () => {
   it("adds an admin idempotently and auto-stubs an unknown user", async () => {

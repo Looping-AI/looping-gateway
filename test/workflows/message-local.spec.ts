@@ -1,11 +1,14 @@
 import { afterEach, beforeEach, describe, it, expect, vi } from "vitest";
-import { introspectWorkflow } from "cloudflare:test";
 import { env } from "cloudflare:workers";
+import { introspectWorkflow } from "cloudflare:test";
 import { setWorkspaceAdminChannel } from "@/db/models/workspaces";
-import { handleSlackEvent } from "@/slack-webhook-handler";
 import { AGENT_UNREACHABLE_BASE_TEXT } from "@/workflows/message-helpers";
 import { stubSlack } from "../wrappers/slack-stub";
-import { slackHeaders } from "../helpers/slack";
+import {
+  trigger,
+  makeAppMentionRequest,
+  type PostCall
+} from "../helpers/slack-events";
 
 // Tests covering LocalMessageWorkflow execution paths (message-local.ts):
 //   resolve → dispatch → reply     (admin channel, DM)
@@ -18,12 +21,6 @@ beforeEach(async () => {
 });
 
 afterEach(() => vi.unstubAllGlobals());
-
-interface PostCall {
-  channel: string;
-  thread_ts?: string;
-  text: string;
-}
 
 function captureSlack(): PostCall[] {
   const calls: PostCall[] = [];
@@ -41,26 +38,8 @@ function captureSlack(): PostCall[] {
 }
 
 let seq = 0;
-function makeAppMentionRequest(channelId: string, text: string) {
-  const eventId = `Ev-local-${++seq}`;
-  const body = JSON.stringify({
-    type: "event_callback",
-    event_id: eventId,
-    team_id: "T1",
-    event: {
-      type: "app_mention",
-      channel: channelId,
-      user: "U1",
-      text,
-      ts: "1700.1",
-      event_ts: "1700.1"
-    }
-  });
-  return { body, eventId };
-}
-
 function makeDmRequest(channelId: string, text: string) {
-  const eventId = `Ev-local-${++seq}`;
+  const eventId = `Ev-local-dm-${++seq}`;
   const body = JSON.stringify({
     type: "event_callback",
     event_id: eventId,
@@ -76,26 +55,6 @@ function makeDmRequest(channelId: string, text: string) {
     }
   });
   return { body, eventId };
-}
-
-async function trigger(body: string) {
-  const waitUntilPromises: Promise<unknown>[] = [];
-  const ctx = {
-    waitUntil: (p: Promise<unknown>) => {
-      waitUntilPromises.push(p);
-    },
-    passThroughOnException: () => {}
-  } as unknown as ExecutionContext;
-  const res = await handleSlackEvent(
-    new Request("https://example.com/slack/events", {
-      method: "POST",
-      headers: await slackHeaders(body),
-      body
-    }),
-    ctx
-  );
-  await Promise.allSettled(waitUntilPromises);
-  return res;
 }
 
 describe("LocalMessageWorkflow", () => {

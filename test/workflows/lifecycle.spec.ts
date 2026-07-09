@@ -1,17 +1,14 @@
 import { describe, it, expect } from "vitest";
-import { env } from "cloudflare:workers";
 import {
   handleTeamJoin,
   handleMemberJoined,
   handleMemberLeft
 } from "@/workflows/lifecycle";
-import { getDb } from "@/db/client";
 import { getSlackUser } from "@/db/models/users";
 import { upsertWorkspace } from "@/db/models/workspaces";
 import { listWorkspaceAdminIds } from "@/db/models/workspace-admins";
 import type { LifecycleWorkflowParams } from "@/slack/types";
 
-const db = getDb();
 const BOT = "UBOT";
 
 function params(

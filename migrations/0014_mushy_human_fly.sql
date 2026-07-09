@@ -1,0 +1,1 @@
+ALTER TABLE `agent_tasks` ADD `received_message_ids` text;

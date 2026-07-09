@@ -1,4 +1,21 @@
-import type { Message, Part, Task } from "@a2a-js/sdk";
+import type { Message, Part, Task, TaskState } from "@a2a-js/sdk";
+
+/**
+ * Terminal A2A task states — those after which no further push notifications
+ * arrive. `submitted` / `working` / `input-required` / `auth-required` /
+ * `unknown` are non-terminal (the task is still in flight).
+ */
+const TERMINAL_STATES = new Set<TaskState>([
+  "completed",
+  "failed",
+  "canceled",
+  "rejected"
+]);
+
+/** Whether a task state is terminal (no further updates expected). */
+export function isTerminalTaskState(state: TaskState): boolean {
+  return TERMINAL_STATES.has(state);
+}
 
 /** Concatenate the text of every `TextPart`, trimming surrounding whitespace. */
 function partsText(parts: Part[] | undefined): string {

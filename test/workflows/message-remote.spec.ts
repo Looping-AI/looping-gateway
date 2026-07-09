@@ -1,7 +1,6 @@
 import { afterEach, beforeEach, describe, it, expect, vi } from "vitest";
-import { introspectWorkflow } from "cloudflare:test";
 import { env } from "cloudflare:workers";
-import { handleSlackEvent } from "@/slack-webhook-handler";
+import { introspectWorkflow } from "cloudflare:test";
 import { AGENT_UNREACHABLE_BASE_TEXT } from "@/workflows/message-helpers";
 import { PENDING_REACTION } from "@/workflows/reaction";
 import { buildDispatchId, _resetIssuerCacheForTest } from "@/agents/dispatch";
@@ -11,24 +10,15 @@ import {
   setPublicUrl
 } from "@/db/models/workspace-configs";
 import { buildAgentCard } from "@/a2a/card";
-import { slackHeaders } from "../helpers/slack";
+import {
+  trigger,
+  type PostCall,
+  type ReactionCall
+} from "../helpers/slack-events";
 
 const REMOTE_ENDPOINT = "https://remote.example.com/a2a";
 const REMOTE_CHANNEL = "C_REMOTE";
 const AGENT_NAME = "remote-test";
-
-interface PostCall {
-  channel: string;
-  text: string;
-  thread_ts?: string;
-}
-
-interface ReactionCall {
-  method: string;
-  channel: string;
-  timestamp: string;
-  name: string;
-}
 
 /**
  * Stub global fetch to route Slack API calls and remote agent calls separately.
@@ -140,26 +130,6 @@ function makeChannelMessageRequest(channelId: string) {
     }
   });
   return { body, eventId };
-}
-
-async function trigger(body: string) {
-  const waitUntilPromises: Promise<unknown>[] = [];
-  const ctx = {
-    waitUntil: (p: Promise<unknown>) => {
-      waitUntilPromises.push(p);
-    },
-    passThroughOnException: () => {}
-  } as unknown as ExecutionContext;
-  const res = await handleSlackEvent(
-    new Request("https://example.com/slack/events", {
-      method: "POST",
-      headers: await slackHeaders(body),
-      body
-    }),
-    ctx
-  );
-  await Promise.allSettled(waitUntilPromises);
-  return res;
 }
 
 // Compute the deterministic push token the workflow uses for this event + agent.

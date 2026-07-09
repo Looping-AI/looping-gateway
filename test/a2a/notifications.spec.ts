@@ -1,8 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { SignJWT, exportJWK, generateKeyPair, type JWK } from "jose";
-import type { Task } from "@a2a-js/sdk";
-import { env } from "cloudflare:workers";
-import { getDb } from "@/db/client";
+import type { Task, TaskState } from "@a2a-js/sdk";
 import { registerAgent } from "@/db/models/agents";
 import {
   setPublicUrl,
@@ -18,43 +15,14 @@ import {
   NOTIFICATION_TOKEN_HEADER,
   NOTIFICATIONS_PATH
 } from "@/a2a/notifications";
+import { makeKey, signJwt, type TestKey } from "../helpers/auth";
 
 const JKU = "https://agent.example.com/.well-known/jwks.json";
 const KID = "cb1";
 const ISSUER = "https://gw.example.com";
 const AUD = `${ISSUER}${NOTIFICATIONS_PATH}`;
+const SUB = "custom:0:remoteagent";
 const NTOK = "ntok-123";
-
-const db = getDb();
-
-interface TestKey {
-  privateKey: CryptoKey;
-  publicJwk: JWK;
-}
-async function makeKey(kid: string): Promise<TestKey> {
-  const { publicKey, privateKey } = await generateKeyPair("EdDSA", {
-    crv: "Ed25519",
-    extractable: true
-  });
-  const publicJwk = await exportJWK(publicKey);
-  publicJwk.kid = kid;
-  publicJwk.alg = "EdDSA";
-  publicJwk.use = "sig";
-  return { privateKey, publicJwk };
-}
-
-async function signCallback(
-  key: TestKey,
-  opts: { aud?: string } = {}
-): Promise<string> {
-  return new SignJWT({})
-    .setProtectedHeader({ alg: "EdDSA", kid: KID, jku: JKU })
-    .setSubject("custom:0:remoteagent")
-    .setAudience(opts.aud ?? AUD)
-    .setIssuedAt()
-    .setExpirationTime("2m")
-    .sign(key.privateKey);
-}
 
 interface SlackPost {
   channel: string;
@@ -97,15 +65,23 @@ function stubFetch(key: TestKey, posts: SlackPost[]) {
 }
 
 function makeTask(text: string): Task {
+  return makeStatusTask(text, { state: "completed", messageId: "r1" });
+}
+
+/** Build a Task callback with an explicit state + status-message id. */
+function makeStatusTask(
+  text: string,
+  opts: { state: TaskState; messageId?: string }
+): Task {
   return {
     kind: "task",
     id: "task-1",
     contextId: "c1",
     status: {
-      state: "completed",
+      state: opts.state,
       message: {
         kind: "message",
-        messageId: "r1",
+        messageId: opts.messageId ?? "r1",
         role: "agent",
         parts: [{ kind: "text", text }],
         contextId: "c1"
@@ -158,7 +134,7 @@ describe("handleAgentNotification", () => {
   it("verifies the callback, posts the reply, and completes the task", async () => {
     const posts: SlackPost[] = [];
     stubFetch(key, posts);
-    const bearer = await signCallback(key);
+    const bearer = await signJwt(key, { jku: JKU, sub: SUB, aud: AUD });
 
     const res = await handleAgentNotification(
       callbackRequest(bearer, NTOK, makeTask("Hello from the agent"))
@@ -176,7 +152,7 @@ describe("handleAgentNotification", () => {
   it("posts nothing for an empty reply but still completes (no-reply classification)", async () => {
     const posts: SlackPost[] = [];
     stubFetch(key, posts);
-    const bearer = await signCallback(key);
+    const bearer = await signJwt(key, { jku: JKU, sub: SUB, aud: AUD });
 
     const res = await handleAgentNotification(
       callbackRequest(bearer, NTOK, makeTask("   "))
@@ -190,7 +166,11 @@ describe("handleAgentNotification", () => {
   it("rejects a callback whose token is signed for the wrong audience", async () => {
     const posts: SlackPost[] = [];
     stubFetch(key, posts);
-    const bearer = await signCallback(key, { aud: "https://evil.test/hook" });
+    const bearer = await signJwt(key, {
+      jku: JKU,
+      sub: SUB,
+      aud: "https://evil.test/hook"
+    });
 
     const res = await handleAgentNotification(
       callbackRequest(bearer, NTOK, makeTask("hi"))
@@ -208,7 +188,7 @@ describe("handleAgentNotification", () => {
     const posts: SlackPost[] = [];
     const attacker = await makeKey(KID); // same kid, different key material
     stubFetch(key, posts); // JWKS still serves the real pinned key
-    const bearer = await signCallback(attacker);
+    const bearer = await signJwt(attacker, { jku: JKU, sub: SUB, aud: AUD });
 
     const res = await handleAgentNotification(
       callbackRequest(bearer, NTOK, makeTask("hi"))
@@ -221,7 +201,7 @@ describe("handleAgentNotification", () => {
   it("400s and records the reason when the body is not a Task", async () => {
     const posts: SlackPost[] = [];
     stubFetch(key, posts);
-    const bearer = await signCallback(key);
+    const bearer = await signJwt(key, { jku: JKU, sub: SUB, aud: AUD });
     const req = new Request(`${ISSUER}${NOTIFICATIONS_PATH}`, {
       method: "POST",
       headers: {
@@ -241,30 +221,132 @@ describe("handleAgentNotification", () => {
     expect(row?.lastError).toContain("not a valid A2A Task");
   });
 
-  it("400s and records the reason when the task state is not completed", async () => {
+  it("posts an intermediate (non-terminal) update, keeps the task pending, and keeps the ⏳", async () => {
     const posts: SlackPost[] = [];
     stubFetch(key, posts);
-    const bearer = await signCallback(key);
-    const workingTask: Task = {
-      ...makeTask("partial"),
-      status: { state: "working" }
+    const bearer = await signJwt(key, { jku: JKU, sub: SUB, aud: AUD });
+
+    const res = await handleAgentNotification(
+      callbackRequest(
+        bearer,
+        NTOK,
+        makeStatusTask("working on it", { state: "working", messageId: "u1" })
+      )
+    );
+
+    expect(res.status).toBe(200);
+    expect(posts).toHaveLength(1);
+    expect(posts[0]).toMatchObject({ channel: "C1", text: "working on it" });
+    const row = await getAgentTaskByToken(NTOK);
+    // Row stays pending (⏳ not collected) and the update is recorded for dedup.
+    expect(row?.status).toBe("pending");
+    expect(row?.receivedMessageIds).toBe("u1");
+  });
+
+  it("400s a non-terminal update missing a messageId and records the reason", async () => {
+    const posts: SlackPost[] = [];
+    stubFetch(key, posts);
+    const bearer = await signJwt(key, { jku: JKU, sub: SUB, aud: AUD });
+    const noIdTask: Task = {
+      kind: "task",
+      id: "task-1",
+      contextId: "c1",
+      status: { state: "working" } // no status.message → no messageId
     };
 
     const res = await handleAgentNotification(
-      callbackRequest(bearer, NTOK, workingTask)
+      callbackRequest(bearer, NTOK, noIdTask)
     );
 
     expect(res.status).toBe(400);
     expect(posts).toHaveLength(0);
     const row = await getAgentTaskByToken(NTOK);
     expect(row?.status).toBe("pending");
-    expect(row?.lastError).toContain("working");
+    expect(row?.lastError).toContain("messageId");
+  });
+
+  it("dedupes a replayed intermediate update by messageId but posts distinct ones", async () => {
+    const posts: SlackPost[] = [];
+    stubFetch(key, posts);
+    const bearer = await signJwt(key, { jku: JKU, sub: SUB, aud: AUD });
+
+    await handleAgentNotification(
+      callbackRequest(
+        bearer,
+        NTOK,
+        makeStatusTask("step one", { state: "working", messageId: "u1" })
+      )
+    );
+    // Same messageId again (at-least-once retry) → not re-posted.
+    await handleAgentNotification(
+      callbackRequest(
+        bearer,
+        NTOK,
+        makeStatusTask("step one", { state: "working", messageId: "u1" })
+      )
+    );
+    // Distinct messageId → posted.
+    await handleAgentNotification(
+      callbackRequest(
+        bearer,
+        NTOK,
+        makeStatusTask("step two", { state: "working", messageId: "u2" })
+      )
+    );
+
+    expect(posts.map((p) => p.text)).toEqual(["step one", "step two"]);
+    const row = await getAgentTaskByToken(NTOK);
+    expect(row?.status).toBe("pending");
+    expect((row?.receivedMessageIds ?? "").split(",").sort()).toEqual([
+      "u1",
+      "u2"
+    ]);
+  });
+
+  it("posts intermediate updates then completes on the terminal Task", async () => {
+    const posts: SlackPost[] = [];
+    stubFetch(key, posts);
+    const bearer = await signJwt(key, { jku: JKU, sub: SUB, aud: AUD });
+
+    await handleAgentNotification(
+      callbackRequest(
+        bearer,
+        NTOK,
+        makeStatusTask("searching…", { state: "working", messageId: "u1" })
+      )
+    );
+    const res = await handleAgentNotification(
+      callbackRequest(bearer, NTOK, makeTask("final answer"))
+    );
+
+    expect(res.status).toBe(200);
+    expect(posts.map((p) => p.text)).toEqual(["searching…", "final answer"]);
+    expect((await getAgentTaskByToken(NTOK))?.status).toBe("completed");
+  });
+
+  it("surfaces a gateway notice and completes on a terminal failure with no text", async () => {
+    const posts: SlackPost[] = [];
+    stubFetch(key, posts);
+    const bearer = await signJwt(key, { jku: JKU, sub: SUB, aud: AUD });
+    const failed: Task = {
+      ...makeTask("ignored"),
+      status: { state: "failed" }
+    };
+
+    const res = await handleAgentNotification(
+      callbackRequest(bearer, NTOK, failed)
+    );
+
+    expect(res.status).toBe(200);
+    expect(posts).toHaveLength(1);
+    expect(posts[0].text).toContain("ended without a reply (state: failed)");
+    expect((await getAgentTaskByToken(NTOK))?.status).toBe("completed");
   });
 
   it("404s an unknown notification token", async () => {
     const posts: SlackPost[] = [];
     stubFetch(key, posts);
-    const bearer = await signCallback(key);
+    const bearer = await signJwt(key, { jku: JKU, sub: SUB, aud: AUD });
 
     const res = await handleAgentNotification(
       callbackRequest(bearer, "nope", makeTask("hi"))
@@ -277,7 +359,7 @@ describe("handleAgentNotification", () => {
     const posts: SlackPost[] = [];
     stubFetch(key, posts);
     await completeAgentTask(NTOK); // pretend a prior callback already ran
-    const bearer = await signCallback(key);
+    const bearer = await signJwt(key, { jku: JKU, sub: SUB, aud: AUD });
 
     const res = await handleAgentNotification(
       callbackRequest(bearer, NTOK, makeTask("hi"))

@@ -115,6 +115,38 @@ export async function recordAgentTaskError(
 }
 
 /**
+ * Record that an intermediate update's `messageId` has been received (and its
+ * text posted to Slack) for a task, so an at-least-once push retry does not
+ * double-post the same progress message. The append-if-absent is a single
+ * atomic UPDATE (no app-side read-modify-write, so concurrent callbacks can't
+ * race): it only appends when the id is not already present in the
+ * comma-delimited `received_message_ids` set. Returns `true` when a row was
+ * updated (this update was new → the caller should post it); `false` when the
+ * id was already recorded or the task is no longer `pending`. The surrounding
+ * commas in the `LIKE` guard make the membership test exact.
+ */
+export async function recordReceivedMessageId(
+  token: string,
+  messageId: string
+): Promise<boolean> {
+  const db = getDb();
+  const rows = await db
+    .update(schema.agentTasks)
+    .set({
+      receivedMessageIds: sql`coalesce(${schema.agentTasks.receivedMessageIds} || ',', '') || ${messageId}`
+    })
+    .where(
+      and(
+        eq(schema.agentTasks.token, token),
+        eq(schema.agentTasks.status, "pending"),
+        sql`(',' || coalesce(${schema.agentTasks.receivedMessageIds}, '') || ',') NOT LIKE ${"%," + messageId + ",%"}`
+      )
+    )
+    .returning({ token: schema.agentTasks.token });
+  return rows.length > 0;
+}
+
+/**
  * Mark a task completed. Conditional on it still being `pending` so a duplicate
  * or replayed callback flips exactly one row — the returned count is the caller's
  * idempotency signal (1 = we own this callback; 0 = already handled).

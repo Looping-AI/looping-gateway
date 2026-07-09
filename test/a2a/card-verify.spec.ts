@@ -1,11 +1,12 @@
 import { describe, it, expect, afterEach, vi } from "vitest";
-import { FlattenedSign, exportJWK, generateKeyPair, type JWK } from "jose";
+import { FlattenedSign } from "jose";
 import type { AgentCard } from "@a2a-js/sdk";
 import {
   AgentCardVerificationError,
   canonicalCardPayload,
   verifyAgentCardSignature
 } from "@/a2a/card-verify";
+import { makeKey, stubJwks, type TestKey } from "../helpers/auth";
 
 const JKU = "https://agent.example.com/.well-known/jwks.json";
 
@@ -24,24 +25,6 @@ function baseCard(): AgentCard {
   };
 }
 
-interface TestKey {
-  privateKey: CryptoKey;
-  publicJwk: JWK;
-  kid: string;
-}
-
-async function makeKey(kid: string): Promise<TestKey> {
-  const { publicKey, privateKey } = await generateKeyPair("EdDSA", {
-    crv: "Ed25519",
-    extractable: true
-  });
-  const publicJwk = await exportJWK(publicKey);
-  publicJwk.kid = kid;
-  publicJwk.alg = "EdDSA";
-  publicJwk.use = "sig";
-  return { privateKey, publicJwk, kid };
-}
-
 async function signCard(
   card: AgentCard,
   key: TestKey,
@@ -49,30 +32,12 @@ async function signCard(
 ): Promise<AgentCard> {
   const payload = new TextEncoder().encode(canonicalCardPayload(card));
   const jws = await new FlattenedSign(payload)
-    .setProtectedHeader({ alg: "EdDSA", kid: key.kid, jku })
+    .setProtectedHeader({ alg: "EdDSA", kid: key.publicJwk.kid as string, jku })
     .sign(key.privateKey);
   return {
     ...card,
     signatures: [{ protected: jws.protected, signature: jws.signature }]
   } as AgentCard;
-}
-
-/** Stub global fetch to serve a JWKS at `jku` with the given keys. */
-function stubJwks(jku: string, keys: JWK[]) {
-  const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
-    const url =
-      typeof input === "string"
-        ? input
-        : input instanceof URL
-          ? input.toString()
-          : input.url;
-    if (url === jku) {
-      return new Response(JSON.stringify({ keys }), { status: 200 });
-    }
-    return new Response("not found", { status: 404 });
-  });
-  vi.stubGlobal("fetch", fetchMock);
-  return fetchMock;
 }
 
 afterEach(() => {

@@ -1,14 +1,11 @@
 import { describe, it, expect } from "vitest";
 import { env } from "cloudflare:workers";
-import { getDb } from "@/db/client";
 import {
   getAgent,
   listAgents,
   getAgentsForChannel,
   getAgentInChannel
 } from "@/db/models/agents";
-
-const db = getDb();
 
 describe("agents", () => {
   it("migration seed: admin and onboarding agents exist", async () => {

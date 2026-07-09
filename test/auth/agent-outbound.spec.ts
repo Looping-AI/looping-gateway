@@ -1,20 +1,15 @@
 import { describe, it, expect, afterEach, vi } from "vitest";
-import { env } from "cloudflare:workers";
-import { decodeProtectedHeader, importJWK, jwtVerify, type JWK } from "jose";
+import { decodeProtectedHeader, jwtVerify, type JWK } from "jose";
 import {
   IDENTITY_CLAIM,
   getPublicJwks,
   signGatewayToken
 } from "@/auth/agent-outbound";
+import { importGatewayPublicKey } from "../helpers/auth";
 
 const AUD = "https://agent.example.com";
 const PUBLIC_URL = "https://gateway.test";
 const EXPECTED_JKU = `${PUBLIC_URL}/.well-known/jwks.json`;
-
-async function publicKey() {
-  const { keys } = getPublicJwks();
-  return importJWK(keys[0], "EdDSA");
-}
 
 afterEach(() => {
   vi.useRealTimers();
@@ -56,7 +51,7 @@ describe("signGatewayToken", () => {
     expect(header.jku).toBe(EXPECTED_JKU);
     expect(header.kid).toBeTruthy();
 
-    const { payload } = await jwtVerify(token, await publicKey(), {
+    const { payload } = await jwtVerify(token, await importGatewayPublicKey(), {
       issuer: PUBLIC_URL,
       audience: AUD,
       algorithms: ["EdDSA"]
@@ -85,7 +80,7 @@ describe("signGatewayToken", () => {
         workspaceId: 0
       }
     });
-    const { payload } = await jwtVerify(token, await publicKey(), {
+    const { payload } = await jwtVerify(token, await importGatewayPublicKey(), {
       issuer: PUBLIC_URL,
       audience: AUD,
       algorithms: ["EdDSA"]
@@ -108,7 +103,7 @@ describe("signGatewayToken", () => {
       }
     });
     await expect(
-      jwtVerify(token, await publicKey(), {
+      jwtVerify(token, await importGatewayPublicKey(), {
         issuer: PUBLIC_URL,
         audience: "https://someone-else.example.com",
         algorithms: ["EdDSA"]
@@ -131,7 +126,7 @@ describe("signGatewayToken", () => {
     const flipped = s[0] === "A" ? "B" : "A";
     const tampered = `${h}.${p}.${flipped}${s.slice(1)}`;
     await expect(
-      jwtVerify(tampered, await publicKey(), {
+      jwtVerify(tampered, await importGatewayPublicKey(), {
         issuer: PUBLIC_URL,
         audience: AUD,
         algorithms: ["EdDSA"]
@@ -155,7 +150,7 @@ describe("signGatewayToken", () => {
     // Advance past the 120s TTL.
     vi.setSystemTime(new Date("2025-01-01T00:05:00Z"));
     await expect(
-      jwtVerify(token, await publicKey(), {
+      jwtVerify(token, await importGatewayPublicKey(), {
         issuer: PUBLIC_URL,
         audience: AUD,
         algorithms: ["EdDSA"]

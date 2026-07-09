@@ -1,5 +1,4 @@
 import { describe, it, expect, afterEach, beforeEach, vi } from "vitest";
-import { env } from "cloudflare:workers";
 import { stubSlack } from "../wrappers/slack-stub";
 import {
   anchorTeamId,
@@ -8,7 +7,6 @@ import {
   syncUsers,
   syncAdminMemberships
 } from "@/workflows/reconcile";
-import { getDb } from "@/db/client";
 import { getSlackUser, upsertSlackUser } from "@/db/models/users";
 import { getSlackChannelName, upsertSlackChannel } from "@/db/models/channels";
 import { upsertWorkspace, ORG_WORKSPACE_ID } from "@/db/models/workspaces";
@@ -22,8 +20,6 @@ import {
   SystemConfigKeys
 } from "@/db/models/workspace-configs";
 import { _resetBotInfoCacheForTest } from "@/wrappers/slack";
-
-const db = getDb();
 
 afterEach(() => vi.unstubAllGlobals());
 

@@ -1,18 +1,15 @@
 import { describe, it, expect, beforeEach } from "vitest";
-import { env } from "cloudflare:workers";
-import { getDb } from "@/db/client";
 import { registerAgent } from "@/db/models/agents";
 import {
   createAgentTask,
   getAgentTaskByToken,
   completeAgentTask,
+  recordReceivedMessageId,
   updateAgentTaskTaskId,
   deleteAgentTask,
   sweepStaleAgentTasks,
   type CreateAgentTaskInput
 } from "@/db/models/agent-tasks";
-
-const db = getDb();
 
 // agent_tasks.agent_name is an FK; seed a real agent so inserts satisfy it.
 beforeEach(async () => {
@@ -97,5 +94,51 @@ describe("agent-tasks model", () => {
     // ...but a negative window (cutoff in the future) collects everything.
     expect(await sweepStaleAgentTasks(-10)).toBeGreaterThanOrEqual(1);
     expect(await getAgentTaskByToken("tok-d")).toBeNull();
+  });
+
+  describe("recordReceivedMessageId", () => {
+    it("returns true and records the id on first call", async () => {
+      await createAgentTask(input("tok-rid-a"));
+      expect(await recordReceivedMessageId("tok-rid-a", "msg-1")).toBe(true);
+      const row = await getAgentTaskByToken("tok-rid-a");
+      expect(row?.receivedMessageIds).toContain("msg-1");
+    });
+
+    it("returns false and does not duplicate on a repeated id (idempotent)", async () => {
+      await createAgentTask(input("tok-rid-b"));
+      expect(await recordReceivedMessageId("tok-rid-b", "msg-1")).toBe(true);
+      expect(await recordReceivedMessageId("tok-rid-b", "msg-1")).toBe(false);
+      const row = await getAgentTaskByToken("tok-rid-b");
+      // Exactly one occurrence in the stored string.
+      expect(row?.receivedMessageIds?.split("msg-1").length).toBe(2);
+    });
+
+    it("accumulates multiple distinct ids", async () => {
+      await createAgentTask(input("tok-rid-c"));
+      expect(await recordReceivedMessageId("tok-rid-c", "msg-1")).toBe(true);
+      expect(await recordReceivedMessageId("tok-rid-c", "msg-2")).toBe(true);
+      expect(await recordReceivedMessageId("tok-rid-c", "msg-3")).toBe(true);
+      const row = await getAgentTaskByToken("tok-rid-c");
+      expect(row?.receivedMessageIds).toContain("msg-1");
+      expect(row?.receivedMessageIds).toContain("msg-2");
+      expect(row?.receivedMessageIds).toContain("msg-3");
+    });
+
+    it("does not match a substring as a duplicate (msg-1 vs msg-10)", async () => {
+      await createAgentTask(input("tok-rid-d"));
+      expect(await recordReceivedMessageId("tok-rid-d", "msg-1")).toBe(true);
+      // msg-10 must be treated as a new id, not a duplicate of msg-1.
+      expect(await recordReceivedMessageId("tok-rid-d", "msg-10")).toBe(true);
+    });
+
+    it("returns false for a completed task", async () => {
+      await createAgentTask(input("tok-rid-e"));
+      await completeAgentTask("tok-rid-e");
+      expect(await recordReceivedMessageId("tok-rid-e", "msg-1")).toBe(false);
+    });
+
+    it("returns false for an unknown token", async () => {
+      expect(await recordReceivedMessageId("tok-nope", "msg-1")).toBe(false);
+    });
   });
 });

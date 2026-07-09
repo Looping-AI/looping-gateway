@@ -1,7 +1,6 @@
 import { describe, it, expect, afterEach, vi } from "vitest";
-import { env } from "cloudflare:workers";
 import type { Message } from "@a2a-js/sdk";
-import { importJWK, jwtVerify } from "jose";
+import { jwtVerify } from "jose";
 import {
   _resetIssuerCacheForTest,
   dispatchToAgent,
@@ -9,9 +8,9 @@ import {
 } from "@/agents/dispatch";
 import { slackTsToIso } from "@/agents/shared/messages";
 import type { UserAuthContext } from "@/auth";
-import { getPublicJwks, IDENTITY_CLAIM } from "@/auth/agent-outbound";
+import { IDENTITY_CLAIM } from "@/auth/agent-outbound";
+import { importGatewayPublicKey } from "../helpers/auth";
 import { buildAgentCard } from "@/a2a/card";
-import { getDb } from "@/db/client";
 import {
   setAllowedRemoteAgentDomains,
   setPublicUrl
@@ -30,11 +29,6 @@ const ENDPOINT = "https://remote.example.com/a2a";
 interface RemotePost {
   authorization: string | null;
   message: Message;
-}
-
-async function publicKey() {
-  const { keys } = getPublicJwks();
-  return importJWK(keys[0], "EdDSA");
 }
 
 function stubRemote(posts: RemotePost[]) {
@@ -116,7 +110,6 @@ function stubRemoteContractViolation(posts: RemotePost[]) {
 afterEach(async () => {
   vi.unstubAllGlobals();
   _resetIssuerCacheForTest();
-  const db = getDb();
   await setPublicUrl("https://gateway.test");
   await setAllowedRemoteAgentDomains([]);
 });
@@ -180,7 +173,6 @@ describe("dispatchToAgent (local Durable Object)", () => {
   });
 
   it("namespaces remote identity and context per logical agent instance", async () => {
-    const db = getDb();
     await setPublicUrl("https://gateway.test");
     await setAllowedRemoteAgentDomains(["example.com"]);
     const posts: RemotePost[] = [];
@@ -272,12 +264,12 @@ describe("dispatchToAgent (local Durable Object)", () => {
     const tokenA = posts[0].authorization?.split(" ")[1] ?? "";
     const tokenB = posts[1].authorization?.split(" ")[1] ?? "";
     const [{ payload: payloadA }, { payload: payloadB }] = await Promise.all([
-      jwtVerify(tokenA, await publicKey(), {
+      jwtVerify(tokenA, await importGatewayPublicKey(), {
         issuer: "https://gateway.test",
         audience: "https://remote.example.com",
         algorithms: ["EdDSA"]
       }),
-      jwtVerify(tokenB, await publicKey(), {
+      jwtVerify(tokenB, await importGatewayPublicKey(), {
         issuer: "https://gateway.test",
         audience: "https://remote.example.com",
         algorithms: ["EdDSA"]
