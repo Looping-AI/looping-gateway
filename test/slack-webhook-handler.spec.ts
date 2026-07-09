@@ -396,6 +396,52 @@ describe("lifecycle events", () => {
     );
   });
 
+  it("ignores a message_changed whose text is unchanged (metadata-only, e.g. link unfurl)", async () => {
+    const create = spyWorkflow("REMOTE_MESSAGE_WORKFLOW");
+    const body = JSON.stringify({
+      type: "event_callback",
+      event_id: "EvEditNoOp",
+      event: {
+        type: "message",
+        subtype: "message_changed",
+        channel: "C1",
+        channel_type: "channel",
+        message: { ts: "1700000000.1", user: "U1", text: "see github.com/x" },
+        previous_message: {
+          ts: "1700000000.1",
+          user: "U1",
+          text: "see github.com/x"
+        }
+      }
+    });
+    const res = await post(body);
+    expect(res.status).toBe(200);
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it("ignores a message_changed that differs only in whitespace", async () => {
+    const create = spyWorkflow("REMOTE_MESSAGE_WORKFLOW");
+    const body = JSON.stringify({
+      type: "event_callback",
+      event_id: "EvEditWs",
+      event: {
+        type: "message",
+        subtype: "message_changed",
+        channel: "C1",
+        channel_type: "channel",
+        message: { ts: "1700000000.1", user: "U1", text: "hello  world " },
+        previous_message: {
+          ts: "1700000000.1",
+          user: "U1",
+          text: "hello world"
+        }
+      }
+    });
+    const res = await post(body);
+    expect(res.status).toBe(200);
+    expect(create).not.toHaveBeenCalled();
+  });
+
   it("extracts userId from message.edited.user when message.user is absent (channel message_changed)", async () => {
     const create = spyWorkflow("REMOTE_MESSAGE_WORKFLOW");
     const body = JSON.stringify({

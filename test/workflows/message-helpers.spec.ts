@@ -159,18 +159,37 @@ describe("feedText", () => {
     );
   });
 
-  it("renders an edit feed turn describing before/after text", () => {
+  it("renders an edit feed turn as a wdiff of the changed words", () => {
     const result = feedText(
       makeParams({
         editKind: "edited",
         ts: "1700.1",
-        text: "new text",
-        prevText: "old text"
+        text: "the new text here",
+        prevText: "the old text here"
       })
     );
     expect(result).toContain("edited");
-    expect(result).toContain("old text");
-    expect(result).toContain("new text");
+    // Only the changed word is marked; unchanged surrounding words stay as context.
+    expect(result).toContain("[-old-]");
+    expect(result).toContain("[+new+]");
+    expect(result).not.toContain("before:");
+  });
+
+  it("sends only the diff + context, not the whole body, for a long edit", () => {
+    const shared = "x".repeat(400);
+    const result = feedText(
+      makeParams({
+        editKind: "edited",
+        ts: "1700.1",
+        text: `${shared} alpha ${shared}`,
+        prevText: `${shared} omega ${shared}`
+      })
+    );
+    expect(result).toContain("[-omega-]");
+    expect(result).toContain("[+alpha+]");
+    // The full 400-char blocks must not be resent — context is truncated with an ellipsis.
+    expect(result).not.toContain(shared);
+    expect(result).toContain("…");
   });
 
   it("renders a delete feed turn with the prior text as transcript", () => {
