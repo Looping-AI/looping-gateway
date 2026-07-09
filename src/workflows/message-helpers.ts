@@ -9,6 +9,7 @@ import {
   type DispatchResult
 } from "@/agents/dispatch";
 import { InvalidEndpointError } from "@/a2a/endpoint";
+import { renderEditDiff } from "@/util/text-diff";
 import { postReply } from "@/wrappers/slack";
 import {
   REACTION_COLLECT_EVENT,
@@ -74,13 +75,17 @@ export function replyThreadTs(p: MessageWorkflowParams): string | null {
  * Render the body fanned out to agents. Plain turns carry the user text; edits
  * and deletes become a feed turn describing the change so agents stay aware of
  * the evolving channel reality (A2A has no edit/delete primitive).
+ *
+ * Edits send only a compact diff (the agent already holds the prior message in
+ * session), not both full bodies — see {@link renderEditDiff}.
  */
 export function feedText(p: MessageWorkflowParams): string {
   if (p.editKind === "deleted") {
     return `[deleted a message (ts ${p.ts})] ${p.prevText ?? ""}`.trim();
   }
   if (p.editKind === "edited") {
-    return `[edited a message (ts ${p.ts})] before: ${p.prevText ?? ""} | after: ${p.text}`;
+    const diff = renderEditDiff(p.prevText ?? "", p.text);
+    return `[edited a message (ts ${p.ts})] changed:\n${diff}`;
   }
   return p.text;
 }

@@ -6,6 +6,7 @@ import {
 import type { SlackWebhookPayload } from "@chat-adapter/slack/webhook";
 import { env } from "cloudflare:workers";
 import { isRecord, str } from "@/util/json";
+import { normalizeWhitespace } from "@/util/text-diff";
 import { pickDisplayName } from "@/util/display-name";
 import { getSlackTeamId, setPublicUrl } from "@/db/models/workspace-configs";
 import { PENDING_REACTION, reactionInstanceId } from "@/workflows/reaction";
@@ -81,6 +82,19 @@ function messageEditFromEvent(raw: unknown, subtype: string): MessageEdit {
 }
 
 /**
+ * True when an "edit" changed no visible text — e.g. Slack re-firing
+ * `message_changed` for link unfurling/embedding, or a whitespace-only tweak.
+ * These carry no signal for agents, so they are ignored rather than dispatched.
+ * Deletes are never no-ops (empty `text` differs from the prior transcript).
+ */
+function isNoOpEdit(edit: MessageEdit): boolean {
+  return (
+    edit.editKind === "edited" &&
+    normalizeWhitespace(edit.text) === normalizeWhitespace(edit.prevText ?? "")
+  );
+}
+
+/**
  * Map a parsed Slack webhook payload to the Workflow it should drive.
  *
  * Exported for unit-testing in isolation. The gateway calls this via
@@ -120,6 +134,9 @@ export function classifyEvent(payload: SlackWebhookPayload): Classification {
         // DM edit/delete → feed turn for the onboarding agent (DMs are an
         // implicit mention, so the agent is always woken). raw is the inner event.
         const edit = messageEditFromEvent(payload.raw, payload.subtype);
+        if (isNoOpEdit(edit)) {
+          return { kind: "ignore", reason: "message edit with no text change" };
+        }
         const userId = edit.userId ?? payload.userId;
         if (!userId) {
           return {
@@ -219,6 +236,12 @@ export function classifyEvent(payload: SlackWebhookPayload): Classification {
         }
         if (subtype && MESSAGE_EDIT_SUBTYPES.has(subtype)) {
           const edit = messageEditFromEvent(event, subtype);
+          if (isNoOpEdit(edit)) {
+            return {
+              kind: "ignore",
+              reason: "message edit with no text change"
+            };
+          }
           if (!edit.userId) {
             return { kind: "ignore", reason: "message edit without a user id" };
           }
