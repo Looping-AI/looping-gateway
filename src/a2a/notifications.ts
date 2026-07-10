@@ -163,9 +163,8 @@ export async function handleAgentNotification(
 
   if (!isTerminalTaskState(state)) {
     // Intermediate progress update: post its text as a threaded reply, leave the
-    // row pending, and keep the ⏳. Dedup by the update's `messageId` so an
-    // at-least-once retry doesn't re-post it (the in-memory `receivedMessageIds`
-    // set is fresh — the row was just re-read at the top of this handler).
+    // row pending, and keep the ⏳. Dedup by the update's `messageId`: we write
+    // the id first (atomic upsert) and only post when the write confirms it's new.
     const updateId = task.status.message?.messageId;
     if (!updateId) {
       // Agent developer requirement: every non-terminal Task pushed to this
@@ -180,10 +179,9 @@ export async function handleAgentNotification(
         { status: 400 }
       );
     }
-    const alreadyReceived = (row.receivedMessageIds ?? "")
-      .split(",")
-      .includes(updateId);
-    if (text && !alreadyReceived) {
+
+    const isNew = await recordReceivedMessageId(notificationToken, updateId);
+    if (isNew && text) {
       await postReply(
         row.channelId,
         row.replyThreadTs,
@@ -191,10 +189,8 @@ export async function handleAgentNotification(
         displayName,
         iconUrl
       );
-      // Record AFTER a successful post so a post failure leaves the id unrecorded
-      // for the remote to retry. The append is atomic + idempotent on the id.
-      await recordReceivedMessageId(notificationToken, updateId);
     }
+
     return OK();
   }
 

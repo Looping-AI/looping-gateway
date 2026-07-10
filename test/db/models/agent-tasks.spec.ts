@@ -131,6 +131,32 @@ describe("agent-tasks model", () => {
       expect(await recordReceivedMessageId("tok-rid-d", "msg-10")).toBe(true);
     });
 
+    it("treats LIKE metacharacters in the id literally, not as wildcards", async () => {
+      await createAgentTask(input("tok-rid-wild"));
+      // Store a concrete id, then push a distinct id whose `_`/`%` would be
+      // wildcards under a LIKE membership test and falsely match it — dropping
+      // a genuine update. With an exact (instr) check both must be recorded.
+      expect(await recordReceivedMessageId("tok-rid-wild", "msg-1")).toBe(true);
+      expect(await recordReceivedMessageId("tok-rid-wild", "msg-_")).toBe(true);
+      expect(await recordReceivedMessageId("tok-rid-wild", "%")).toBe(true);
+      // And each remains idempotent on its own literal value.
+      expect(await recordReceivedMessageId("tok-rid-wild", "msg-_")).toBe(
+        false
+      );
+      expect(await recordReceivedMessageId("tok-rid-wild", "%")).toBe(false);
+    });
+
+    it("strips commas and whitespace from the id before storing/matching", async () => {
+      await createAgentTask(input("tok-rid-comma"));
+      // The comma is the set delimiter (a raw one would corrupt membership) and
+      // whitespace is meaningless in an opaque id, so both are removed: `a, b`
+      // is recorded as `ab` and a later `ab` is deduped against it.
+      expect(await recordReceivedMessageId("tok-rid-comma", "a, b")).toBe(true);
+      const row = await getAgentTaskByToken("tok-rid-comma");
+      expect(row?.receivedMessageIds).toBe("ab");
+      expect(await recordReceivedMessageId("tok-rid-comma", "ab")).toBe(false);
+    });
+
     it("returns false for a completed task", async () => {
       await createAgentTask(input("tok-rid-e"));
       await completeAgentTask("tok-rid-e");

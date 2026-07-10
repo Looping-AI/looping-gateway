@@ -122,24 +122,44 @@ export async function recordAgentTaskError(
  * race): it only appends when the id is not already present in the
  * comma-delimited `received_message_ids` set. Returns `true` when a row was
  * updated (this update was new → the caller should post it); `false` when the
- * id was already recorded or the task is no longer `pending`. The surrounding
- * commas in the `LIKE` guard make the membership test exact.
+ * id was already recorded or the task is no longer `pending`. Membership is an
+ * exact, literal `instr` substring search over the comma-wrapped set (not
+ * `LIKE`, whose `%`/`_` would be interpreted as wildcards in the
+ * remote-controlled `messageId`).
+ *
+ * Commas and whitespace are stripped from `messageId` before use: the comma is
+ * the set delimiter (a raw one would corrupt membership tests) and whitespace
+ * carries no meaning in an opaque id. The remote id format is not guaranteed,
+ * so we sanitize rather than reject.
  */
 export async function recordReceivedMessageId(
   token: string,
   messageId: string
 ): Promise<boolean> {
   const db = getDb();
+  const id = messageId.replace(/[\s,]/g, "");
   const rows = await db
     .update(schema.agentTasks)
     .set({
-      receivedMessageIds: sql`coalesce(${schema.agentTasks.receivedMessageIds} || ',', '') || ${messageId}`
+      receivedMessageIds: sql`case
+        when ${schema.agentTasks.receivedMessageIds} is null
+          or ${schema.agentTasks.receivedMessageIds} = ''
+        then ${id}
+        else ${schema.agentTasks.receivedMessageIds} || ',' || ${id}
+      end`
     })
     .where(
       and(
         eq(schema.agentTasks.token, token),
         eq(schema.agentTasks.status, "pending"),
-        sql`(',' || coalesce(${schema.agentTasks.receivedMessageIds}, '') || ',') NOT LIKE ${"%," + messageId + ",%"}`
+        // Exact, comma-delimited set membership via `instr` (a literal substring
+        // search). `LIKE` is unusable here: `messageId` is remote-controlled and
+        // its `%`/`_` would act as wildcards, so an id could falsely match a
+        // different stored id and drop a genuine update.
+        sql`instr(
+          ',' || coalesce(${schema.agentTasks.receivedMessageIds}, '') || ',',
+          ',' || ${id} || ','
+        ) = 0`
       )
     )
     .returning({ token: schema.agentTasks.token });
