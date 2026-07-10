@@ -1,22 +1,11 @@
 import { describe, it, expect } from "vitest";
 import { authorize } from "@/auth/authorize";
-import type { UserAuthContext } from "@/auth/authorize";
+import { makeAuthCtx } from "../helpers/workspace";
 
-function ctx(overrides: Partial<UserAuthContext> = {}): UserAuthContext {
-  return {
-    slackUserId: "U1",
-    displayName: null,
-    isPrimaryOwner: false,
-    isOrgAdmin: false,
-    adminWorkspaces: [],
-    ...overrides
-  };
-}
-
-const owner = ctx({ isPrimaryOwner: true });
-const orgAdmin = ctx({ isOrgAdmin: true });
-const wsAdmin5 = ctx({ adminWorkspaces: [5] });
-const none = ctx();
+const owner = makeAuthCtx({ isPrimaryOwner: true });
+const orgAdmin = makeAuthCtx({ isOrgAdmin: true });
+const wsAdmin5 = makeAuthCtx({ adminWorkspaces: [5] });
+const none = makeAuthCtx();
 
 describe("authorize — truth table", () => {
   it("IsPrimaryOwner: only the owner", () => {

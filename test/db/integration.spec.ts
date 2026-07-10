@@ -1,6 +1,4 @@
 import { describe, it, expect } from "vitest";
-import { env } from "cloudflare:workers";
-import { getDb } from "@/db/client";
 import {
   getAgent,
   getAgentChannels,
@@ -16,8 +14,6 @@ import {
   getWorkspace,
   ORG_WORKSPACE_ID
 } from "@/db/models/workspaces";
-
-const db = getDb();
 
 describe("workspaces — createWorkspace", () => {
   it("allocates an id above the org sentinel and persists the row", async () => {

@@ -1,6 +1,4 @@
 import { describe, it, expect } from "vitest";
-import { env } from "cloudflare:workers";
-import { getDb } from "@/db/client";
 import type { UserAuthContext } from "@/auth";
 import {
   agentsRead,
@@ -14,7 +12,6 @@ import {
 } from "@/agents/admin/tools";
 import {
   ORG_WORKSPACE_ID,
-  createWorkspace,
   setWorkspaceAdminChannel
 } from "@/db/models/workspaces";
 import { getAgent } from "@/db/models/agents";
@@ -23,24 +20,9 @@ import {
   getAdminIconUrl,
   getAdminDisplayName
 } from "@/db/models/workspace-configs";
+import { makeAuthCtx, freshWsId } from "../../helpers/workspace";
 
-const db = getDb();
-
-/** Create a real workspace (agents FK-reference it) and return its id. */
-async function freshWsId(name: string): Promise<number> {
-  return (await createWorkspace({ name })).id;
-}
-
-function ctx(overrides: Partial<UserAuthContext> = {}): UserAuthContext {
-  return {
-    slackUserId: "U1",
-    displayName: "Tester",
-    isPrimaryOwner: false,
-    isOrgAdmin: false,
-    adminWorkspaces: [],
-    ...overrides
-  };
-}
+const ctx = makeAuthCtx;
 
 const orgAdmin = ctx({ isOrgAdmin: true });
 

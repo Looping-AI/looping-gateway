@@ -1,13 +1,9 @@
 import { describe, it, expect } from "vitest";
-import { env } from "cloudflare:workers";
-import { getDb } from "@/db/client";
 import {
   upsertSlackUser,
   getSlackUser,
   markUserDeleted
 } from "@/db/models/users";
-
-const db = getDb();
 
 describe("slack_users", () => {
   it("inserts then updates by id (upsert)", async () => {

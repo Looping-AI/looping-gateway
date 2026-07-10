@@ -4,7 +4,8 @@ import { getAgent } from "@/db/models/agents";
 import {
   getAgentTaskByToken,
   completeAgentTask,
-  recordAgentTaskError
+  recordAgentTaskError,
+  recordReceivedMessageId
 } from "@/db/models/agent-tasks";
 import {
   getPublicUrl,
@@ -14,7 +15,7 @@ import {
   verifyAgentCallbackToken,
   AgentCallbackAuthError
 } from "@/auth/agent-inbound";
-import { extractText } from "@/a2a/parts";
+import { extractText, isTerminalTaskState } from "@/a2a/parts";
 import { sanitizeRemoteReply } from "@/a2a/client";
 import { postReply } from "@/wrappers/slack";
 import { signalReactionCollect } from "@/workflows/message-helpers";
@@ -48,18 +49,32 @@ async function captureCallbackError(
 }
 
 /**
+ * Gateway-controlled notice posted when a remote agent ends a turn in a failure
+ * state (`failed`/`canceled`/`rejected`) without any text of its own — so the
+ * user sees *why* the ⏳ cleared rather than silence. Never contains remote
+ * payload, so it is safe to post verbatim.
+ */
+function terminalFailureNotice(agentName: string, state: string): string {
+  return `*Agent ${agentName}* ended without a reply (state: ${state}). If you were expecting an answer, please contact the agent developer.`;
+}
+
+/**
  * Handle a remote agent's push-notification callback (A2A spec §13.2). This is
  * how a remote agent's reply actually reaches Slack now: the gateway accepted the
  * turn earlier and handed the remote a webhook URL + validation `token`; the
- * remote generates on its own time and POSTs the terminal Task here.
+ * remote generates on its own time and POSTs one or more Tasks here — zero or
+ * more intermediate progress updates (non-terminal `state`) followed by a
+ * terminal Task.
  *
  * Trust boundary. Everything here is untrusted until proven:
  *  1. The `token` header must match a pending `agent_tasks` row (correlation).
  *  2. The `Authorization: Bearer` JWT must verify against that agent's *pinned*
  *     card signing key, with `aud` = this endpoint and a fresh `iat`/`exp`.
- * Only then do we read the pushed Task, post its (sanitized) text under the
- * agent's identity, and collect the ⏳. Single-use is enforced by flipping the
- * row to `completed` after a successful post, so retries/replays are no-ops.
+ * Only then do we read the pushed Task and post its (sanitized) text under the
+ * agent's identity. Intermediate updates post a threaded reply and leave the row
+ * `pending` (⏳ stays); each is deduped by its `messageId` so an at-least-once
+ * retry won't double-post. The ⏳ is collected only on a *terminal* Task, which
+ * also flips the row to `completed` — so terminal retries/replays are no-ops.
  */
 export async function handleAgentNotification(
   request: Request
@@ -141,33 +156,68 @@ export async function handleAgentNotification(
     return new Response("expected a Task body", { status: 400 });
   }
 
-  if (task.status.state !== "completed") {
-    await captureCallbackError(
-      notificationToken,
-      `unexpected task state: ${task.status.state}`
-    );
-    return new Response("only completed tasks are accepted", { status: 400 });
-  }
-
+  const state = task.status.state;
   const text = sanitizeRemoteReply(extractText(task));
   const displayName = agent.displayName ?? agent.name;
   const iconUrl = agent.iconUrl ?? null;
 
+  if (!isTerminalTaskState(state)) {
+    // Intermediate progress update: post its text as a threaded reply, leave the
+    // row pending, and keep the ⏳. Dedup by the update's `messageId`: we write
+    // the id first (atomic upsert) and only post when the write confirms it's new.
+    const updateId = task.status.message?.messageId;
+    if (!updateId) {
+      // Agent developer requirement: every non-terminal Task pushed to this
+      // endpoint MUST carry a status.message.messageId so the gateway can
+      // deduplicate at-least-once retries without double-posting.
+      await captureCallbackError(
+        notificationToken,
+        "non-terminal task updates must include a status.message.messageId; the gateway uses this to deduplicate at-least-once delivery"
+      );
+      return new Response(
+        "non-terminal task updates require a status.message.messageId for deduplication",
+        { status: 400 }
+      );
+    }
+
+    const isNew = await recordReceivedMessageId(notificationToken, updateId);
+    if (isNew && text) {
+      await postReply(
+        row.channelId,
+        row.replyThreadTs,
+        text,
+        displayName,
+        iconUrl
+      );
+    }
+
+    return OK();
+  }
+
+  // Terminal update (completed | failed | canceled | rejected). For `completed`
+  // an empty reply means the agent classified the turn as needing no response
+  // (post nothing). For the failure states, surface the agent's text if any, else
+  // a gateway notice so the cleared ⏳ isn't silent.
+  const body =
+    text ||
+    (state === "completed" ? "" : terminalFailureNotice(displayName, state));
+
   // Post BEFORE marking complete so a postMessage failure leaves the row pending
-  // for the remote to retry (a retry after success sees `completed` → no-op). An
-  // empty reply means the agent classified the turn as needing no response: post
-  // nothing, but still complete + collect the ⏳.
-  if (text) {
+  // for the remote to retry (a retry after success sees `completed` → no-op).
+  if (body) {
     await postReply(
       row.channelId,
       row.replyThreadTs,
-      text,
+      body,
       displayName,
       iconUrl
     );
   }
 
-  await completeAgentTask(notificationToken);
-  await signalReactionCollect(row.eventId);
+  // Collect the ⏳ only if we own this terminal callback (flipped exactly one
+  // pending row) — a replayed terminal callback is a no-op.
+  if (await completeAgentTask(notificationToken)) {
+    await signalReactionCollect(row.eventId);
+  }
   return OK();
 }

@@ -1,14 +1,10 @@
 import { describe, it, expect } from "vitest";
-import { env } from "cloudflare:workers";
-import { getDb } from "@/db/client";
 import {
   upsertWorkspace,
   getWorkspace,
   getWorkspaceByAdminChannel,
   setWorkspaceAdminChannel
 } from "@/db/models/workspaces";
-
-const db = getDb();
 
 describe("workspaces", () => {
   it("upserts and reads back, including by admin channel", async () => {

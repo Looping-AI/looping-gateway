@@ -1,13 +1,9 @@
 import { describe, it, expect } from "vitest";
-import { env } from "cloudflare:workers";
-import { getDb } from "@/db/client";
 import {
   upsertSlackChannel,
   getSlackChannelName,
   getSlackChannelIdByName
 } from "@/db/models/channels";
-
-const db = getDb();
 
 describe("slack_channels", () => {
   it("inserts then updates the name by id (rename)", async () => {

@@ -1,14 +1,8 @@
 import { describe, it, expect } from "vitest";
-import type { UserAuthContext } from "@/auth";
 import { LOOPING_CONSTITUTION, callerContext } from "@/agents/shared/prompt";
+import { makeAuthCtx } from "../../helpers/workspace";
 
-const baseCtx: UserAuthContext = {
-  slackUserId: "U123",
-  displayName: "Alice",
-  isPrimaryOwner: false,
-  isOrgAdmin: false,
-  adminWorkspaces: []
-};
+const baseCtx = makeAuthCtx({ slackUserId: "U123", displayName: "Alice" });
 
 describe("LOOPING_CONSTITUTION", () => {
   it("is an array of exactly 4 strings", () => {

@@ -153,12 +153,15 @@ export const agentChannels = sqliteTable(
  * notifications. When the gateway dispatches to a remote (custom) agent it no
  * longer blocks for the reply: it sends a per-dispatch validation `token` in the
  * A2A `pushNotificationConfig`, the remote returns a Task immediately, and later
- * POSTs the terminal Task back to `/a2a/notifications`. This row is how the
+ * POSTs Tasks back to `/a2a/notifications` — one or more intermediate progress
+ * updates (non-terminal `state`) followed by a terminal Task. This row is how the
  * callback recovers where to post (channel/thread) and which ⏳ to clear
  * (`eventId`). Callback rendering identity is read from the current `agents` row.
  *
  * Keyed by the gateway-generated `token` (the value the remote echoes back).
- * Rows are marked `completed` by the callback and swept in the maintenance workflow.
+ * The row stays `pending` across intermediate updates and is marked `completed`
+ * only by the terminal callback (which then clears the ⏳); rows are swept in the
+ * maintenance workflow.
  */
 export const agentTasks = sqliteTable(
   "agent_tasks",
@@ -184,6 +187,9 @@ export const agentTasks = sqliteTable(
     // Last gateway-controlled reason a callback was rejected (auth/malformed),
     // captured for the reaction backstop to surface. Never holds remote payload.
     lastError: text("last_error"),
+    // Comma-delimited list of intermediate-update `messageId`s already received
+    // from the remote, so an at-least-once push retry doesn't double-post it.
+    receivedMessageIds: text("received_message_ids"),
     createdAt: timestamp("created_at"),
     completedAt: integer("completed_at")
   },

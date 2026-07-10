@@ -1,6 +1,5 @@
 import { describe, it, expect, afterEach, vi } from "vitest";
 import { env } from "cloudflare:workers";
-import { getDb } from "@/db/client";
 import type { UserAuthContext } from "@/auth";
 import {
   directoryAgents,
@@ -12,25 +11,11 @@ import {
 import { createWorkspace } from "@/db/models/workspaces";
 import { registerAgent, updateAgent } from "@/db/models/agents";
 import { upsertSlackUser } from "@/db/models/users";
-
-const db = getDb();
+import { makeAuthCtx, freshWsId } from "../../helpers/workspace";
 
 afterEach(() => vi.restoreAllMocks());
 
-async function freshWsId(name: string): Promise<number> {
-  return (await createWorkspace({ name })).id;
-}
-
-function ctx(overrides: Partial<UserAuthContext> = {}): UserAuthContext {
-  return {
-    slackUserId: "U_onb",
-    displayName: "Newbie",
-    isPrimaryOwner: false,
-    isOrgAdmin: false,
-    adminWorkspaces: [],
-    ...overrides
-  };
-}
+const ctx = makeAuthCtx;
 
 function deps(c: UserAuthContext | null): OnboardingToolDeps {
   return {

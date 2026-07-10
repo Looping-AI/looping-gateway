@@ -1,6 +1,4 @@
 import { describe, it, expect } from "vitest";
-import { env } from "cloudflare:workers";
-import { getDb } from "@/db/client";
 import {
   getConfig,
   setConfig,
@@ -12,8 +10,6 @@ import {
   SystemConfigKeys
 } from "@/db/models/workspace-configs";
 import { upsertWorkspace } from "@/db/models/workspaces";
-
-const db = getDb();
 
 // Workspace 0 is seeded by migrations; we use a unique workspace for
 // isolation between parallel test runs.

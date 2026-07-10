@@ -1,6 +1,6 @@
 import { afterEach, describe, it, expect, vi } from "vitest";
-import { introspectWorkflow } from "cloudflare:test";
 import { env } from "cloudflare:workers";
+import { introspectWorkflow } from "cloudflare:test";
 import {
   PENDING_REACTION,
   REACTION_COLLECT_EVENT,
