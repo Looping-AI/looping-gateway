@@ -531,33 +531,13 @@ export async function handleSlackEvent(
             });
             return;
           }
-          // Local (admin/onboarding) and remote (custom) agents are registered
-          // on separate channel types, so these arrays are mutually exclusive
-          // in practice. Each workflow runs independently and owns its own
-          // collect-reaction signal for the events it handles.
-          const localTargets = targets.filter((t) => t.agent.kind !== "custom");
-          const remoteTargets = targets.filter(
-            (t) => t.agent.kind === "custom"
-          );
+          // One workflow instance per event handles every woken agent (local
+          // built-in and remote custom); it dispatches each by `agent.kind` and
+          // owns the single collect-reaction signal for the event.
           await Promise.allSettled([
             addPendingReaction(base),
             triggerReactionWorkflow(env.REACTION_WORKFLOW, base),
-            ...(localTargets.length > 0
-              ? [
-                  triggerWorkflow(env.LOCAL_MESSAGE_WORKFLOW, {
-                    ...base,
-                    targets: localTargets
-                  })
-                ]
-              : []),
-            ...(remoteTargets.length > 0
-              ? [
-                  triggerWorkflow(env.REMOTE_MESSAGE_WORKFLOW, {
-                    ...base,
-                    targets: remoteTargets
-                  })
-                ]
-              : [])
+            triggerWorkflow(env.MESSAGE_WORKFLOW, { ...base, targets })
           ]);
         })()
       );

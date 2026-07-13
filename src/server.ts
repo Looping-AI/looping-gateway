@@ -7,8 +7,7 @@ import {
 
 // Cloudflare resolves Workflow + Durable Object class_names (wrangler.jsonc)
 // from the entry module's exports.
-export { LocalMessageWorkflow } from "./workflows/message-local";
-export { RemoteMessageWorkflow } from "./workflows/message-remote";
+export { MessageWorkflow } from "./workflows/message";
 export { LifecycleWorkflow } from "./workflows/lifecycle";
 export { ReconcileWorkflow } from "./workflows/reconcile";
 export { ReactionWorkflow } from "./workflows/reaction";

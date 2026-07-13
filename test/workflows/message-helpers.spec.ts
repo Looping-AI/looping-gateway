@@ -24,7 +24,7 @@ import {
 //   dispatchMessage — InvalidEndpointError → error_reply path (no-domains-approved case)
 //   resolveMessage  — exercised via the no-targets short-circuit
 //   signalReactionCollect — exercised via the reaction-removal integration
-//   handleUnreachable — covered indirectly via message-local.spec + message-remote.spec
+//   handleUnreachable — covered indirectly via message.spec
 
 beforeEach(async () => {
   await setWorkspaceAdminChannel(0, "C_ORGADMIN");
@@ -203,7 +203,7 @@ describe("dispatchMessage", () => {
 
 describe("resolveMessage (via webhook handler)", () => {
   it("no-match channel: no agent woken, no workflow created, nothing posted", async () => {
-    const introspector = await introspectWorkflow(env.LOCAL_MESSAGE_WORKFLOW);
+    const introspector = await introspectWorkflow(env.MESSAGE_WORKFLOW);
     try {
       const { body } = makeAppMentionRequest(
         "C_UNCONFIGURED",
@@ -212,8 +212,8 @@ describe("resolveMessage (via webhook handler)", () => {
       const res = await trigger(body);
       expect(res.status).toBe(200);
 
-      // resolveMessage returns an empty target list → handler skips both
-      // workflows and the reaction entirely; no hourglass flicker.
+      // resolveMessage returns an empty target list → handler skips the
+      // workflow and the reaction entirely; no hourglass flicker.
       expect(await introspector.get()).toHaveLength(0);
     } finally {
       await introspector.dispose();
@@ -225,12 +225,10 @@ describe("resolveMessage (via webhook handler)", () => {
 // signalReactionCollect — ⏳ removal
 // ---------------------------------------------------------------------------
 
-describe("signalReactionCollect (via LocalMessageWorkflow)", () => {
+describe("signalReactionCollect (via MessageWorkflow)", () => {
   it("sends reply_posted to ReactionWorkflow once the local reply is done, removing ⏳", async () => {
     const { reactions } = captureSlackWithReactions();
-    const msgIntrospector = await introspectWorkflow(
-      env.LOCAL_MESSAGE_WORKFLOW
-    );
+    const msgIntrospector = await introspectWorkflow(env.MESSAGE_WORKFLOW);
     const reactionIntrospector = await introspectWorkflow(
       env.REACTION_WORKFLOW
     );

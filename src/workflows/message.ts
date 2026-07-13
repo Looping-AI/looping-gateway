@@ -19,37 +19,33 @@ import {
 } from "@/workflows/message-helpers";
 
 /**
- * Dispatch one remote (custom) plan and handle its outcome.
+ * Dispatch one plan (local built-in or remote custom) and handle its task
+ * acceptance. Both kinds accept a Task and deliver their reply asynchronously —
+ * built-ins through the trusted in-process push sender, remotes through the
+ * authenticated `/a2a/notifications` callback. Routing by `agent.kind` lives
+ * entirely in `dispatchToAgent`, so this path is identical for both.
  *
- * Remote agents reply asynchronously via /a2a/notifications. An agent_tasks row
- * is written *before* dispatch so the push token is always present when the
- * callback arrives — closing the accept→record race. If the dispatch does not
- * end in `accepted` the pre-written row is deleted (no callback will arrive).
- *
- * The dispatch id is deterministic (`buildDispatchId`), making step retries
- * idempotent: a re-send carries the same A2A `messageId` so a conformant remote
- * dedupes instead of appending the turn twice.
+ * The correlation row is written *before* dispatch so a status update can never
+ * outrun the record that routes it to Slack. `createAgentTask` is idempotent on
+ * the token PK, so step retries are safe.
  */
-async function runRemoteAgentTask(
+async function runAgentTask(
   step: WorkflowStep,
   p: MessageWorkflowParams,
   plan: AgentPlan,
   threadTs: string | null
 ): Promise<TaskOutcome> {
-  // Pre-write the correlation row before dispatch so an accepted reply can never
-  // be orphaned (404) by a post-accept failure. `createAgentTask` is idempotent
-  // on the token PK, so step retries are safe.
   const token = await step.do(`record-task:${plan.agent.name}`, async () => {
-    const t = await buildDispatchId(p.eventId, plan.agent);
+    const dispatchId = await buildDispatchId(p.eventId, plan.agent);
     await createAgentTask({
-      token: t,
+      token: dispatchId,
       taskId: null,
       agentName: plan.agent.name,
       channelId: p.channelId,
       replyThreadTs: threadTs,
       eventId: p.eventId
     });
-    return t;
+    return dispatchId;
   });
 
   let result;
@@ -58,8 +54,6 @@ async function runRemoteAgentTask(
       dispatchMessage(p, plan)
     );
   } catch (err) {
-    // Dispatch retries exhausted — genuinely unreachable. Remove the pre-written
-    // row since no push callback will ever arrive.
     await step.do(`unrecord-task:${plan.agent.name}`, () =>
       deleteAgentTask(token)
     );
@@ -70,16 +64,14 @@ async function runRemoteAgentTask(
   }
 
   if (result.kind === "accepted") {
-    // Backfill the remote-assigned taskId now that the accept response carries
-    // it (the row was written with a null taskId). The ⏳ lingers until the
-    // callback clears it.
     await step.do(`update-task:${plan.agent.name}`, () =>
-      updateAgentTaskTaskId(result.token, result.taskId)
+      updateAgentTaskTaskId(token, result.taskId)
     );
     return { kind: "accepted" };
   }
 
-  // Non-accepted outcome — no callback is coming, so remove the pre-written row.
+  // A non-accepted dispatch cannot emit task updates, so remove the prewritten
+  // correlation row before surfacing its gateway-controlled error to the user.
   await step.do(`unrecord-task:${plan.agent.name}`, () =>
     deleteAgentTask(token)
   );
@@ -94,20 +86,17 @@ async function runRemoteAgentTask(
       return { kind: "done" };
     }
 
-    // Remote agents must never return a sync `reply` — protocol violation.
-    // Notify the user and log so it surfaces in observability.
-    console.error(
-      "[message-remote] protocol violation: sync reply from remote agent",
-      {
-        agent: plan.agent.name,
-        kind: result.kind
-      }
-    );
+    // Every agent must accept a Task and reply asynchronously — a sync `reply`
+    // is a protocol violation. Notify the user and log so it surfaces.
+    console.error("[message] protocol violation: sync reply from agent", {
+      agent: plan.agent.name,
+      kind: result.kind
+    });
     await step.do(`protocol-error:${plan.agent.name}`, () =>
       postReply(
         p.channelId,
         threadTs,
-        `The agent *${plan.agent.name}* responded synchronously instead of using the required async callback. Please contact the agent developer.`,
+        `The agent *${plan.agent.name}* responded synchronously instead of using the required task lifecycle. Please contact the agent developer.`,
         null,
         null
       )
@@ -122,23 +111,20 @@ async function runRemoteAgentTask(
 }
 
 /**
- * Durable workflow for Slack messages dispatched to remote (custom) agents.
- * One instance per Slack `event_id`.
+ * Durable workflow for Slack messages dispatched to agents. One instance per
+ * Slack `event_id`, handling every woken agent (local built-in and remote
+ * custom) for that event.
  *
- * Remote agents accept the turn over HTTP and push their reply later via
- * /a2a/notifications. While any remote task is still pending (`anyAccepted`),
- * the ⏳ reaction lingers — the push-notification handler (or the ReactionWorkflow
- * backstop) removes it once the reply arrives.
- *
- * Remote and local agents are registered on separate channel types, so a single
- * event never wakes both kinds at once. This workflow always owns the
- * collect-reaction signal for any event that reaches it. See ReactionWorkflow
- * for the backstop that removes ⏳ if this workflow (or its callbacks) fails.
+ * All agents accept the turn and deliver status snapshots asynchronously:
+ * built-ins through a trusted in-process push sender, remotes through the
+ * authenticated `/a2a/notifications` callback. While any accepted task is still
+ * pending (`anyAccepted`), the ⏳ reaction lingers until its terminal delivery
+ * (or the ReactionWorkflow backstop) removes it.
  *
  * Steps: `resolve` → one `record-task:{name}` + `dispatch:{name}` per agent →
  * `update-task:{name}` on accept → `collect-reaction` when nothing is pending.
  */
-export class RemoteMessageWorkflow extends WorkflowEntrypoint<
+export class MessageWorkflow extends WorkflowEntrypoint<
   Env,
   MessageWorkflowParams
 > {
@@ -150,14 +136,14 @@ export class RemoteMessageWorkflow extends WorkflowEntrypoint<
       const plans = await step.do("resolve", () => resolveMessage(p));
 
       const results = await Promise.allSettled(
-        plans.map((plan) => runRemoteAgentTask(step, p, plan, threadTs))
+        plans.map((plan) => runAgentTask(step, p, plan, threadTs))
       );
 
       let anyAccepted = false;
       for (const [i, r] of results.entries()) {
         const plan = plans[i];
         if (r.status === "rejected") {
-          console.error("[message-remote] agent task threw unexpectedly", {
+          console.error("[message] agent task threw unexpectedly", {
             agent: plan.agent.name,
             error:
               r.reason instanceof Error ? r.reason.message : String(r.reason)
@@ -177,23 +163,23 @@ export class RemoteMessageWorkflow extends WorkflowEntrypoint<
             outcome.error
           );
         } else if (outcome.kind === "internal_error") {
-          console.error("[message-remote] agent reply step failed", {
+          console.error("[message] agent reply step failed", {
             agent: plan.agent.name,
             error: outcome.error
           });
         }
       }
 
-      // Clear the ⏳ only when no remote agent is still working. A pending
-      // accepted task keeps it alive until the push-notification callback
-      // (or the ReactionWorkflow backstop) removes it.
+      // Clear the ⏳ only when no agent is still working. A pending accepted
+      // task keeps it alive until its push-notification delivery (or the
+      // ReactionWorkflow backstop) removes it.
       if (!anyAccepted) {
         await step.do("collect-reaction", () =>
           signalReactionCollect(p.eventId)
         );
       }
     } catch (err) {
-      console.error("[message-remote] workflow run failed", {
+      console.error("[message] workflow run failed", {
         instanceId: event.instanceId,
         eventId: p.eventId,
         channelId: p.channelId,
