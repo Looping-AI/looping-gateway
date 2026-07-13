@@ -30,10 +30,10 @@
     "prepare": "husky"
   },
   "dependencies": {
-    "@a2a-js/sdk": "^0.3.13",
+    "@a2a-js/sdk": "^0.3.14",
     "@chat-adapter/slack": "^4.32.0",
     "agents": "^0.17.3",
-    "ai": "^6.0.219",
+    "ai": "^7.0.22",
     "chat": "^4.32.0",
     "drizzle-orm": "^0.45.2",
     "jose": "^6.2.3",
