@@ -61,7 +61,7 @@ async function runLocalAgentTask(
 
   if (result.kind === "accepted") {
     await step.do(`update-task:${plan.agent.name}`, () =>
-      updateAgentTaskTaskId(result.token, result.taskId)
+      updateAgentTaskTaskId(token, result.taskId)
     );
     return { kind: "accepted" };
   }

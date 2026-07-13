@@ -64,9 +64,9 @@ export class LocalPushNotificationSender implements PushNotificationSender {
   }
 
   private async deliver(task: Task): Promise<void> {
-    // The initial submitted Task establishes acceptance only; it has no agent
-    // content and must not be treated as a user-visible progress update.
-    if (!task.status.message) return;
+    // The initial submitted Task establishes acceptance only. It must not be
+    // treated as a user-visible progress update, even if it carries a message.
+    if (task.status.state === "submitted") return;
 
     const configs = await this.pushNotificationStore.load(task.id);
     for (const config of configs) {

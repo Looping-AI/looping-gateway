@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import type { Task, TaskState } from "@a2a-js/sdk";
+import { InMemoryPushNotificationStore } from "@a2a-js/sdk/server";
 import { registerAgent } from "@/db/models/agents";
 import {
   setPublicUrl,
@@ -15,7 +16,11 @@ import {
   NOTIFICATION_TOKEN_HEADER,
   NOTIFICATIONS_PATH
 } from "@/a2a/notifications/remote";
-import { deliverLocalAgentTask } from "@/a2a/notifications/local";
+import {
+  deliverLocalAgentTask,
+  LocalPushNotificationSender,
+  localPushNotificationConfig
+} from "@/a2a/notifications/local";
 import { makeKey, signJwt, type TestKey } from "../helpers/auth";
 
 const JKU = "https://agent.example.com/.well-known/jwks.json";
@@ -363,6 +368,51 @@ describe("handleRemoteAgentNotification", () => {
     expect((await getAgentTaskByToken("local-token"))?.status).toBe(
       "completed"
     );
+  });
+
+  it("suppresses a submitted local Task even when it includes text", async () => {
+    const posts: SlackPost[] = [];
+    stubFetch(key, posts);
+    await registerAgent({
+      name: "adminsender",
+      kind: "admin",
+      displayName: "Admin Sender",
+      a2aEndpoint: "https://agent.local/a2a",
+      notifyOn: "mention",
+      workspaceId: 0
+    });
+    await createAgentTask({
+      token: "local-sender-token",
+      taskId: "local-sender-task",
+      agentName: "adminsender",
+      channelId: "C-local",
+      replyThreadTs: null,
+      eventId: "Ev-local-sender"
+    });
+
+    const store = new InMemoryPushNotificationStore();
+    await store.save(
+      "local-sender-task",
+      localPushNotificationConfig("local-sender-token")
+    );
+    const sender = new LocalPushNotificationSender(store, "admin");
+
+    await sender.send({
+      ...makeStatusTask("acceptance text", {
+        state: "submitted",
+        messageId: "submitted-message"
+      }),
+      id: "local-sender-task"
+    });
+    await sender.send({
+      ...makeStatusTask("working update", {
+        state: "working",
+        messageId: "working-message"
+      }),
+      id: "local-sender-task"
+    });
+
+    expect(posts.map((post) => post.text)).toEqual(["working update"]);
   });
 
   it("surfaces a gateway notice and completes on a terminal failure with no text", async () => {
