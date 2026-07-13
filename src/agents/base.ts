@@ -2,9 +2,11 @@ import { Agent } from "agents";
 import type { AgentCard } from "@a2a-js/sdk";
 import {
   DefaultRequestHandler,
+  InMemoryPushNotificationStore,
   InMemoryTaskStore,
   type AgentExecutor
 } from "@a2a-js/sdk/server";
+import { LocalPushNotificationSender } from "@/a2a/notifications/local";
 import { serveA2A } from "@/a2a/serve";
 
 /**
@@ -24,13 +26,22 @@ export abstract class A2AAgent extends Agent<Env> {
 
   protected abstract card(): AgentCard;
   protected abstract executor(): AgentExecutor;
+  protected abstract builtinKind(): "admin" | "onboarding";
 
   private getHandler(): DefaultRequestHandler {
     if (!this.handler) {
+      const card = this.card();
+      const pushNotificationStore = new InMemoryPushNotificationStore();
       this.handler = new DefaultRequestHandler(
-        this.card(),
+        card,
         new InMemoryTaskStore(),
-        this.executor()
+        this.executor(),
+        undefined,
+        pushNotificationStore,
+        new LocalPushNotificationSender(
+          pushNotificationStore,
+          this.builtinKind()
+        )
       );
     }
     return this.handler;

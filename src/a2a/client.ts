@@ -10,13 +10,13 @@ import type {
   MessageSendParams,
   PushNotificationConfig
 } from "@a2a-js/sdk";
-import { extractText } from "./parts";
 
 /**
  * Where to send an A2A message:
  * - `local`  — a known card + a `fetchImpl` bound to a Durable Object `stub.fetch`,
  *   so card discovery is skipped and the call runs in-process (no network hop).
- *   Local agents reply *synchronously* — {@link sendA2ALocal} returns their text.
+ *   Local agents return a Task acceptance and deliver replies through a trusted
+ *   in-process push sender.
  * - `remote` — a base URL; the card is discovered over real HTTP, every request
  *   carries the gateway identity JWT (`authToken`). Remote agents reply
  *   *asynchronously* via push notification — {@link sendA2ARemote} only waits
@@ -118,21 +118,25 @@ async function buildRemoteClient(target: A2ARemoteTarget): Promise<Client> {
 }
 
 /**
- * Send one A2A message to a **local** (in-process) agent and return its reply
- * text. Local agents are our own code (trusted) and reply synchronously, so the
- * text is returned directly with no sanitization.
+ * Send one A2A message to a **local** (in-process) agent. Its Task snapshots
+ * reach Slack through the local push sender, so the caller receives only the
+ * accepted task id and never handles model text directly.
  */
 export async function sendA2ALocal(
   target: A2ALocalTarget,
-  message: Message
-): Promise<string> {
+  message: Message,
+  pushNotificationConfig: PushNotificationConfig
+): Promise<A2AAccept> {
   const client = await buildLocalClient(target);
-  const result = await client.sendMessage({ message });
-  return extractText(result);
+  const params: MessageSendParams = {
+    message,
+    configuration: { pushNotificationConfig }
+  };
+  return acceptedTask(await client.sendMessage(params), message);
 }
 
-/** Result of accepting a message onto a remote agent's async task queue. */
-export type RemoteAccept =
+/** Result of accepting a message onto an A2A agent's task queue. */
+export type A2AAccept =
   | {
       /** Remote accepted the turn and returned its Task id. */
       kind: "accepted";
@@ -142,6 +146,22 @@ export type RemoteAccept =
       /** Remote omitted the required async Task acceptance/id. */
       kind: "contract_violation";
     };
+
+function acceptedTask(
+  result: Awaited<ReturnType<Client["sendMessage"]>>,
+  message: Message
+): A2AAccept {
+  if (result.kind === "task" && result.id.trim().length > 0) {
+    return { kind: "accepted", taskId: result.id };
+  }
+  console.error(
+    "[a2a] agent accept response missing required Task acceptance " +
+      "(submitted/working Task with non-empty id); push-notification contract " +
+      "not honored",
+    { contextId: message.contextId }
+  );
+  return { kind: "contract_violation" };
+}
 
 /**
  * Send one A2A message to a **remote** agent for asynchronous processing. The
@@ -156,21 +176,11 @@ export async function sendA2ARemote(
   target: A2ARemoteTarget,
   message: Message,
   pushNotificationConfig: PushNotificationConfig
-): Promise<RemoteAccept> {
+): Promise<A2AAccept> {
   const client = await buildRemoteClient(target);
   const params: MessageSendParams = {
     message,
     configuration: { pushNotificationConfig }
   };
-  const result = await client.sendMessage(params);
-  if (result.kind === "task" && result.id.trim().length > 0) {
-    return { kind: "accepted", taskId: result.id };
-  }
-  console.error(
-    "[a2a] remote agent accept response missing required Task acceptance " +
-      "(submitted/working Task with non-empty id); push-notification contract " +
-      "not honored",
-    { contextId: message.contextId }
-  );
-  return { kind: "contract_violation" };
+  return acceptedTask(await client.sendMessage(params), message);
 }

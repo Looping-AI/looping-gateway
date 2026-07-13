@@ -118,9 +118,10 @@ export async function resolveMessage(
 }
 
 /**
- * Dispatch one resolved plan to its agent over A2A. Local agents reply
- * synchronously (`{ kind: "reply" }`); remote agents only *accept* here and push
- * their reply later (`{ kind: "accepted" }`).
+ * Dispatch one resolved plan to its agent over A2A. Every agent accepts a Task
+ * (`{ kind: "accepted" }`) and delivers status snapshots later: remote agents
+ * through the authenticated callback and built-ins through the trusted local
+ * sender.
  *
  * Retry policy. A rejected endpoint (`InvalidEndpointError`) is a policy verdict,
  * not a transient fault: stay silent and do NOT retry. Everything else (network

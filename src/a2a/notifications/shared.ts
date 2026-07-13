@@ -1,0 +1,80 @@
+import type { Task } from "@a2a-js/sdk";
+import type { AgentRow } from "@/db/models/agents";
+import {
+  completeAgentTask,
+  recordReceivedMessageId,
+  type AgentTaskRow
+} from "@/db/models/agent-tasks";
+import { extractText, isTerminalTaskState } from "@/a2a/parts";
+import { postReply } from "@/wrappers/slack";
+import { signalReactionCollect } from "@/workflows/message-helpers";
+
+/** A malformed Task snapshot that is safe to report to a task's owner. */
+export class TaskDeliveryValidationError extends Error {}
+
+/**
+ * Gateway-controlled notice posted when an agent ends a turn in a failure state
+ * without text of its own. It contains no agent-controlled content.
+ */
+function terminalFailureNotice(agentName: string, state: string): string {
+  return `*Agent ${agentName}* ended without a reply (state: ${state}). If you were expecting an answer, please contact the agent developer.`;
+}
+
+/**
+ * Deliver one trusted Task snapshot through the durable task ledger. Each
+ * notification boundary authenticates and validates its caller before invoking
+ * this function, and supplies the appropriate text-sanitization policy.
+ */
+export async function deliverTaskToSlack(
+  token: string,
+  row: AgentTaskRow,
+  agent: AgentRow,
+  task: Task,
+  sanitize: (text: string) => string
+): Promise<void> {
+  const state = task.status.state;
+  const text = sanitize(extractText(task));
+  const displayName = agent.displayName ?? agent.name;
+  const iconUrl = agent.iconUrl ?? null;
+
+  if (!isTerminalTaskState(state)) {
+    const updateId = task.status.message?.messageId;
+    if (!updateId) {
+      throw new TaskDeliveryValidationError(
+        "non-terminal task updates must include a status.message.messageId; the gateway uses this to deduplicate at-least-once delivery"
+      );
+    }
+
+    const isNew = await recordReceivedMessageId(token, updateId);
+    if (isNew && text) {
+      await postReply(
+        row.channelId,
+        row.replyThreadTs,
+        text,
+        displayName,
+        iconUrl
+      );
+    }
+    return;
+  }
+
+  const body =
+    text ||
+    (state === "completed" ? "" : terminalFailureNotice(displayName, state));
+
+  // Post before completion so a delivery failure leaves the row pending for a
+  // retry. A replay after completion becomes a no-op at the boundary.
+  if (body) {
+    await postReply(
+      row.channelId,
+      row.replyThreadTs,
+      body,
+      displayName,
+      iconUrl
+    );
+  }
+
+  if (await completeAgentTask(token)) {
+    await signalReactionCollect(row.eventId);
+  }
+}

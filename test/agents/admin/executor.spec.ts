@@ -7,7 +7,8 @@ import {
   fakeRecallEnv,
   okResult,
   toolCallResult,
-  makeRequest
+  makeRequest,
+  terminalTaskText
 } from "../../helpers/agents";
 
 const sqlHost: SessionHost = { sql: () => [] };
@@ -30,7 +31,7 @@ const adminRequest = () =>
 afterEach(() => vi.restoreAllMocks());
 
 describe("AdminAgentExecutor", () => {
-  it("runs the loop and publishes the model's reply", async () => {
+  it("runs the loop and completes an A2A task with the model's reply", async () => {
     const session = new FakeSession();
     const model = new MockLanguageModelV3({
       doGenerate: async () => okResult("Here are your agents.") as never
@@ -44,8 +45,8 @@ describe("AdminAgentExecutor", () => {
     await exec.execute(t.requestContext, t.eventBus);
 
     expect(t.isFinished()).toBe(true);
-    expect(t.published).toHaveLength(1);
-    expect(t.published[0].parts[0].text).toBe("Here are your agents.");
+    expect(t.published).toHaveLength(2);
+    expect(terminalTaskText(t.published)).toBe("Here are your agents.");
     // user turn + assistant turn persisted
     expect(session.messages.map((m) => m.role)).toEqual(["user", "assistant"]);
   });
@@ -70,8 +71,8 @@ describe("AdminAgentExecutor", () => {
     await exec.execute(t.requestContext, t.eventBus);
 
     expect(t.isFinished()).toBe(true);
-    expect(t.published).toHaveLength(1);
-    expect(t.published[0].parts[0].text?.toLowerCase()).toContain("error");
+    expect(t.published).toHaveLength(2);
+    expect(terminalTaskText(t.published)?.toLowerCase()).toContain("error");
   });
 
   it("withholds the recall tool before the first compaction", async () => {
@@ -116,7 +117,7 @@ describe("AdminAgentExecutor", () => {
     await exec.execute(t.requestContext, t.eventBus);
 
     expect(t.isFinished()).toBe(true);
-    expect(t.published).toHaveLength(1);
+    expect(t.published).toHaveLength(2);
     // The recall tool must have been executed against the workspace namespace.
     expect(query).toHaveBeenCalledTimes(1);
     const opts = query.mock.calls[0][1] as { namespace: string };

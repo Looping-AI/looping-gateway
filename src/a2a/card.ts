@@ -15,11 +15,13 @@ export interface AgentCardInput {
   description: string;
   /** Override the endpoint URL (remote agents). Defaults to the local placeholder. */
   url?: string;
+  /** Whether this agent accepts A2A push-notification configuration. */
+  pushNotifications?: boolean;
 }
 
 /**
  * Build a minimal A2A AgentCard for a local in-repo agent. JSON-RPC is the only
- * transport; streaming + push notifications are off (single-reply MVP).
+ * transport. Streaming is off; built-ins opt into local push notifications.
  */
 export function buildAgentCard(input: AgentCardInput): AgentCard {
   return {
@@ -29,7 +31,10 @@ export function buildAgentCard(input: AgentCardInput): AgentCard {
     version: "0.1.0",
     url: input.url ?? `${PLACEHOLDER_BASE_URL}${A2A_ENDPOINT_PATH}`,
     preferredTransport: "JSONRPC",
-    capabilities: { streaming: false, pushNotifications: false },
+    capabilities: {
+      streaming: false,
+      pushNotifications: input.pushNotifications ?? false
+    },
     defaultInputModes: ["text/plain"],
     defaultOutputModes: ["text/plain"],
     skills: [

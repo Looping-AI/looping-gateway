@@ -1,7 +1,13 @@
 import { WorkflowEntrypoint } from "cloudflare:workers";
 import type { WorkflowEvent, WorkflowStep } from "cloudflare:workers";
 import type { MessageWorkflowParams } from "@/slack/types";
+import { buildDispatchId } from "@/agents/dispatch";
 import { postReply } from "@/wrappers/slack";
+import {
+  createAgentTask,
+  updateAgentTaskTaskId,
+  deleteAgentTask
+} from "@/db/models/agent-tasks";
 import {
   type AgentPlan,
   type TaskOutcome,
@@ -13,11 +19,11 @@ import {
 } from "@/workflows/message-helpers";
 
 /**
- * Dispatch one local (admin / onboarding) plan and handle its reply.
+ * Dispatch one local (admin / onboarding) plan and handle its task acceptance.
  *
- * Local agents reply synchronously — there is no async push-back, no
- * agent_tasks row, and no `accepted` outcome. The dispatch step either
- * returns a reply immediately or throws (causing the step to retry).
+ * Local A2A status snapshots are delivered through the trusted in-process
+ * sender. As with remote agents, write the correlation row before dispatch so a
+ * status update can never outrun the record that routes it to Slack.
  */
 async function runLocalAgentTask(
   step: WorkflowStep,
@@ -25,17 +31,46 @@ async function runLocalAgentTask(
   plan: AgentPlan,
   threadTs: string | null
 ): Promise<TaskOutcome> {
+  const token = await step.do(`record-task:${plan.agent.name}`, async () => {
+    const dispatchId = await buildDispatchId(p.eventId, plan.agent);
+    await createAgentTask({
+      token: dispatchId,
+      taskId: null,
+      agentName: plan.agent.name,
+      channelId: p.channelId,
+      replyThreadTs: threadTs,
+      eventId: p.eventId
+    });
+    return dispatchId;
+  });
+
   let result;
   try {
     result = await step.do(`dispatch:${plan.agent.name}`, () =>
       dispatchMessage(p, plan)
     );
   } catch (err) {
+    await step.do(`unrecord-task:${plan.agent.name}`, () =>
+      deleteAgentTask(token)
+    );
     return {
       kind: "unreachable",
       error: err instanceof Error ? err.message : String(err)
     };
   }
+
+  if (result.kind === "accepted") {
+    await step.do(`update-task:${plan.agent.name}`, () =>
+      updateAgentTaskTaskId(result.token, result.taskId)
+    );
+    return { kind: "accepted" };
+  }
+
+  // A non-accepted dispatch cannot emit task updates, so remove the prewritten
+  // correlation row before surfacing its gateway-controlled error to the user.
+  await step.do(`unrecord-task:${plan.agent.name}`, () =>
+    deleteAgentTask(token)
+  );
 
   try {
     if (result.kind === "error_reply") {
@@ -47,17 +82,19 @@ async function runLocalAgentTask(
       return { kind: "done" };
     }
 
-    if (result.kind === "reply" && result.text.trim()) {
-      await step.do(`reply:${plan.agent.name}`, () =>
-        postReply(
-          p.channelId,
-          threadTs,
-          result.text,
-          plan.displayName,
-          plan.iconUrl
-        )
-      );
-    }
+    console.error(
+      "[message-local] protocol violation: sync reply from local agent",
+      { agent: plan.agent.name, kind: result.kind }
+    );
+    await step.do(`protocol-error:${plan.agent.name}`, () =>
+      postReply(
+        p.channelId,
+        threadTs,
+        `The local agent *${plan.agent.name}* responded synchronously instead of using the required task lifecycle.`,
+        null,
+        null
+      )
+    );
     return { kind: "done" };
   } catch (err) {
     return {
@@ -71,15 +108,13 @@ async function runLocalAgentTask(
  * Durable workflow for Slack messages dispatched to local (admin / onboarding)
  * agents. One instance per Slack `event_id`.
  *
- * Local agents are hosted as Durable Objects and reply synchronously, so the
- * full reply cycle completes within this workflow — no async push-back, no
- * agent_tasks rows. The ⏳ reaction is always cleared unconditionally when the
- * workflow finishes, because local and remote agents are registered on separate
- * channel types and a single event never wakes both kinds at once. See
- * ReactionWorkflow for the backstop that removes ⏳ if this workflow fails.
+ * Local agents are hosted as Durable Objects and deliver status snapshots through
+ * a trusted in-process push sender. While an accepted task is pending, the ⏳
+ * reaction remains until terminal delivery completes it; ReactionWorkflow stays
+ * the backstop if a notification cannot be delivered.
  *
- * Steps: `resolve` → one `dispatch:{name}` per agent → one `reply:{name}` per
- * non-empty reply → `collect-reaction`.
+ * Steps: `resolve` → one `record-task:{name}` + `dispatch:{name}` per agent →
+ * `update-task:{name}` on accept → `collect-reaction` when nothing is pending.
  */
 export class LocalMessageWorkflow extends WorkflowEntrypoint<
   Env,
@@ -96,6 +131,7 @@ export class LocalMessageWorkflow extends WorkflowEntrypoint<
         plans.map((plan) => runLocalAgentTask(step, p, plan, threadTs))
       );
 
+      let anyAccepted = false;
       for (const [i, r] of results.entries()) {
         const plan = plans[i];
         if (r.status === "rejected") {
@@ -108,7 +144,9 @@ export class LocalMessageWorkflow extends WorkflowEntrypoint<
         }
 
         const outcome = r.value;
-        if (outcome.kind === "unreachable") {
+        if (outcome.kind === "accepted") {
+          anyAccepted = true;
+        } else if (outcome.kind === "unreachable") {
           await handleUnreachable(
             step,
             p,
@@ -124,9 +162,11 @@ export class LocalMessageWorkflow extends WorkflowEntrypoint<
         }
       }
 
-      // Local agents always reply synchronously — no push-back is ever pending,
-      // so the ⏳ can always be cleared once this workflow finishes.
-      await step.do("collect-reaction", () => signalReactionCollect(p.eventId));
+      if (!anyAccepted) {
+        await step.do("collect-reaction", () =>
+          signalReactionCollect(p.eventId)
+        );
+      }
     } catch (err) {
       console.error("[message-local] workflow run failed", {
         instanceId: event.instanceId,

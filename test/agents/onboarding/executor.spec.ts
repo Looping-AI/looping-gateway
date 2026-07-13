@@ -8,7 +8,8 @@ import {
   fakeRecallEnv,
   okResult,
   toolCallResult,
-  makeRequest
+  makeRequest,
+  terminalTaskText
 } from "../../helpers/agents";
 
 const sqlHost: SessionHost = { sql: () => [] };
@@ -31,7 +32,7 @@ const onboardingRequest = () =>
 afterEach(() => vi.restoreAllMocks());
 
 describe("OnboardingAgentExecutor", () => {
-  it("runs the loop and publishes the model's reply", async () => {
+  it("runs the loop and completes an A2A task with the model's reply", async () => {
     const session = new FakeSession();
     const model = new MockLanguageModelV3({
       doGenerate: async () =>
@@ -46,8 +47,8 @@ describe("OnboardingAgentExecutor", () => {
     await exec.execute(t.requestContext, t.eventBus);
 
     expect(t.isFinished()).toBe(true);
-    expect(t.published).toHaveLength(1);
-    expect(t.published[0].parts[0].text).toBe(
+    expect(t.published).toHaveLength(2);
+    expect(terminalTaskText(t.published)).toBe(
       "Looping routes work through Slack."
     );
     // user turn + assistant turn persisted
@@ -72,8 +73,8 @@ describe("OnboardingAgentExecutor", () => {
     await exec.execute(t.requestContext, t.eventBus);
 
     expect(t.isFinished()).toBe(true);
-    expect(t.published).toHaveLength(1);
-    expect(t.published[0].parts[0].text?.toLowerCase()).toContain("error");
+    expect(t.published).toHaveLength(2);
+    expect(terminalTaskText(t.published)?.toLowerCase()).toContain("error");
   });
 
   it("offers recall and routes it through the user namespace", async () => {
@@ -95,7 +96,7 @@ describe("OnboardingAgentExecutor", () => {
     await exec.execute(t.requestContext, t.eventBus);
 
     expect(t.isFinished()).toBe(true);
-    expect(t.published).toHaveLength(1);
+    expect(t.published).toHaveLength(2);
     // Recall must be scoped to the caller's user namespace.
     expect(query).toHaveBeenCalledTimes(1);
     const opts = query.mock.calls[0][1] as { namespace: string };
@@ -141,8 +142,8 @@ describe("OnboardingAgentExecutor", () => {
     await exec.execute(requestContext as never, eventBus as never);
 
     expect(finished).toBe(true);
-    expect(published).toHaveLength(1);
-    expect(published[0].parts[0].text?.toLowerCase()).toContain("error");
+    expect(published).toHaveLength(2);
+    expect(terminalTaskText(published)?.toLowerCase()).toContain("error");
     expect(modelCalled).toBe(false);
   });
 });

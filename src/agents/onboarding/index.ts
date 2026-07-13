@@ -16,8 +16,13 @@ export class OnboardingAgent extends A2AAgent {
     return buildAgentCard({
       name: "Onboarding Agent",
       description:
-        "Looping onboarding concierge — explains the system, routes users, and surfaces health."
+        "Looping onboarding concierge — explains the system, routes users, and surfaces health.",
+      pushNotifications: true
     });
+  }
+
+  protected builtinKind(): "onboarding" {
+    return "onboarding";
   }
 
   protected executor(): AgentExecutor {

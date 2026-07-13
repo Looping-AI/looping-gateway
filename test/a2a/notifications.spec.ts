@@ -11,10 +11,11 @@ import {
   completeAgentTask
 } from "@/db/models/agent-tasks";
 import {
-  handleAgentNotification,
+  handleRemoteAgentNotification,
   NOTIFICATION_TOKEN_HEADER,
   NOTIFICATIONS_PATH
-} from "@/a2a/notifications";
+} from "@/a2a/notifications/remote";
+import { deliverLocalAgentTask } from "@/a2a/notifications/local";
 import { makeKey, signJwt, type TestKey } from "../helpers/auth";
 
 const JKU = "https://agent.example.com/.well-known/jwks.json";
@@ -130,13 +131,13 @@ beforeEach(async () => {
 
 afterEach(() => vi.unstubAllGlobals());
 
-describe("handleAgentNotification", () => {
+describe("handleRemoteAgentNotification", () => {
   it("verifies the callback, posts the reply, and completes the task", async () => {
     const posts: SlackPost[] = [];
     stubFetch(key, posts);
     const bearer = await signJwt(key, { jku: JKU, sub: SUB, aud: AUD });
 
-    const res = await handleAgentNotification(
+    const res = await handleRemoteAgentNotification(
       callbackRequest(bearer, NTOK, makeTask("Hello from the agent"))
     );
 
@@ -154,7 +155,7 @@ describe("handleAgentNotification", () => {
     stubFetch(key, posts);
     const bearer = await signJwt(key, { jku: JKU, sub: SUB, aud: AUD });
 
-    const res = await handleAgentNotification(
+    const res = await handleRemoteAgentNotification(
       callbackRequest(bearer, NTOK, makeTask("   "))
     );
 
@@ -172,7 +173,7 @@ describe("handleAgentNotification", () => {
       aud: "https://evil.test/hook"
     });
 
-    const res = await handleAgentNotification(
+    const res = await handleRemoteAgentNotification(
       callbackRequest(bearer, NTOK, makeTask("hi"))
     );
 
@@ -190,7 +191,7 @@ describe("handleAgentNotification", () => {
     stubFetch(key, posts); // JWKS still serves the real pinned key
     const bearer = await signJwt(attacker, { jku: JKU, sub: SUB, aud: AUD });
 
-    const res = await handleAgentNotification(
+    const res = await handleRemoteAgentNotification(
       callbackRequest(bearer, NTOK, makeTask("hi"))
     );
 
@@ -212,7 +213,7 @@ describe("handleAgentNotification", () => {
       body: JSON.stringify({ kind: "message", not: "a task" })
     });
 
-    const res = await handleAgentNotification(req);
+    const res = await handleRemoteAgentNotification(req);
 
     expect(res.status).toBe(400);
     expect(posts).toHaveLength(0);
@@ -226,7 +227,7 @@ describe("handleAgentNotification", () => {
     stubFetch(key, posts);
     const bearer = await signJwt(key, { jku: JKU, sub: SUB, aud: AUD });
 
-    const res = await handleAgentNotification(
+    const res = await handleRemoteAgentNotification(
       callbackRequest(
         bearer,
         NTOK,
@@ -254,7 +255,7 @@ describe("handleAgentNotification", () => {
       status: { state: "working" } // no status.message → no messageId
     };
 
-    const res = await handleAgentNotification(
+    const res = await handleRemoteAgentNotification(
       callbackRequest(bearer, NTOK, noIdTask)
     );
 
@@ -270,7 +271,7 @@ describe("handleAgentNotification", () => {
     stubFetch(key, posts);
     const bearer = await signJwt(key, { jku: JKU, sub: SUB, aud: AUD });
 
-    await handleAgentNotification(
+    await handleRemoteAgentNotification(
       callbackRequest(
         bearer,
         NTOK,
@@ -278,7 +279,7 @@ describe("handleAgentNotification", () => {
       )
     );
     // Same messageId again (at-least-once retry) → not re-posted.
-    await handleAgentNotification(
+    await handleRemoteAgentNotification(
       callbackRequest(
         bearer,
         NTOK,
@@ -286,7 +287,7 @@ describe("handleAgentNotification", () => {
       )
     );
     // Distinct messageId → posted.
-    await handleAgentNotification(
+    await handleRemoteAgentNotification(
       callbackRequest(
         bearer,
         NTOK,
@@ -308,20 +309,60 @@ describe("handleAgentNotification", () => {
     stubFetch(key, posts);
     const bearer = await signJwt(key, { jku: JKU, sub: SUB, aud: AUD });
 
-    await handleAgentNotification(
+    await handleRemoteAgentNotification(
       callbackRequest(
         bearer,
         NTOK,
         makeStatusTask("searching…", { state: "working", messageId: "u1" })
       )
     );
-    const res = await handleAgentNotification(
+    const res = await handleRemoteAgentNotification(
       callbackRequest(bearer, NTOK, makeTask("final answer"))
     );
 
     expect(res.status).toBe(200);
     expect(posts.map((p) => p.text)).toEqual(["searching…", "final answer"]);
     expect((await getAgentTaskByToken(NTOK))?.status).toBe("completed");
+  });
+
+  it("delivers a trusted local built-in Task without accepting it on the public callback", async () => {
+    const posts: SlackPost[] = [];
+    stubFetch(key, posts);
+    await registerAgent({
+      name: "adminlocal",
+      kind: "admin",
+      displayName: "Admin Local",
+      a2aEndpoint: "https://agent.local/a2a",
+      notifyOn: "mention",
+      workspaceId: 0
+    });
+    await createAgentTask({
+      token: "local-token",
+      taskId: "local-task",
+      agentName: "adminlocal",
+      channelId: "C-local",
+      replyThreadTs: null,
+      eventId: "Ev-local"
+    });
+
+    await deliverLocalAgentTask(
+      "local-token",
+      makeStatusTask("checking that", { state: "working", messageId: "u1" }),
+      "admin"
+    );
+    await deliverLocalAgentTask(
+      "local-token",
+      makeTask("Here is the answer"),
+      "admin"
+    );
+
+    expect(posts.map((post) => post.text)).toEqual([
+      "checking that",
+      "Here is the answer"
+    ]);
+    expect((await getAgentTaskByToken("local-token"))?.status).toBe(
+      "completed"
+    );
   });
 
   it("surfaces a gateway notice and completes on a terminal failure with no text", async () => {
@@ -333,7 +374,7 @@ describe("handleAgentNotification", () => {
       status: { state: "failed" }
     };
 
-    const res = await handleAgentNotification(
+    const res = await handleRemoteAgentNotification(
       callbackRequest(bearer, NTOK, failed)
     );
 
@@ -348,7 +389,7 @@ describe("handleAgentNotification", () => {
     stubFetch(key, posts);
     const bearer = await signJwt(key, { jku: JKU, sub: SUB, aud: AUD });
 
-    const res = await handleAgentNotification(
+    const res = await handleRemoteAgentNotification(
       callbackRequest(bearer, "nope", makeTask("hi"))
     );
     expect(res.status).toBe(404);
@@ -361,7 +402,7 @@ describe("handleAgentNotification", () => {
     await completeAgentTask(NTOK); // pretend a prior callback already ran
     const bearer = await signJwt(key, { jku: JKU, sub: SUB, aud: AUD });
 
-    const res = await handleAgentNotification(
+    const res = await handleRemoteAgentNotification(
       callbackRequest(bearer, NTOK, makeTask("hi"))
     );
     expect(res.status).toBe(200);
@@ -376,7 +417,7 @@ describe("handleAgentNotification", () => {
       headers: { "content-type": "application/json" },
       body: JSON.stringify(makeTask("hi"))
     });
-    const res = await handleAgentNotification(req);
+    const res = await handleRemoteAgentNotification(req);
     expect(res.status).toBe(401);
   });
 });

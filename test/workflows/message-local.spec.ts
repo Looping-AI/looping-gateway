@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, it, expect, vi } from "vitest";
 import { env } from "cloudflare:workers";
 import { introspectWorkflow } from "cloudflare:test";
 import { setWorkspaceAdminChannel } from "@/db/models/workspaces";
+import { getPendingAgentTasksByEventId } from "@/db/models/agent-tasks";
 import { AGENT_UNREACHABLE_BASE_TEXT } from "@/workflows/message-helpers";
 import { stubSlack } from "../wrappers/slack-stub";
 import {
@@ -141,31 +142,41 @@ describe("LocalMessageWorkflow", () => {
     }
   });
 
-  it("a failed reply post is NOT reported as unreachable", async () => {
-    const calls = captureSlack();
+  it("a local task delivery failure is NOT reported as unreachable", async () => {
+    const calls: PostCall[] = [];
+    stubSlack((method, body) => {
+      if (method === "chat.postMessage") {
+        calls.push({
+          channel: body.get("channel") ?? "",
+          thread_ts: body.get("thread_ts") ?? undefined,
+          text: body.get("text") ?? ""
+        });
+        return { ok: false, error: "service_unavailable" };
+      }
+      return { ok: true, ts: "1700.2" };
+    });
     const introspector = await introspectWorkflow(env.LOCAL_MESSAGE_WORKFLOW);
     try {
-      // The agent replies fine, but posting it to Slack exhausts retries. This is
-      // an internal-error, not a dispatch failure — the user must not be told the
-      // agent "couldn't be reached" (and the run must still complete cleanly).
-      await introspector.modifyAll(async (m) => {
-        await m.disableRetryDelays([{ name: "reply:admin" }]);
-        await m.mockStepError({ name: "reply:admin" }, new Error("slack 503"));
-      });
-
-      const { body } = makeAppMentionRequest("C_ORGADMIN", "<@UBOT> hello");
+      const { body, eventId } = makeAppMentionRequest(
+        "C_ORGADMIN",
+        "<@UBOT> hello"
+      );
       const res = await trigger(body);
       expect(res.status).toBe(200);
 
       const [instance] = await introspector.get();
       await instance.waitForStatus("complete");
 
-      // No unreachable notice, and nothing else posted (the only post — the reply —
-      // is the step we forced to fail).
+      // The sender captures the error on its durable pending task; it is not a
+      // dispatch failure, so the workflow must not mislabel the agent unreachable.
       expect(calls.map((c) => c.text)).not.toContain(
         AGENT_UNREACHABLE_BASE_TEXT
       );
-      expect(calls).toHaveLength(0);
+      expect(calls).toHaveLength(1);
+      const [pending] = await getPendingAgentTasksByEventId(eventId);
+      expect(pending?.lastError).toBe(
+        "the local agent's reply could not be delivered"
+      );
     } finally {
       await introspector.dispose();
     }

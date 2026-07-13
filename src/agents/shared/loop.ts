@@ -1,6 +1,6 @@
 import type { ExecutionEventBus, RequestContext } from "@a2a-js/sdk/server";
-import type { Message } from "@a2a-js/sdk";
-import type { ToolSet } from "ai";
+import type { Message, TaskStatusUpdateEvent } from "@a2a-js/sdk";
+import type { GenerateTextOnStepFinishCallback, ToolSet } from "ai";
 import { generateText, stepCountIs } from "ai";
 import type { createModelPair } from "@/agents/model";
 import { textOf } from "@/a2a/parts";
@@ -52,19 +52,51 @@ export interface AgentTurnConfig {
   unexpectedReply: string;
 }
 
-function publish(
-  eventBus: ExecutionEventBus,
-  contextId: string,
+function agentMessage(
+  requestContext: RequestContext,
+  messageId: string,
   text: string
-): void {
-  const reply: Message = {
+): Message {
+  return {
     kind: "message",
-    messageId: crypto.randomUUID(),
+    messageId,
     role: "agent",
     parts: [{ kind: "text", text }],
-    contextId
+    taskId: requestContext.taskId,
+    contextId: requestContext.contextId
   };
-  eventBus.publish(reply);
+}
+
+function publishSubmitted(
+  eventBus: ExecutionEventBus,
+  requestContext: RequestContext
+): void {
+  eventBus.publish({
+    kind: "task",
+    id: requestContext.taskId,
+    contextId: requestContext.contextId,
+    status: { state: "submitted" }
+  });
+}
+
+function publishStatus(
+  eventBus: ExecutionEventBus,
+  requestContext: RequestContext,
+  text: string,
+  messageId: string,
+  final: boolean
+): void {
+  const update: TaskStatusUpdateEvent = {
+    kind: "status-update",
+    taskId: requestContext.taskId,
+    contextId: requestContext.contextId,
+    status: {
+      state: final ? "completed" : "working",
+      message: agentMessage(requestContext, messageId, text)
+    },
+    final
+  };
+  eventBus.publish(update);
 }
 
 /**
@@ -83,6 +115,21 @@ export async function executeAgentTurn(
   const text = textOf(userMessage);
   const metadata = (userMessage.metadata ?? {}) as Partial<AgentTurnMetadata>;
   let modelId = cfg.models.primaryId();
+  let completed = false;
+
+  publishSubmitted(eventBus, requestContext);
+
+  const publishTerminal = (reply: string): void => {
+    if (completed) return;
+    completed = true;
+    publishStatus(
+      eventBus,
+      requestContext,
+      reply,
+      `${userMessage.messageId}:final`,
+      true
+    );
+  };
 
   try {
     const {
@@ -102,7 +149,21 @@ export async function executeAgentTurn(
       system,
       messages: toModelMessages(history),
       tools,
-      stopWhen: stepCountIs(MAX_STEPS)
+      stopWhen: stepCountIs(MAX_STEPS),
+      onStepFinish: (
+        step: Parameters<GenerateTextOnStepFinishCallback<ToolSet>>[0]
+      ) => {
+        // Text from a tool-calling step is the agent's only genuine
+        // non-terminal content. Tool-only steps stay silent in Slack.
+        if (step.toolCalls.length === 0 || !step.text.trim()) return;
+        publishStatus(
+          eventBus,
+          requestContext,
+          step.text.trim(),
+          `${userMessage.messageId}:step:${step.stepNumber}`,
+          false
+        );
+      }
     };
 
     let result: Awaited<ReturnType<typeof generateText>>;
@@ -146,12 +207,12 @@ export async function executeAgentTurn(
           contextId: requestContext.contextId
         });
       }
-      publish(eventBus, requestContext.contextId, TRANSIENT_REPLY);
+      publishTerminal(TRANSIENT_REPLY);
       return;
     }
 
     await session.appendMessage(assistantSessionMessage(replyText));
-    publish(eventBus, requestContext.contextId, replyText);
+    publishTerminal(replyText);
   } catch (err) {
     console.error("[agent-loop] turn failed", {
       contextId: requestContext.contextId,
@@ -162,7 +223,7 @@ export async function executeAgentTurn(
     const reply = isTransientAiError(err)
       ? TRANSIENT_REPLY
       : cfg.unexpectedReply;
-    publish(eventBus, requestContext.contextId, reply);
+    publishTerminal(reply);
   } finally {
     eventBus.finished();
   }
