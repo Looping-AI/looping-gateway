@@ -42,7 +42,7 @@
     "zod": "^4.4.3"
   },
   "devDependencies": {
-    "@cloudflare/vitest-pool-workers": "^0.18.0",
+    "@cloudflare/vitest-pool-workers": "^0.18.4",
     "@types/node": "^26.1.0",
     "drizzle-kit": "^0.31.10",
     "eslint": "^10.6.0",
@@ -51,7 +51,7 @@
     "typescript": "^6.0.3",
     "typescript-eslint": "^8.62.1",
     "vitest": "^4.1.10",
-    "wrangler": "^4.107.0"
+    "wrangler": "^4.110.0"
   },
   "overrides": {
     "@esbuild-kit/core-utils": {
