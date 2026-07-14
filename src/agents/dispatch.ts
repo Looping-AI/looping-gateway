@@ -4,6 +4,7 @@ import { env } from "cloudflare:workers";
 import { signGatewayToken, type RemoteIdentity } from "@/auth/agent-outbound";
 import type { AgentRow } from "@/db/models/agents";
 import { buildAgentCard } from "@/a2a/card";
+import { localPushNotificationConfig } from "@/a2a/notifications/local";
 import { sendA2ALocal, sendA2ARemote } from "@/a2a/client";
 import { originOf, validateRemoteEndpoint } from "@/a2a/endpoint";
 import {
@@ -183,25 +184,21 @@ export function instanceNameFor(metadata: AgentTurnMetadata): string {
 }
 
 /**
- * The outcome of a dispatch. Local agents reply synchronously, so their text is
- * returned inline for the workflow to post. Remote agents are asynchronous: they
- * only *accept* the message here (returning a Task) and push the real reply later
- * to `/a2a/notifications`, so all the gateway gets now is the correlation `token`
- * (echoed back on the callback) and the remote-assigned `taskId`. A remote may
- * violate this async contract by returning a Message; that outcome is surfaced
- * separately so the workflow can post a visible failure.
+ * The outcome of a dispatch. All agents accept a Task here and deliver their real
+ * reply later: remote agents call the authenticated public callback, while local
+ * built-ins use a trusted in-process sender. The workflow receives the shared
+ * correlation `token` and the assigned `taskId`; a contract violation (a reply
+ * that isn't a Task acceptance) is surfaced as a visible error reply.
  */
 export type DispatchResult =
-  | { kind: "reply"; text: string }
   | { kind: "error_reply"; text: string }
   | { kind: "accepted"; token: string; taskId: string };
 
 /**
  * Dispatch a user message to an agent over A2A. Routing is by `agent.kind`:
- * built-in local agents are reached in-process via their DO `stub.fetch` and
- * reply synchronously (`{ kind: "reply" }`); custom agents go over real HTTP at
- * their `a2aEndpoint` and reply asynchronously via push notification
- * (`{ kind: "accepted" }`) — the gateway never blocks on their generation.
+ * built-in local agents are reached in-process via their DO `stub.fetch`; custom
+ * agents go over real HTTP at their `a2aEndpoint`. Both return task acceptance
+ * and deliver status snapshots through their respective push-notification path.
  */
 export async function dispatchToAgent(
   agent: DispatchAgentRef,
@@ -307,9 +304,20 @@ export async function dispatchToAgent(
     stub.fetch(input as RequestInfo, init)) as typeof fetch;
   const card = buildAgentCard({
     name: agent.name,
-    description: `Local ${agent.kind} agent`
+    description: `Local ${agent.kind} agent`,
+    pushNotifications: true
   });
 
-  const reply = await sendA2ALocal({ card, fetchImpl }, message);
-  return { kind: "reply", text: reply };
+  const accept = await sendA2ALocal(
+    { card, fetchImpl },
+    message,
+    localPushNotificationConfig(dispatchId)
+  );
+  if (accept.kind === "accepted") {
+    return { kind: "accepted", token: dispatchId, taskId: accept.taskId };
+  }
+  return {
+    kind: "error_reply",
+    text: "Local agent did not provide the required task acknowledgment."
+  };
 }

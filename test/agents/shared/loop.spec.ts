@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import { MockLanguageModelV3 } from "ai/test";
-import type { LanguageModel } from "ai";
+import { tool, type LanguageModel } from "ai";
+import { z } from "zod";
 import type { ModelPair } from "@/agents/model";
 import type { SessionLike } from "@/agents/shared/session";
 import {
@@ -8,14 +9,31 @@ import {
   executeAgentTurn,
   type AgentTurnConfig
 } from "@/agents/shared/loop";
-import { FakeSession, okResult, lengthResult } from "../../helpers/agents";
+import {
+  FakeSession,
+  okResult,
+  lengthResult,
+  toolCallResult
+} from "../../helpers/agents";
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
+interface PublishedEvent {
+  kind: string;
+  id?: string;
+  taskId?: string;
+  contextId?: string;
+  final?: boolean;
+  status?: {
+    state: string;
+    message?: { messageId: string; parts: Array<{ text?: string }> };
+  };
+}
+
 function fakeEventBus() {
-  const published: Array<{ parts: Array<{ text?: string }> }> = [];
+  const published: PublishedEvent[] = [];
   const publish = vi.fn((e: unknown) => {
     published.push(e as never);
   });
@@ -30,6 +48,7 @@ function fakeRequestContext(
 ) {
   return {
     contextId: opts.contextId ?? "ctx-1",
+    taskId: "task-1",
     userMessage: {
       kind: "message",
       messageId: "m1",
@@ -38,6 +57,25 @@ function fakeRequestContext(
       metadata: opts.metadata ?? {}
     }
   } as never;
+}
+
+function expectTerminalReply(bus: { published: PublishedEvent[] }) {
+  expect(bus.published[0]).toMatchObject({
+    kind: "task",
+    id: "task-1",
+    contextId: "ctx-1",
+    status: { state: "submitted" }
+  });
+
+  const terminal = bus.published.at(-1);
+  expect(terminal).toMatchObject({
+    kind: "status-update",
+    taskId: "task-1",
+    contextId: "ctx-1",
+    final: true,
+    status: { state: "completed" }
+  });
+  return terminal?.status?.message;
 }
 
 function fakeModels(
@@ -113,7 +151,7 @@ describe("isTransientAiError", () => {
 // ---------------------------------------------------------------------------
 
 describe("executeAgentTurn", () => {
-  it("happy path: appends user + assistant messages and publishes the reply", async () => {
+  it("happy path: appends user + assistant messages and completes a task", async () => {
     const session = new FakeSession();
     const model = new MockLanguageModelV3({
       doGenerate: async () => okResult("Hello!") as never
@@ -128,9 +166,12 @@ describe("executeAgentTurn", () => {
 
     // finished() always fires
     expect(bus.finished).toHaveBeenCalledTimes(1);
-    // One published reply with the model's text
-    expect(bus.published).toHaveLength(1);
-    expect(bus.published[0].parts[0]).toMatchObject({ text: "Hello!" });
+    // The task exists before its terminal response, allowing async acceptance.
+    expect(bus.published).toHaveLength(2);
+    expect(expectTerminalReply(bus)).toMatchObject({
+      messageId: "m1:final",
+      parts: [{ text: "Hello!" }]
+    });
     // User turn then assistant turn persisted
     expect(session.messages.map((m) => m.role)).toEqual(["user", "assistant"]);
   });
@@ -184,7 +225,9 @@ describe("executeAgentTurn", () => {
     );
 
     expect(bus.finished).toHaveBeenCalledTimes(1);
-    expect(bus.published[0].parts[0]).toMatchObject({ text: "Fallback reply" });
+    expect(expectTerminalReply(bus)?.parts[0]).toMatchObject({
+      text: "Fallback reply"
+    });
   });
 
   it("publishes the transient reply when a transient error propagates to the outer catch", async () => {
@@ -205,8 +248,10 @@ describe("executeAgentTurn", () => {
     });
 
     expect(bus.finished).toHaveBeenCalledTimes(1);
-    expect(bus.published).toHaveLength(1);
-    expect(bus.published[0].parts[0].text).toMatch(/temporarily unavailable/i);
+    expect(bus.published).toHaveLength(2);
+    expect(expectTerminalReply(bus)?.parts[0].text).toMatch(
+      /temporarily unavailable/i
+    );
   });
 
   it("publishes unexpectedReply when a non-transient error propagates to the outer catch", async () => {
@@ -226,8 +271,8 @@ describe("executeAgentTurn", () => {
     });
 
     expect(bus.finished).toHaveBeenCalledTimes(1);
-    expect(bus.published).toHaveLength(1);
-    expect(bus.published[0].parts[0].text).toBe(
+    expect(bus.published).toHaveLength(2);
+    expect(expectTerminalReply(bus)?.parts[0].text).toBe(
       "Something went wrong. Please try again."
     );
   });
@@ -246,7 +291,9 @@ describe("executeAgentTurn", () => {
     );
 
     expect(bus.finished).toHaveBeenCalledTimes(1);
-    expect(bus.published[0].parts[0].text).toMatch(/temporarily unavailable/i);
+    expect(expectTerminalReply(bus)?.parts[0].text).toMatch(
+      /temporarily unavailable/i
+    );
     // User message WAS appended; assistant message was NOT (empty reply skipped)
     expect(session.messages.map((m) => m.role)).toEqual(["user"]);
   });
@@ -265,7 +312,9 @@ describe("executeAgentTurn", () => {
     );
 
     expect(bus.finished).toHaveBeenCalledTimes(1);
-    expect(bus.published[0].parts[0].text).toMatch(/temporarily unavailable/i);
+    expect(expectTerminalReply(bus)?.parts[0].text).toMatch(
+      /temporarily unavailable/i
+    );
     // Assistant message must NOT be persisted when the reply was truncated
     expect(session.messages.map((m) => m.role)).toEqual(["user"]);
   });
@@ -285,8 +334,8 @@ describe("executeAgentTurn", () => {
     });
 
     expect(bus.finished).toHaveBeenCalledTimes(1);
-    expect(bus.published).toHaveLength(1);
-    expect(bus.published[0].parts[0].text).toBe(
+    expect(bus.published).toHaveLength(2);
+    expect(expectTerminalReply(bus)?.parts[0].text).toBe(
       "Something went wrong. Please try again."
     );
   });
@@ -310,5 +359,143 @@ describe("executeAgentTurn", () => {
     );
 
     expect(bus.finished).toHaveBeenCalledTimes(1);
+  });
+
+  it("publishes textual tool-loop steps without persisting them", async () => {
+    const session = new FakeSession();
+    let generation = 0;
+    const model = new MockLanguageModelV3({
+      doGenerate: async () => {
+        if (generation++ === 0) {
+          return {
+            ...toolCallResult("lookup", {}),
+            content: [
+              { type: "text", text: "I will check that." },
+              {
+                type: "tool-call",
+                toolCallId: "tc1",
+                toolName: "lookup",
+                input: "{}"
+              }
+            ]
+          } as never;
+        }
+        return okResult("Here is what I found.") as never;
+      }
+    });
+    const bus = fakeEventBus();
+
+    await executeAgentTurn(
+      fakeRequestContext("hi"),
+      bus.eventBus,
+      makeCfg(session, fakeModels(model), {
+        prepare: async () => ({
+          session,
+          systemSuffix: "",
+          tools: {
+            lookup: tool({
+              description: "Lookup a value.",
+              inputSchema: z.object({}),
+              execute: async () => "found"
+            })
+          }
+        })
+      })
+    );
+
+    expect(bus.published).toHaveLength(3);
+    expect(bus.published[1]).toMatchObject({
+      kind: "status-update",
+      taskId: "task-1",
+      final: false,
+      status: {
+        state: "working",
+        message: {
+          messageId: "m1:step:0",
+          parts: [{ text: "I will check that." }]
+        }
+      }
+    });
+    expect(expectTerminalReply(bus)?.parts[0]).toMatchObject({
+      text: "Here is what I found."
+    });
+    expect(session.messages.map((message) => message.role)).toEqual([
+      "user",
+      "assistant"
+    ]);
+    expect(session.messages[1].parts[0]).toMatchObject({
+      type: "text",
+      text: "Here is what I found."
+    });
+  });
+
+  it("does not double-post the final text when generation stops at the step limit", async () => {
+    const session = new FakeSession();
+    // Every step emits text + a tool call, so the loop never reaches a plain
+    // stop and instead halts at the step limit. The final step's text is both
+    // streamed non-terminally (`:step:N`) and returned as `result.text`.
+    let n = 0;
+    const model = new MockLanguageModelV3({
+      doGenerate: async () => {
+        const i = n++;
+        return {
+          ...toolCallResult("lookup", {}),
+          content: [
+            { type: "text", text: `step-${i}` },
+            {
+              type: "tool-call",
+              toolCallId: `tc${i}`,
+              toolName: "lookup",
+              input: "{}"
+            }
+          ]
+        } as never;
+      }
+    });
+    const bus = fakeEventBus();
+
+    await executeAgentTurn(
+      fakeRequestContext("hi"),
+      bus.eventBus,
+      makeCfg(session, fakeModels(model), {
+        prepare: async () => ({
+          session,
+          systemSuffix: "",
+          tools: {
+            lookup: tool({
+              description: "Lookup a value.",
+              inputSchema: z.object({}),
+              execute: async () => "found"
+            })
+          }
+        })
+      })
+    );
+
+    // The final step's text was streamed as a non-terminal update; the terminal
+    // event completes the task with empty text so it isn't posted twice.
+    const stepTexts = bus.published
+      .filter(
+        (e): e is PublishedEvent =>
+          e.kind === "status-update" && e.final === false
+      )
+      .map((e) => e.status?.message?.parts[0]?.text);
+    const lastStepText = stepTexts.at(-1);
+    expect(lastStepText).toBeTruthy();
+
+    const terminal = expectTerminalReply(bus);
+    expect(terminal?.parts[0]?.text).toBe("");
+
+    // The final text appears exactly once across every published event…
+    const allTexts = bus.published.map(
+      (e) => e.status?.message?.parts[0]?.text
+    );
+    expect(allTexts.filter((t) => t === lastStepText)).toHaveLength(1);
+    // …yet the full reply is still persisted to session history.
+    expect(session.messages.map((m) => m.role)).toEqual(["user", "assistant"]);
+    expect(session.messages[1].parts[0]).toMatchObject({
+      type: "text",
+      text: lastStepText
+    });
   });
 });

@@ -149,7 +149,7 @@ export const agentChannels = sqliteTable(
 );
 
 /**
- * Pending remote-agent tasks — the correlation store for async A2A push
+ * Pending agent tasks — the correlation store for async A2A push
  * notifications. When the gateway dispatches to a remote (custom) agent it no
  * longer blocks for the reply: it sends a per-dispatch validation `token` in the
  * A2A `pushNotificationConfig`, the remote returns a Task immediately, and later

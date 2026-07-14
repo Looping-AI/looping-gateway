@@ -59,8 +59,7 @@ export interface AgentPlan {
 }
 
 // ---------------------------------------------------------------------------
-// Pure steps — called by LocalMessageWorkflow / RemoteMessageWorkflow and
-// exported for tests.
+// Pure steps — called by MessageWorkflow and exported for tests.
 // ---------------------------------------------------------------------------
 
 /**
@@ -118,9 +117,10 @@ export async function resolveMessage(
 }
 
 /**
- * Dispatch one resolved plan to its agent over A2A. Local agents reply
- * synchronously (`{ kind: "reply" }`); remote agents only *accept* here and push
- * their reply later (`{ kind: "accepted" }`).
+ * Dispatch one resolved plan to its agent over A2A. Every agent accepts a Task
+ * (`{ kind: "accepted" }`) and delivers status snapshots later: remote agents
+ * through the authenticated callback and built-ins through the trusted local
+ * sender.
  *
  * Retry policy. A rejected endpoint (`InvalidEndpointError`) is a policy verdict,
  * not a transient fault: stay silent and do NOT retry. Everything else (network
@@ -203,7 +203,7 @@ export async function signalReactionCollect(eventId: string): Promise<void> {
  * so the workflow can react precisely instead of collapsing everything into a
  * single "dispatch failed" notice.
  *
- * - `accepted`      — a remote agent took the turn and will push its reply later;
+ * - `accepted`      — the agent took the turn and will deliver its reply later;
  *                     the ⏳ must linger until its callback (or backstop) clears it.
  * - `done`          — handled fully now (sync reply posted, silence, or a policy
  *                     error notice posted); nothing is still working.
@@ -219,8 +219,8 @@ export type TaskOutcome =
   | { kind: "internal_error"; error: string };
 
 /**
- * Post the "agent unreachable" notice and dispatch-failed error handling shared
- * by both local and remote workflows when a task returns `{ kind: "unreachable" }`.
+ * Post the "agent unreachable" notice and dispatch-failed error handling the
+ * workflow runs when a task returns `{ kind: "unreachable" }`.
  */
 export async function handleUnreachable(
   step: WorkflowStep,

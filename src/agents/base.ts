@@ -2,9 +2,12 @@ import { Agent } from "agents";
 import type { AgentCard } from "@a2a-js/sdk";
 import {
   DefaultRequestHandler,
+  InMemoryPushNotificationStore,
   InMemoryTaskStore,
   type AgentExecutor
 } from "@a2a-js/sdk/server";
+import type { LocalAgentKind } from "@/db/models/agents";
+import { LocalPushNotificationSender } from "@/a2a/notifications/local";
 import { serveA2A } from "@/a2a/serve";
 
 /**
@@ -21,22 +24,38 @@ import { serveA2A } from "@/a2a/serve";
  */
 export abstract class A2AAgent extends Agent<Env> {
   private handler?: DefaultRequestHandler;
+  private sender?: LocalPushNotificationSender;
 
   protected abstract card(): AgentCard;
   protected abstract executor(): AgentExecutor;
+  protected abstract builtinKind(): LocalAgentKind;
 
   private getHandler(): DefaultRequestHandler {
     if (!this.handler) {
+      const card = this.card();
+      const pushNotificationStore = new InMemoryPushNotificationStore();
+      this.sender = new LocalPushNotificationSender(
+        pushNotificationStore,
+        this.builtinKind()
+      );
       this.handler = new DefaultRequestHandler(
-        this.card(),
+        card,
         new InMemoryTaskStore(),
-        this.executor()
+        this.executor(),
+        undefined,
+        pushNotificationStore,
+        this.sender
       );
     }
     return this.handler;
   }
 
   async fetch(request: Request): Promise<Response> {
-    return serveA2A(request, this.getHandler());
+    const response = await serveA2A(request, this.getHandler());
+    // The SDK dispatches push delivery without awaiting it. Register the sender's
+    // in-flight deliveries on waitUntil so the runtime keeps this DO alive until
+    // they settle, instead of dropping them when the response returns.
+    if (this.sender) this.ctx.waitUntil(this.sender.drain());
+    return response;
   }
 }

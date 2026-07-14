@@ -115,15 +115,13 @@ afterEach(async () => {
 });
 
 // End-to-end of the local A2A path: client (official SDK) → DO stub.fetch →
-// serveA2A → DefaultRequestHandler → executor → reply, all in-process.
-// Both admin and onboarding now run the AI loop (Workers AI is unavailable
-// offline, so each returns its graceful fallback reply).
+// serveA2A → DefaultRequestHandler → executor → Task acceptance, all in-process.
+// Reply delivery itself uses the trusted local notification sender.
 describe("dispatchToAgent (local Durable Object)", () => {
-  it("reaches the AdminAgent A2A server and returns a reply", async () => {
+  it("reaches the AdminAgent A2A server and accepts a task", async () => {
     // Exercises the full local A2A path into the real AdminAgent DO (which runs
-    // the AI loop over its Session/SQLite). Workers AI is unavailable offline, so
-    // the executor's graceful fallback reply comes back — but the round-trip
-    // proves card discovery + JSON-RPC + the DO executor are wired correctly.
+    // the AI loop over its Session/SQLite). The response is an A2A Task; status
+    // snapshots are delivered through the local sender instead of inline.
     const result = await dispatchToAgent(
       {
         name: "admin",
@@ -142,14 +140,23 @@ describe("dispatchToAgent (local Durable Object)", () => {
         metadata: { agentKind: "admin", adminWorkspaceId: 0 }
       }
     );
-    expect(result.kind).toBe("reply");
-    if (result.kind === "reply") expect(result.text.length).toBeGreaterThan(0);
+    expect(result.kind).toBe("accepted");
+    if (result.kind === "accepted") {
+      expect(result.taskId.length).toBeGreaterThan(0);
+      expect(result.token).toBe(
+        await buildDispatchId("Ev-admin", {
+          name: "admin",
+          kind: "admin",
+          workspaceId: 0
+        })
+      );
+    }
   });
 
-  it("routes the onboarding kind to its per-user OnboardingAgent instance", async () => {
+  it("routes onboarding to its per-user instance and accepts a task", async () => {
     // The onboarding instance is keyed by the caller's slackUserId (read from
-    // metadata.user); the round-trip into the real DO proves wiring even though
-    // the offline fallback reply comes back.
+    // metadata.user); the round-trip into the real DO proves wiring before the
+    // in-process sender delivers its task status snapshots.
     const result = await dispatchToAgent(
       {
         name: "onboarding",
@@ -168,8 +175,17 @@ describe("dispatchToAgent (local Durable Object)", () => {
         metadata: { agentKind: "onboarding" }
       }
     );
-    expect(result.kind).toBe("reply");
-    if (result.kind === "reply") expect(result.text.length).toBeGreaterThan(0);
+    expect(result.kind).toBe("accepted");
+    if (result.kind === "accepted") {
+      expect(result.taskId.length).toBeGreaterThan(0);
+      expect(result.token).toBe(
+        await buildDispatchId("Ev-onb", {
+          name: "onboarding",
+          kind: "onboarding",
+          workspaceId: 0
+        })
+      );
+    }
   });
 
   it("namespaces remote identity and context per logical agent instance", async () => {

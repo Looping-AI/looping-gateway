@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import type { Task, TaskState } from "@a2a-js/sdk";
+import { InMemoryPushNotificationStore } from "@a2a-js/sdk/server";
 import { registerAgent } from "@/db/models/agents";
 import {
   setPublicUrl,
@@ -11,10 +12,15 @@ import {
   completeAgentTask
 } from "@/db/models/agent-tasks";
 import {
-  handleAgentNotification,
+  handleRemoteAgentNotification,
   NOTIFICATION_TOKEN_HEADER,
   NOTIFICATIONS_PATH
-} from "@/a2a/notifications";
+} from "@/a2a/notifications/remote";
+import {
+  deliverLocalAgentTask,
+  LocalPushNotificationSender,
+  localPushNotificationConfig
+} from "@/a2a/notifications/local";
 import { makeKey, signJwt, type TestKey } from "../helpers/auth";
 
 const JKU = "https://agent.example.com/.well-known/jwks.json";
@@ -130,13 +136,13 @@ beforeEach(async () => {
 
 afterEach(() => vi.unstubAllGlobals());
 
-describe("handleAgentNotification", () => {
+describe("handleRemoteAgentNotification", () => {
   it("verifies the callback, posts the reply, and completes the task", async () => {
     const posts: SlackPost[] = [];
     stubFetch(key, posts);
     const bearer = await signJwt(key, { jku: JKU, sub: SUB, aud: AUD });
 
-    const res = await handleAgentNotification(
+    const res = await handleRemoteAgentNotification(
       callbackRequest(bearer, NTOK, makeTask("Hello from the agent"))
     );
 
@@ -154,7 +160,7 @@ describe("handleAgentNotification", () => {
     stubFetch(key, posts);
     const bearer = await signJwt(key, { jku: JKU, sub: SUB, aud: AUD });
 
-    const res = await handleAgentNotification(
+    const res = await handleRemoteAgentNotification(
       callbackRequest(bearer, NTOK, makeTask("   "))
     );
 
@@ -172,7 +178,7 @@ describe("handleAgentNotification", () => {
       aud: "https://evil.test/hook"
     });
 
-    const res = await handleAgentNotification(
+    const res = await handleRemoteAgentNotification(
       callbackRequest(bearer, NTOK, makeTask("hi"))
     );
 
@@ -190,7 +196,7 @@ describe("handleAgentNotification", () => {
     stubFetch(key, posts); // JWKS still serves the real pinned key
     const bearer = await signJwt(attacker, { jku: JKU, sub: SUB, aud: AUD });
 
-    const res = await handleAgentNotification(
+    const res = await handleRemoteAgentNotification(
       callbackRequest(bearer, NTOK, makeTask("hi"))
     );
 
@@ -212,7 +218,31 @@ describe("handleAgentNotification", () => {
       body: JSON.stringify({ kind: "message", not: "a task" })
     });
 
-    const res = await handleAgentNotification(req);
+    const res = await handleRemoteAgentNotification(req);
+
+    expect(res.status).toBe(400);
+    expect(posts).toHaveLength(0);
+    const row = await getAgentTaskByToken(NTOK);
+    expect(row?.status).toBe("pending");
+    expect(row?.lastError).toContain("not a valid A2A Task");
+  });
+
+  it("400s a Task-kind body missing status without reaching delivery", async () => {
+    const posts: SlackPost[] = [];
+    stubFetch(key, posts);
+    const bearer = await signJwt(key, { jku: JKU, sub: SUB, aud: AUD });
+    const req = new Request(`${ISSUER}${NOTIFICATIONS_PATH}`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${bearer}`,
+        [NOTIFICATION_TOKEN_HEADER]: NTOK,
+        "content-type": "application/json"
+      },
+      // kind: "task" but no status → would crash on task.status.state if cast.
+      body: JSON.stringify({ kind: "task", id: "task-1", contextId: "c1" })
+    });
+
+    const res = await handleRemoteAgentNotification(req);
 
     expect(res.status).toBe(400);
     expect(posts).toHaveLength(0);
@@ -226,7 +256,7 @@ describe("handleAgentNotification", () => {
     stubFetch(key, posts);
     const bearer = await signJwt(key, { jku: JKU, sub: SUB, aud: AUD });
 
-    const res = await handleAgentNotification(
+    const res = await handleRemoteAgentNotification(
       callbackRequest(
         bearer,
         NTOK,
@@ -254,7 +284,7 @@ describe("handleAgentNotification", () => {
       status: { state: "working" } // no status.message → no messageId
     };
 
-    const res = await handleAgentNotification(
+    const res = await handleRemoteAgentNotification(
       callbackRequest(bearer, NTOK, noIdTask)
     );
 
@@ -270,7 +300,7 @@ describe("handleAgentNotification", () => {
     stubFetch(key, posts);
     const bearer = await signJwt(key, { jku: JKU, sub: SUB, aud: AUD });
 
-    await handleAgentNotification(
+    await handleRemoteAgentNotification(
       callbackRequest(
         bearer,
         NTOK,
@@ -278,7 +308,7 @@ describe("handleAgentNotification", () => {
       )
     );
     // Same messageId again (at-least-once retry) → not re-posted.
-    await handleAgentNotification(
+    await handleRemoteAgentNotification(
       callbackRequest(
         bearer,
         NTOK,
@@ -286,7 +316,7 @@ describe("handleAgentNotification", () => {
       )
     );
     // Distinct messageId → posted.
-    await handleAgentNotification(
+    await handleRemoteAgentNotification(
       callbackRequest(
         bearer,
         NTOK,
@@ -308,20 +338,176 @@ describe("handleAgentNotification", () => {
     stubFetch(key, posts);
     const bearer = await signJwt(key, { jku: JKU, sub: SUB, aud: AUD });
 
-    await handleAgentNotification(
+    await handleRemoteAgentNotification(
       callbackRequest(
         bearer,
         NTOK,
         makeStatusTask("searching…", { state: "working", messageId: "u1" })
       )
     );
-    const res = await handleAgentNotification(
+    const res = await handleRemoteAgentNotification(
       callbackRequest(bearer, NTOK, makeTask("final answer"))
     );
 
     expect(res.status).toBe(200);
     expect(posts.map((p) => p.text)).toEqual(["searching…", "final answer"]);
     expect((await getAgentTaskByToken(NTOK))?.status).toBe("completed");
+  });
+
+  it("delivers a trusted local built-in Task without accepting it on the public callback", async () => {
+    const posts: SlackPost[] = [];
+    stubFetch(key, posts);
+    await registerAgent({
+      name: "adminlocal",
+      kind: "admin",
+      displayName: "Admin Local",
+      a2aEndpoint: "https://agent.local/a2a",
+      notifyOn: "mention",
+      workspaceId: 0
+    });
+    await createAgentTask({
+      token: "local-token",
+      taskId: "local-task",
+      agentName: "adminlocal",
+      channelId: "C-local",
+      replyThreadTs: null,
+      eventId: "Ev-local"
+    });
+
+    await deliverLocalAgentTask(
+      "local-token",
+      makeStatusTask("checking that", { state: "working", messageId: "u1" }),
+      "admin"
+    );
+    await deliverLocalAgentTask(
+      "local-token",
+      makeTask("Here is the answer"),
+      "admin"
+    );
+
+    expect(posts.map((post) => post.text)).toEqual([
+      "checking that",
+      "Here is the answer"
+    ]);
+    expect((await getAgentTaskByToken("local-token"))?.status).toBe(
+      "completed"
+    );
+  });
+
+  it("sanitizes a local built-in reply before posting (defangs broadcast sequences)", async () => {
+    const posts: SlackPost[] = [];
+    stubFetch(key, posts);
+    await registerAgent({
+      name: "adminsanitize",
+      kind: "admin",
+      displayName: "Admin Sanitize",
+      a2aEndpoint: "https://agent.local/a2a",
+      notifyOn: "mention",
+      workspaceId: 0
+    });
+    await createAgentTask({
+      token: "local-sanitize-token",
+      taskId: "local-sanitize-task",
+      agentName: "adminsanitize",
+      channelId: "C-local",
+      replyThreadTs: null,
+      eventId: "Ev-local-sanitize"
+    });
+
+    // A built-in agent still relays untrusted model output — the reply is
+    // sanitized before it reaches Slack, just like a remote agent's.
+    await deliverLocalAgentTask(
+      "local-sanitize-token",
+      makeTask("hey <!channel> listen"),
+      "admin"
+    );
+
+    expect(posts).toHaveLength(1);
+    expect(posts[0].text).not.toContain("<!channel>");
+    expect(posts[0].text).toContain("@channel");
+  });
+
+  it("rejects a built-in agent's token on the public remote callback (401, nothing posted)", async () => {
+    const posts: SlackPost[] = [];
+    stubFetch(key, posts);
+    await registerAgent({
+      name: "adminpublic",
+      kind: "admin",
+      displayName: "Admin Public",
+      a2aEndpoint: "https://agent.local/a2a",
+      notifyOn: "mention",
+      workspaceId: 0
+    });
+    await createAgentTask({
+      token: "local-public-token",
+      taskId: "local-public-task",
+      agentName: "adminpublic",
+      channelId: "C-local",
+      replyThreadTs: null,
+      eventId: "Ev-local-public"
+    });
+
+    // A built-in agent's task must never be completable through the public HTTP
+    // callback — it is delivered in-process. The kind check rejects it before any
+    // signature verification or Slack post, even with a bearer present.
+    const res = await handleRemoteAgentNotification(
+      callbackRequest(
+        "any-bearer",
+        "local-public-token",
+        makeTask("smuggled reply")
+      )
+    );
+
+    expect(res.status).toBe(401);
+    expect(posts).toHaveLength(0);
+    const row = await getAgentTaskByToken("local-public-token");
+    expect(row?.status).toBe("pending");
+    expect(row?.lastError).toContain("delivered internally");
+  });
+
+  it("suppresses a submitted local Task even when it includes text", async () => {
+    const posts: SlackPost[] = [];
+    stubFetch(key, posts);
+    await registerAgent({
+      name: "adminsender",
+      kind: "admin",
+      displayName: "Admin Sender",
+      a2aEndpoint: "https://agent.local/a2a",
+      notifyOn: "mention",
+      workspaceId: 0
+    });
+    await createAgentTask({
+      token: "local-sender-token",
+      taskId: "local-sender-task",
+      agentName: "adminsender",
+      channelId: "C-local",
+      replyThreadTs: null,
+      eventId: "Ev-local-sender"
+    });
+
+    const store = new InMemoryPushNotificationStore();
+    await store.save(
+      "local-sender-task",
+      localPushNotificationConfig("local-sender-token")
+    );
+    const sender = new LocalPushNotificationSender(store, "admin");
+
+    await sender.send({
+      ...makeStatusTask("acceptance text", {
+        state: "submitted",
+        messageId: "submitted-message"
+      }),
+      id: "local-sender-task"
+    });
+    await sender.send({
+      ...makeStatusTask("working update", {
+        state: "working",
+        messageId: "working-message"
+      }),
+      id: "local-sender-task"
+    });
+
+    expect(posts.map((post) => post.text)).toEqual(["working update"]);
   });
 
   it("surfaces a gateway notice and completes on a terminal failure with no text", async () => {
@@ -333,7 +519,7 @@ describe("handleAgentNotification", () => {
       status: { state: "failed" }
     };
 
-    const res = await handleAgentNotification(
+    const res = await handleRemoteAgentNotification(
       callbackRequest(bearer, NTOK, failed)
     );
 
@@ -348,7 +534,7 @@ describe("handleAgentNotification", () => {
     stubFetch(key, posts);
     const bearer = await signJwt(key, { jku: JKU, sub: SUB, aud: AUD });
 
-    const res = await handleAgentNotification(
+    const res = await handleRemoteAgentNotification(
       callbackRequest(bearer, "nope", makeTask("hi"))
     );
     expect(res.status).toBe(404);
@@ -361,7 +547,7 @@ describe("handleAgentNotification", () => {
     await completeAgentTask(NTOK); // pretend a prior callback already ran
     const bearer = await signJwt(key, { jku: JKU, sub: SUB, aud: AUD });
 
-    const res = await handleAgentNotification(
+    const res = await handleRemoteAgentNotification(
       callbackRequest(bearer, NTOK, makeTask("hi"))
     );
     expect(res.status).toBe(200);
@@ -376,7 +562,7 @@ describe("handleAgentNotification", () => {
       headers: { "content-type": "application/json" },
       body: JSON.stringify(makeTask("hi"))
     });
-    const res = await handleAgentNotification(req);
+    const res = await handleRemoteAgentNotification(req);
     expect(res.status).toBe(401);
   });
 });

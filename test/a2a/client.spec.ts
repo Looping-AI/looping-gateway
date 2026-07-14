@@ -1,6 +1,6 @@
 import { describe, it, expect, afterEach, vi } from "vitest";
 import type { Message, Task } from "@a2a-js/sdk";
-import { sendA2ARemote, sanitizeRemoteReply } from "@/a2a/client";
+import { sendA2ARemote, sanitizeAgentReply } from "@/a2a/client";
 import { buildAgentCard } from "@/a2a/card";
 
 const ENDPOINT = "https://remote.example.com/a2a";
@@ -154,10 +154,10 @@ describe("sendA2ARemote — async remote accept", () => {
   });
 });
 
-describe("sanitizeRemoteReply — untrusted reply hardening", () => {
+describe("sanitizeAgentReply — untrusted reply hardening", () => {
   it("strips control characters and caps an oversized reply", () => {
     const hostile = "x".repeat(20_000) + "\u0007bell";
-    const reply = sanitizeRemoteReply(hostile);
+    const reply = sanitizeAgentReply(hostile);
     expect(reply).not.toContain("\u0007");
     // 16_000 chars + the truncation ellipsis.
     expect(reply.length).toBe(16_001);
@@ -165,11 +165,11 @@ describe("sanitizeRemoteReply — untrusted reply hardening", () => {
   });
 
   it("keeps tabs and newlines", () => {
-    expect(sanitizeRemoteReply("a\tb\nc")).toBe("a\tb\nc");
+    expect(sanitizeAgentReply("a\tb\nc")).toBe("a\tb\nc");
   });
 
   it("defangs Slack broadcast sequences so a hostile reply can't @-notify a channel", () => {
-    const reply = sanitizeRemoteReply(
+    const reply = sanitizeAgentReply(
       "urgent <!channel> and <!here> and <!subteam^S1|@grp> now"
     );
     expect(reply).not.toContain("<!");

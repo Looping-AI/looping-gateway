@@ -1,6 +1,6 @@
 import type { ExecutionEventBus, RequestContext } from "@a2a-js/sdk/server";
-import type { Message } from "@a2a-js/sdk";
-import type { ToolSet } from "ai";
+import type { Message, TaskStatusUpdateEvent } from "@a2a-js/sdk";
+import type { GenerateTextOnStepFinishCallback, ToolSet } from "ai";
 import { generateText, stepCountIs } from "ai";
 import type { createModelPair } from "@/agents/model";
 import { textOf } from "@/a2a/parts";
@@ -52,19 +52,51 @@ export interface AgentTurnConfig {
   unexpectedReply: string;
 }
 
-function publish(
-  eventBus: ExecutionEventBus,
-  contextId: string,
+function agentMessage(
+  requestContext: RequestContext,
+  messageId: string,
   text: string
-): void {
-  const reply: Message = {
+): Message {
+  return {
     kind: "message",
-    messageId: crypto.randomUUID(),
+    messageId,
     role: "agent",
     parts: [{ kind: "text", text }],
-    contextId
+    taskId: requestContext.taskId,
+    contextId: requestContext.contextId
   };
-  eventBus.publish(reply);
+}
+
+function publishSubmitted(
+  eventBus: ExecutionEventBus,
+  requestContext: RequestContext
+): void {
+  eventBus.publish({
+    kind: "task",
+    id: requestContext.taskId,
+    contextId: requestContext.contextId,
+    status: { state: "submitted" }
+  });
+}
+
+function publishStatus(
+  eventBus: ExecutionEventBus,
+  requestContext: RequestContext,
+  text: string,
+  messageId: string,
+  final: boolean
+): void {
+  const update: TaskStatusUpdateEvent = {
+    kind: "status-update",
+    taskId: requestContext.taskId,
+    contextId: requestContext.contextId,
+    status: {
+      state: final ? "completed" : "working",
+      message: agentMessage(requestContext, messageId, text)
+    },
+    final
+  };
+  eventBus.publish(update);
 }
 
 /**
@@ -83,6 +115,30 @@ export async function executeAgentTurn(
   const text = textOf(userMessage);
   const metadata = (userMessage.metadata ?? {}) as Partial<AgentTurnMetadata>;
   let modelId = cfg.models.primaryId();
+  let completed = false;
+  // Tracks the text of the most recent non-terminal step published below, so the
+  // terminal reply isn't posted twice when it is that same text.
+  let lastStepText = "";
+
+  publishSubmitted(eventBus, requestContext);
+
+  const publishTerminal = (reply: string): void => {
+    if (completed) return;
+    completed = true;
+    // When generation stops at the step limit on a tool-calling step, that step's
+    // text was already streamed as a non-terminal update (`:step:N`) and equals
+    // `result.text`. Send an empty terminal so the task still completes and
+    // collects the ⏳ without re-posting it (different id ⇒ dedupe would miss it).
+    // History still keeps the full reply via `appendMessage`.
+    const terminalText = reply && reply === lastStepText ? "" : reply;
+    publishStatus(
+      eventBus,
+      requestContext,
+      terminalText,
+      `${userMessage.messageId}:final`,
+      true
+    );
+  };
 
   try {
     const {
@@ -98,11 +154,27 @@ export async function executeAgentTurn(
     const system = (await session.refreshSystemPrompt()) + systemSuffix;
     const tools = { ...(await session.tools()), ...extraTools };
 
+    const onStepFinish: GenerateTextOnStepFinishCallback<ToolSet> = (step) => {
+      // Text from a tool-calling step is the agent's only genuine non-terminal
+      // content. Tool-only steps stay silent in Slack.
+      if (step.toolCalls.length === 0 || !step.text.trim()) return;
+      const stepText = step.text.trim();
+      lastStepText = stepText;
+      publishStatus(
+        eventBus,
+        requestContext,
+        stepText,
+        `${userMessage.messageId}:step:${step.stepNumber}`,
+        false
+      );
+    };
+
     const generateArgs = {
       system,
       messages: toModelMessages(history),
       tools,
-      stopWhen: stepCountIs(MAX_STEPS)
+      stopWhen: stepCountIs(MAX_STEPS),
+      onStepFinish
     };
 
     let result: Awaited<ReturnType<typeof generateText>>;
@@ -146,12 +218,12 @@ export async function executeAgentTurn(
           contextId: requestContext.contextId
         });
       }
-      publish(eventBus, requestContext.contextId, TRANSIENT_REPLY);
+      publishTerminal(TRANSIENT_REPLY);
       return;
     }
 
     await session.appendMessage(assistantSessionMessage(replyText));
-    publish(eventBus, requestContext.contextId, replyText);
+    publishTerminal(replyText);
   } catch (err) {
     console.error("[agent-loop] turn failed", {
       contextId: requestContext.contextId,
@@ -162,7 +234,7 @@ export async function executeAgentTurn(
     const reply = isTransientAiError(err)
       ? TRANSIENT_REPLY
       : cfg.unexpectedReply;
-    publish(eventBus, requestContext.contextId, reply);
+    publishTerminal(reply);
   } finally {
     eventBus.finished();
   }

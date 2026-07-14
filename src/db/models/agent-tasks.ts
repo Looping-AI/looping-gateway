@@ -10,7 +10,7 @@ export type AgentTaskRow = typeof schema.agentTasks.$inferSelect;
 export interface CreateAgentTaskInput {
   /** Gateway-generated push-notification validation token (PK, echoed by the remote). */
   token: string;
-  /** Remote-assigned A2A Task id from the accept response (null if the accept omitted it). */
+  /** Agent-assigned A2A Task id from the accept response (null if omitted). */
   taskId: string | null;
   agentName: string;
   channelId: string;
@@ -20,7 +20,7 @@ export interface CreateAgentTaskInput {
 }
 
 /**
- * Record a pending remote task at dispatch time. Idempotent on the `token` PK so
+ * Record a pending agent task at dispatch time. Idempotent on the `token` PK so
  * the workflow's `record-task` step can retry (or a duplicate dispatch land)
  * without erroring or clobbering an already-recorded row.
  */
@@ -71,7 +71,7 @@ export async function getPendingAgentTasksByEventId(
 }
 
 /**
- * Fill in the remote-assigned A2A Task id once the accept response is known.
+ * Fill in the A2A Task id once the accept response is known.
  * The row is written before dispatch (with `taskId` null) to close the
  * accept→record race, so this best-effort update backfills the id afterwards.
  * Conditional on `pending` so a task the callback already completed is untouched.

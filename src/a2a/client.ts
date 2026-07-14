@@ -10,13 +10,13 @@ import type {
   MessageSendParams,
   PushNotificationConfig
 } from "@a2a-js/sdk";
-import { extractText } from "./parts";
 
 /**
  * Where to send an A2A message:
  * - `local`  — a known card + a `fetchImpl` bound to a Durable Object `stub.fetch`,
  *   so card discovery is skipped and the call runs in-process (no network hop).
- *   Local agents reply *synchronously* — {@link sendA2ALocal} returns their text.
+ *   Local agents return a Task acceptance and deliver replies through a trusted
+ *   in-process push sender.
  * - `remote` — a base URL; the card is discovered over real HTTP, every request
  *   carries the gateway identity JWT (`authToken`). Remote agents reply
  *   *asynchronously* via push notification — {@link sendA2ARemote} only waits
@@ -39,8 +39,8 @@ export interface A2ARemoteTarget {
  */
 const ACCEPT_TIMEOUT_MS = 30_000;
 
-/** Hard cap on a remote reply before it reaches Slack (untrusted output). */
-const MAX_REMOTE_REPLY_CHARS = 16_000;
+/** Hard cap on an agent reply before it reaches Slack (untrusted output). */
+const MAX_REPLY_CHARS = 16_000;
 
 /**
  * Build a `fetchImpl` for a remote target: injects the gateway JWT as a Bearer
@@ -66,13 +66,14 @@ function remoteFetchImpl(authToken?: string): typeof fetch {
 }
 
 /**
- * Sanitize an untrusted remote reply before it reaches Slack: strip control
- * characters (keep newlines and tabs), defang Slack broadcast/command sequences
- * so a hostile agent can't @-notify a whole channel, and cap the length so it
- * can't flood or break Slack. Exported for the push-notification callback, which
- * is the trust boundary where a remote's pushed reply first enters the gateway.
+ * Sanitize an agent reply before it reaches Slack: strip control characters
+ * (keep newlines and tabs), defang Slack broadcast/command sequences so a hostile
+ * agent can't @-notify a whole channel, and cap the length so it can't flood or
+ * break Slack. Applied at every delivery boundary — the remote push-notification
+ * callback and the local in-process sender alike — because even a built-in agent
+ * relays untrusted model output.
  */
-export function sanitizeRemoteReply(text: string): string {
+export function sanitizeAgentReply(text: string): string {
   // Strip C0 control chars except \t, \n, \r.
   const stripped = text.replace(
     /[\u0000-\u0008\u000b\u000c\u000e-\u001f]/g,
@@ -84,8 +85,8 @@ export function sanitizeRemoteReply(text: string): string {
   // escapes these on the normal path; this is the belt-and-suspenders at the trust
   // boundary. Legitimate mentions (<@U…>, <#C…>) are intentionally left intact.
   const safe = stripped.replace(/<!([^>\n]*)>/g, "@$1");
-  return safe.length > MAX_REMOTE_REPLY_CHARS
-    ? `${safe.slice(0, MAX_REMOTE_REPLY_CHARS)}…`
+  return safe.length > MAX_REPLY_CHARS
+    ? `${safe.slice(0, MAX_REPLY_CHARS)}…`
     : safe;
 }
 
@@ -118,21 +119,30 @@ async function buildRemoteClient(target: A2ARemoteTarget): Promise<Client> {
 }
 
 /**
- * Send one A2A message to a **local** (in-process) agent and return its reply
- * text. Local agents are our own code (trusted) and reply synchronously, so the
- * text is returned directly with no sanitization.
+ * Send one A2A message to a **local** (in-process) agent. The SDK's `sendMessage`
+ * is blocking by default, so this awaits the agent's whole turn (generation rides
+ * the in-flight DO request, immune to eviction) and the value returned here is the
+ * *final* Task, not just an acceptance. The agent's Task snapshots are handed to
+ * the local push sender, which the SDK fires without awaiting — so the Slack
+ * delivery is kicked off during this call and completes shortly after; the agent
+ * DO registers it on `ctx.waitUntil`, so the runtime won't drop it. The caller
+ * only forwards the task id for correlation and never handles model text directly.
  */
 export async function sendA2ALocal(
   target: A2ALocalTarget,
-  message: Message
-): Promise<string> {
+  message: Message,
+  pushNotificationConfig: PushNotificationConfig
+): Promise<A2AAccept> {
   const client = await buildLocalClient(target);
-  const result = await client.sendMessage({ message });
-  return extractText(result);
+  const params: MessageSendParams = {
+    message,
+    configuration: { pushNotificationConfig }
+  };
+  return acceptedTask(await client.sendMessage(params), message);
 }
 
-/** Result of accepting a message onto a remote agent's async task queue. */
-export type RemoteAccept =
+/** Result of accepting a message onto an A2A agent's task queue. */
+export type A2AAccept =
   | {
       /** Remote accepted the turn and returned its Task id. */
       kind: "accepted";
@@ -142,6 +152,22 @@ export type RemoteAccept =
       /** Remote omitted the required async Task acceptance/id. */
       kind: "contract_violation";
     };
+
+function acceptedTask(
+  result: Awaited<ReturnType<Client["sendMessage"]>>,
+  message: Message
+): A2AAccept {
+  if (result.kind === "task" && result.id.trim().length > 0) {
+    return { kind: "accepted", taskId: result.id };
+  }
+  console.error(
+    "[a2a] agent accept response missing required Task acceptance " +
+      "(submitted/working Task with non-empty id); push-notification contract " +
+      "not honored",
+    { contextId: message.contextId }
+  );
+  return { kind: "contract_violation" };
+}
 
 /**
  * Send one A2A message to a **remote** agent for asynchronous processing. The
@@ -156,21 +182,11 @@ export async function sendA2ARemote(
   target: A2ARemoteTarget,
   message: Message,
   pushNotificationConfig: PushNotificationConfig
-): Promise<RemoteAccept> {
+): Promise<A2AAccept> {
   const client = await buildRemoteClient(target);
   const params: MessageSendParams = {
     message,
     configuration: { pushNotificationConfig }
   };
-  const result = await client.sendMessage(params);
-  if (result.kind === "task" && result.id.trim().length > 0) {
-    return { kind: "accepted", taskId: result.id };
-  }
-  console.error(
-    "[a2a] remote agent accept response missing required Task acceptance " +
-      "(submitted/working Task with non-empty id); push-notification contract " +
-      "not honored",
-    { contextId: message.contextId }
-  );
-  return { kind: "contract_violation" };
+  return acceptedTask(await client.sendMessage(params), message);
 }

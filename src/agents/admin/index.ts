@@ -46,8 +46,13 @@ export class AdminAgent extends A2AAgent {
     return buildAgentCard({
       name: "Admin Agent",
       description:
-        "Looping admin agent — manages the agent registry and workspaces."
+        "Looping admin agent — manages the agent registry and workspaces.",
+      pushNotifications: true
     });
+  }
+
+  protected builtinKind(): "admin" {
+    return "admin";
   }
 
   protected executor(): AgentExecutor {

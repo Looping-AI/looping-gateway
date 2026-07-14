@@ -4,6 +4,8 @@ import * as schema from "../schema";
 
 export type AgentRow = typeof schema.agents.$inferSelect;
 export type AgentKind = AgentRow["kind"];
+/** The agent kinds hosted in-repo as Durable Objects (reached in-process). */
+export type LocalAgentKind = Extract<AgentKind, "admin" | "onboarding">;
 export type NotifyOn = AgentRow["notifyOn"];
 
 export interface RegisterAgentInput {

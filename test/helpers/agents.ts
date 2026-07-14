@@ -94,6 +94,18 @@ export function toolCallResult(toolName: string, input: unknown) {
   };
 }
 
+/** Extract text from the terminal A2A task-status event captured by a test bus. */
+export function terminalTaskText(events: unknown[]): string | undefined {
+  const event = events.at(-1) as
+    | {
+        status?: {
+          message?: { parts?: Array<{ text?: string }> };
+        };
+      }
+    | undefined;
+  return event?.status?.message?.parts?.[0]?.text;
+}
+
 /** A one-turn agent request plus a capturing event bus, shared by executor specs. */
 export function makeRequest(opts: {
   contextId: string;
@@ -110,6 +122,7 @@ export function makeRequest(opts: {
   };
   const requestContext = {
     contextId: opts.contextId,
+    taskId: "task-test",
     userMessage: {
       kind: "message",
       messageId: "m1",
