@@ -39,8 +39,8 @@ export interface A2ARemoteTarget {
  */
 const ACCEPT_TIMEOUT_MS = 30_000;
 
-/** Hard cap on a remote reply before it reaches Slack (untrusted output). */
-const MAX_REMOTE_REPLY_CHARS = 16_000;
+/** Hard cap on an agent reply before it reaches Slack (untrusted output). */
+const MAX_REPLY_CHARS = 16_000;
 
 /**
  * Build a `fetchImpl` for a remote target: injects the gateway JWT as a Bearer
@@ -66,13 +66,14 @@ function remoteFetchImpl(authToken?: string): typeof fetch {
 }
 
 /**
- * Sanitize an untrusted remote reply before it reaches Slack: strip control
- * characters (keep newlines and tabs), defang Slack broadcast/command sequences
- * so a hostile agent can't @-notify a whole channel, and cap the length so it
- * can't flood or break Slack. Exported for the push-notification callback, which
- * is the trust boundary where a remote's pushed reply first enters the gateway.
+ * Sanitize an agent reply before it reaches Slack: strip control characters
+ * (keep newlines and tabs), defang Slack broadcast/command sequences so a hostile
+ * agent can't @-notify a whole channel, and cap the length so it can't flood or
+ * break Slack. Applied at every delivery boundary — the remote push-notification
+ * callback and the local in-process sender alike — because even a built-in agent
+ * relays untrusted model output.
  */
-export function sanitizeRemoteReply(text: string): string {
+export function sanitizeAgentReply(text: string): string {
   // Strip C0 control chars except \t, \n, \r.
   const stripped = text.replace(
     /[\u0000-\u0008\u000b\u000c\u000e-\u001f]/g,
@@ -84,8 +85,8 @@ export function sanitizeRemoteReply(text: string): string {
   // escapes these on the normal path; this is the belt-and-suspenders at the trust
   // boundary. Legitimate mentions (<@U…>, <#C…>) are intentionally left intact.
   const safe = stripped.replace(/<!([^>\n]*)>/g, "@$1");
-  return safe.length > MAX_REMOTE_REPLY_CHARS
-    ? `${safe.slice(0, MAX_REMOTE_REPLY_CHARS)}…`
+  return safe.length > MAX_REPLY_CHARS
+    ? `${safe.slice(0, MAX_REPLY_CHARS)}…`
     : safe;
 }
 
@@ -118,9 +119,14 @@ async function buildRemoteClient(target: A2ARemoteTarget): Promise<Client> {
 }
 
 /**
- * Send one A2A message to a **local** (in-process) agent. Its Task snapshots
- * reach Slack through the local push sender, so the caller receives only the
- * accepted task id and never handles model text directly.
+ * Send one A2A message to a **local** (in-process) agent. The SDK's `sendMessage`
+ * is blocking by default, so this awaits the agent's whole turn (generation rides
+ * the in-flight DO request, immune to eviction) and the value returned here is the
+ * *final* Task, not just an acceptance. The agent's Task snapshots are handed to
+ * the local push sender, which the SDK fires without awaiting — so the Slack
+ * delivery is kicked off during this call and completes shortly after; the agent
+ * DO registers it on `ctx.waitUntil`, so the runtime won't drop it. The caller
+ * only forwards the task id for correlation and never handles model text directly.
  */
 export async function sendA2ALocal(
   target: A2ALocalTarget,

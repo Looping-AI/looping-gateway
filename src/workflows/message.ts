@@ -76,31 +76,15 @@ async function runAgentTask(
     deleteAgentTask(token)
   );
 
+  // The only non-accepted outcome is a gateway-controlled error reply (an agent
+  // that failed to acknowledge the task, or an endpoint rejected by policy).
+  // Post it so the user isn't left in silence.
   try {
-    if (result.kind === "error_reply") {
-      if (result.text.trim()) {
-        await step.do(`error-reply:${plan.agent.name}`, () =>
-          postReply(p.channelId, threadTs, result.text, null, null)
-        );
-      }
-      return { kind: "done" };
+    if (result.text.trim()) {
+      await step.do(`error-reply:${plan.agent.name}`, () =>
+        postReply(p.channelId, threadTs, result.text, null, null)
+      );
     }
-
-    // Every agent must accept a Task and reply asynchronously — a sync `reply`
-    // is a protocol violation. Notify the user and log so it surfaces.
-    console.error("[message] protocol violation: sync reply from agent", {
-      agent: plan.agent.name,
-      kind: result.kind
-    });
-    await step.do(`protocol-error:${plan.agent.name}`, () =>
-      postReply(
-        p.channelId,
-        threadTs,
-        `The agent *${plan.agent.name}* responded synchronously instead of using the required task lifecycle. Please contact the agent developer.`,
-        null,
-        null
-      )
-    );
     return { kind: "done" };
   } catch (err) {
     return {

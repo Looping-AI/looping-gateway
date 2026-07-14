@@ -428,4 +428,74 @@ describe("executeAgentTurn", () => {
       text: "Here is what I found."
     });
   });
+
+  it("does not double-post the final text when generation stops at the step limit", async () => {
+    const session = new FakeSession();
+    // Every step emits text + a tool call, so the loop never reaches a plain
+    // stop and instead halts at the step limit. The final step's text is both
+    // streamed non-terminally (`:step:N`) and returned as `result.text`.
+    let n = 0;
+    const model = new MockLanguageModelV3({
+      doGenerate: async () => {
+        const i = n++;
+        return {
+          ...toolCallResult("lookup", {}),
+          content: [
+            { type: "text", text: `step-${i}` },
+            {
+              type: "tool-call",
+              toolCallId: `tc${i}`,
+              toolName: "lookup",
+              input: "{}"
+            }
+          ]
+        } as never;
+      }
+    });
+    const bus = fakeEventBus();
+
+    await executeAgentTurn(
+      fakeRequestContext("hi"),
+      bus.eventBus,
+      makeCfg(session, fakeModels(model), {
+        prepare: async () => ({
+          session,
+          systemSuffix: "",
+          tools: {
+            lookup: tool({
+              description: "Lookup a value.",
+              inputSchema: z.object({}),
+              execute: async () => "found"
+            })
+          }
+        })
+      })
+    );
+
+    // The final step's text was streamed as a non-terminal update; the terminal
+    // event completes the task with empty text so it isn't posted twice.
+    const stepTexts = bus.published
+      .filter(
+        (e): e is PublishedEvent =>
+          e.kind === "status-update" && e.final === false
+      )
+      .map((e) => e.status?.message?.parts[0]?.text);
+    const lastStepText = stepTexts.at(-1);
+    expect(lastStepText).toBeTruthy();
+
+    const terminal = expectTerminalReply(bus);
+    expect(terminal?.parts[0]?.text).toBe("");
+
+    // The final text appears exactly once across every published event…
+    const allTexts = bus.published.map(
+      (e) => e.status?.message?.parts[0]?.text
+    );
+    expect(allTexts.filter((t) => t === lastStepText)).toHaveLength(1);
+    // …yet the full reply is still persisted to session history.
+    expect(session.messages.map((m) => m.role)).toEqual(["user", "assistant"]);
+    expect(session.messages[1].parts[0]).toMatchObject({
+      type: "text",
+      text: lastStepText
+    });
+  });
 });

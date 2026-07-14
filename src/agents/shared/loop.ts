@@ -116,16 +116,25 @@ export async function executeAgentTurn(
   const metadata = (userMessage.metadata ?? {}) as Partial<AgentTurnMetadata>;
   let modelId = cfg.models.primaryId();
   let completed = false;
+  // Tracks the text of the most recent non-terminal step published below, so the
+  // terminal reply isn't posted twice when it is that same text.
+  let lastStepText = "";
 
   publishSubmitted(eventBus, requestContext);
 
   const publishTerminal = (reply: string): void => {
     if (completed) return;
     completed = true;
+    // When generation stops at the step limit on a tool-calling step, that step's
+    // text was already streamed as a non-terminal update (`:step:N`) and equals
+    // `result.text`. Send an empty terminal so the task still completes and
+    // collects the ⏳ without re-posting it (different id ⇒ dedupe would miss it).
+    // History still keeps the full reply via `appendMessage`.
+    const terminalText = reply && reply === lastStepText ? "" : reply;
     publishStatus(
       eventBus,
       requestContext,
-      reply,
+      terminalText,
       `${userMessage.messageId}:final`,
       true
     );
@@ -145,25 +154,27 @@ export async function executeAgentTurn(
     const system = (await session.refreshSystemPrompt()) + systemSuffix;
     const tools = { ...(await session.tools()), ...extraTools };
 
+    const onStepFinish: GenerateTextOnStepFinishCallback<ToolSet> = (step) => {
+      // Text from a tool-calling step is the agent's only genuine non-terminal
+      // content. Tool-only steps stay silent in Slack.
+      if (step.toolCalls.length === 0 || !step.text.trim()) return;
+      const stepText = step.text.trim();
+      lastStepText = stepText;
+      publishStatus(
+        eventBus,
+        requestContext,
+        stepText,
+        `${userMessage.messageId}:step:${step.stepNumber}`,
+        false
+      );
+    };
+
     const generateArgs = {
       system,
       messages: toModelMessages(history),
       tools,
       stopWhen: stepCountIs(MAX_STEPS),
-      onStepFinish: (
-        step: Parameters<GenerateTextOnStepFinishCallback<ToolSet>>[0]
-      ) => {
-        // Text from a tool-calling step is the agent's only genuine
-        // non-terminal content. Tool-only steps stay silent in Slack.
-        if (step.toolCalls.length === 0 || !step.text.trim()) return;
-        publishStatus(
-          eventBus,
-          requestContext,
-          step.text.trim(),
-          `${userMessage.messageId}:step:${step.stepNumber}`,
-          false
-        );
-      }
+      onStepFinish
     };
 
     let result: Awaited<ReturnType<typeof generateText>>;

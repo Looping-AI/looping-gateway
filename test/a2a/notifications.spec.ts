@@ -370,6 +370,77 @@ describe("handleRemoteAgentNotification", () => {
     );
   });
 
+  it("sanitizes a local built-in reply before posting (defangs broadcast sequences)", async () => {
+    const posts: SlackPost[] = [];
+    stubFetch(key, posts);
+    await registerAgent({
+      name: "adminsanitize",
+      kind: "admin",
+      displayName: "Admin Sanitize",
+      a2aEndpoint: "https://agent.local/a2a",
+      notifyOn: "mention",
+      workspaceId: 0
+    });
+    await createAgentTask({
+      token: "local-sanitize-token",
+      taskId: "local-sanitize-task",
+      agentName: "adminsanitize",
+      channelId: "C-local",
+      replyThreadTs: null,
+      eventId: "Ev-local-sanitize"
+    });
+
+    // A built-in agent still relays untrusted model output — the reply is
+    // sanitized before it reaches Slack, just like a remote agent's.
+    await deliverLocalAgentTask(
+      "local-sanitize-token",
+      makeTask("hey <!channel> listen"),
+      "admin"
+    );
+
+    expect(posts).toHaveLength(1);
+    expect(posts[0].text).not.toContain("<!channel>");
+    expect(posts[0].text).toContain("@channel");
+  });
+
+  it("rejects a built-in agent's token on the public remote callback (401, nothing posted)", async () => {
+    const posts: SlackPost[] = [];
+    stubFetch(key, posts);
+    await registerAgent({
+      name: "adminpublic",
+      kind: "admin",
+      displayName: "Admin Public",
+      a2aEndpoint: "https://agent.local/a2a",
+      notifyOn: "mention",
+      workspaceId: 0
+    });
+    await createAgentTask({
+      token: "local-public-token",
+      taskId: "local-public-task",
+      agentName: "adminpublic",
+      channelId: "C-local",
+      replyThreadTs: null,
+      eventId: "Ev-local-public"
+    });
+
+    // A built-in agent's task must never be completable through the public HTTP
+    // callback — it is delivered in-process. The kind check rejects it before any
+    // signature verification or Slack post, even with a bearer present.
+    const res = await handleRemoteAgentNotification(
+      callbackRequest(
+        "any-bearer",
+        "local-public-token",
+        makeTask("smuggled reply")
+      )
+    );
+
+    expect(res.status).toBe(401);
+    expect(posts).toHaveLength(0);
+    const row = await getAgentTaskByToken("local-public-token");
+    expect(row?.status).toBe("pending");
+    expect(row?.lastError).toContain("delivered internally");
+  });
+
   it("suppresses a submitted local Task even when it includes text", async () => {
     const posts: SlackPost[] = [];
     stubFetch(key, posts);

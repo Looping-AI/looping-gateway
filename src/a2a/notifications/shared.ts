@@ -6,6 +6,7 @@ import {
   type AgentTaskRow
 } from "@/db/models/agent-tasks";
 import { extractText, isTerminalTaskState } from "@/a2a/parts";
+import { sanitizeAgentReply } from "@/a2a/client";
 import { postReply } from "@/wrappers/slack";
 import { signalReactionCollect } from "@/workflows/message-helpers";
 
@@ -23,17 +24,17 @@ function terminalFailureNotice(agentName: string, state: string): string {
 /**
  * Deliver one trusted Task snapshot through the durable task ledger. Each
  * notification boundary authenticates and validates its caller before invoking
- * this function, and supplies the appropriate text-sanitization policy.
+ * this function; the agent's text is sanitized here regardless of boundary,
+ * since even a built-in agent relays untrusted model output.
  */
 export async function deliverTaskToSlack(
   token: string,
   row: AgentTaskRow,
   agent: AgentRow,
-  task: Task,
-  sanitize: (text: string) => string
+  task: Task
 ): Promise<void> {
   const state = task.status.state;
-  const text = sanitize(extractText(task));
+  const text = sanitizeAgentReply(extractText(task));
   const displayName = agent.displayName ?? agent.name;
   const iconUrl = agent.iconUrl ?? null;
 

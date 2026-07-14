@@ -187,11 +187,10 @@ export function instanceNameFor(metadata: AgentTurnMetadata): string {
  * The outcome of a dispatch. All agents accept a Task here and deliver their real
  * reply later: remote agents call the authenticated public callback, while local
  * built-ins use a trusted in-process sender. The workflow receives the shared
- * correlation `token` and the assigned `taskId`; a protocol violation is surfaced
- * as a visible error reply.
+ * correlation `token` and the assigned `taskId`; a contract violation (a reply
+ * that isn't a Task acceptance) is surfaced as a visible error reply.
  */
 export type DispatchResult =
-  | { kind: "reply"; text: string }
   | { kind: "error_reply"; text: string }
   | { kind: "accepted"; token: string; taskId: string };
 

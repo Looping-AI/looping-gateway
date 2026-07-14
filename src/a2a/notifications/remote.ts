@@ -13,7 +13,6 @@ import {
   verifyAgentCallbackToken,
   AgentCallbackAuthError
 } from "@/auth/agent-inbound";
-import { sanitizeRemoteReply } from "@/a2a/client";
 import { deliverTaskToSlack, TaskDeliveryValidationError } from "./shared";
 
 /** Header carrying the per-task validation token set in pushNotificationConfig. */
@@ -62,7 +61,29 @@ export async function handleRemoteAgentNotification(
   if (row.status === "completed") return OK();
 
   const agent = await getAgent(row.agentName);
-  if (!agent || !agent.cardSigningJku || !agent.cardSigningKid) {
+  if (!agent) {
+    await captureCallbackError(
+      notificationToken,
+      "the agent's registration could not be found, so its callback could not be verified"
+    );
+    return new Response("agent not verifiable", { status: 401 });
+  }
+  // Only custom (remote) agents are reachable through this public callback.
+  // Built-in agents deliver in-process via the trusted local sender and never
+  // hold a card signing key, so a token that maps to one here is illegitimate —
+  // reject it explicitly rather than leaning on the missing-key check below.
+  if (agent.kind !== "custom") {
+    console.error("[remote-notifications] built-in agent token on callback", {
+      agent: row.agentName,
+      kind: agent.kind
+    });
+    await captureCallbackError(
+      notificationToken,
+      "this task is delivered internally and cannot be completed through the public callback"
+    );
+    return new Response("not a remote agent", { status: 401 });
+  }
+  if (!agent.cardSigningJku || !agent.cardSigningKid) {
     console.error("[remote-notifications] agent missing or unsigned", {
       agent: row.agentName
     });
@@ -120,13 +141,7 @@ export async function handleRemoteAgentNotification(
   }
 
   try {
-    await deliverTaskToSlack(
-      notificationToken,
-      row,
-      agent,
-      task,
-      sanitizeRemoteReply
-    );
+    await deliverTaskToSlack(notificationToken, row, agent, task);
   } catch (err) {
     if (err instanceof TaskDeliveryValidationError) {
       await captureCallbackError(notificationToken, err.message);
