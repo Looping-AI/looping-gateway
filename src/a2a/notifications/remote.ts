@@ -126,7 +126,12 @@ export async function handleRemoteAgentNotification(
   let task: Task | null = null;
   try {
     const body = await request.json();
-    if (isRecord(body) && body.kind === "task") {
+    if (
+      isRecord(body) &&
+      body.kind === "task" &&
+      isRecord(body.status) &&
+      typeof body.status.state === "string"
+    ) {
       task = body as unknown as Task;
     }
   } catch {

@@ -227,6 +227,30 @@ describe("handleRemoteAgentNotification", () => {
     expect(row?.lastError).toContain("not a valid A2A Task");
   });
 
+  it("400s a Task-kind body missing status without reaching delivery", async () => {
+    const posts: SlackPost[] = [];
+    stubFetch(key, posts);
+    const bearer = await signJwt(key, { jku: JKU, sub: SUB, aud: AUD });
+    const req = new Request(`${ISSUER}${NOTIFICATIONS_PATH}`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${bearer}`,
+        [NOTIFICATION_TOKEN_HEADER]: NTOK,
+        "content-type": "application/json"
+      },
+      // kind: "task" but no status → would crash on task.status.state if cast.
+      body: JSON.stringify({ kind: "task", id: "task-1", contextId: "c1" })
+    });
+
+    const res = await handleRemoteAgentNotification(req);
+
+    expect(res.status).toBe(400);
+    expect(posts).toHaveLength(0);
+    const row = await getAgentTaskByToken(NTOK);
+    expect(row?.status).toBe("pending");
+    expect(row?.lastError).toContain("not a valid A2A Task");
+  });
+
   it("posts an intermediate (non-terminal) update, keeps the task pending, and keeps the ⏳", async () => {
     const posts: SlackPost[] = [];
     stubFetch(key, posts);
