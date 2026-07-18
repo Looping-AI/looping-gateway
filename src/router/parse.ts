@@ -12,6 +12,31 @@ function isAgentNameBoundary(text: string, index: number): boolean {
 }
 
 /**
+ * Whether an agent-name occurrence is escaped, i.e. the author wrote the name
+ * but does not want to wake the agent. Recognised forms:
+ *   - backslash prefix:  \Player
+ *   - backtick wrap:      `player`
+ *   - double-quote wrap:  "player"
+ *
+ * Only a delimiter sitting directly against the name escapes it, so
+ * `the "best player" here` still mentions `player`. Single quotes and smart
+ * quotes are intentionally excluded (apostrophe/contraction and mobile-keyboard
+ * collisions).
+ */
+function isEscapedMention(
+  text: string,
+  start: number,
+  length: number
+): boolean {
+  const before = text[start - 1];
+  const after = text[start + length];
+  if (before === "\\") return true;
+  if (before === '"' && after === '"') return true;
+  if (before === "`" && after === "`") return true;
+  return false;
+}
+
+/**
  * The first whole-token agent name mention in the text, case-insensitive, or
  * null. The returned name keeps the canonical casing from `agentNames`.
  */
@@ -33,6 +58,7 @@ export function findAgentNameMention(
       if (
         isAgentNameBoundary(text, before) &&
         isAgentNameBoundary(text, after) &&
+        !isEscapedMention(text, index, lowerName.length) &&
         (!best ||
           index < best.index ||
           (index === best.index && name.length > best.name.length))
@@ -80,6 +106,7 @@ export function findAllAgentNameMentions(
   const result: string[] = [];
 
   for (const match of text.matchAll(pattern)) {
+    if (isEscapedMention(text, match.index, match[1].length)) continue;
     const canonical = lowerToCanonical.get(match[1].toLowerCase());
     if (canonical !== undefined && !seen.has(canonical)) {
       seen.add(canonical);

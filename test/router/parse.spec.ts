@@ -36,6 +36,29 @@ describe("findAgentNameMention", () => {
     expect(findAgentNameMention("<@UBOT> hello", ["admin"])).toBeNull();
     expect(findAgentNameMention("just text", ["admin"])).toBeNull();
   });
+
+  it("skips escaped occurrences (backslash, backticks, quotes)", () => {
+    expect(findAgentNameMention("ask \\Player later", ["player"])).toBeNull();
+    expect(findAgentNameMention("the `player` agent", ["player"])).toBeNull();
+    expect(findAgentNameMention('a great "player"', ["player"])).toBeNull();
+  });
+
+  it("still matches when a delimiter does not tightly wrap the name", () => {
+    expect(findAgentNameMention('the "best player" here', ["player"])).toEqual({
+      name: "player",
+      index: 10
+    });
+    expect(findAgentNameMention("he said player", ["player"])).toEqual({
+      name: "player",
+      index: 8
+    });
+  });
+
+  it("returns a later unescaped occurrence when an earlier one is escaped", () => {
+    expect(
+      findAgentNameMention("\\player then player again", ["player"])
+    ).toEqual({ name: "player", index: 13 });
+  });
 });
 
 describe("findAllAgentNameMentions", () => {
@@ -55,5 +78,33 @@ describe("findAllAgentNameMentions", () => {
 
   it("returns empty when nobody is named", () => {
     expect(findAllAgentNameMentions("just text", ["admin", "ana"])).toEqual([]);
+  });
+
+  it("skips escaped occurrences (backslash, backticks, quotes)", () => {
+    expect(findAllAgentNameMentions("ask \\Player", ["player"])).toEqual([]);
+    expect(findAllAgentNameMentions("the `player` agent", ["player"])).toEqual(
+      []
+    );
+    expect(findAllAgentNameMentions('a great "player"', ["player"])).toEqual(
+      []
+    );
+  });
+
+  it("escaping is per-occurrence and does not affect other names", () => {
+    expect(
+      findAllAgentNameMentions("\\player and admin", ["player", "admin"])
+    ).toEqual(["admin"]);
+  });
+
+  it("keeps the name when any occurrence is unescaped", () => {
+    expect(
+      findAllAgentNameMentions("\\player then player again", ["player"])
+    ).toEqual(["player"]);
+  });
+
+  it("still matches when a delimiter does not tightly wrap the name", () => {
+    expect(
+      findAllAgentNameMentions('the "best player" here', ["player"])
+    ).toEqual(["player"]);
   });
 });
