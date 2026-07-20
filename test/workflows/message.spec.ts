@@ -147,7 +147,7 @@ describe("MessageWorkflow — local built-in agents", () => {
       const [instance] = await introspector.get();
       await instance.waitForStatus("complete");
 
-      // Instead of silently clearing the ⏳, the user is told the agent couldn't
+      // Instead of silently clearing the 🛑, the user is told the agent couldn't
       // be reached — posted under the agent's identity in the same channel.
       expect(calls).toHaveLength(1);
       expect(calls[0].channel).toBe("C_ORGADMIN");
@@ -447,7 +447,7 @@ describe("MessageWorkflow — remote custom agents", () => {
       await msg.waitForStatus("complete");
       await reaction.waitForStatus("complete");
 
-      // ⏳ added by the handler; removed after the collect-reaction signal.
+      // 🛑 added by the handler; removed after the collect-reaction signal.
       expect(slackReactions.map((r) => r.method)).toEqual([
         "reactions.add",
         "reactions.remove"
@@ -474,7 +474,7 @@ describe("MessageWorkflow — remote custom agents", () => {
       await instance.waitForStatus("complete");
 
       // Message workflow completed but no collect-reaction signal was sent —
-      // the ⏳ must persist until the push-notification callback (or backstop)
+      // the 🛑 must persist until the push-notification callback (or backstop)
       // removes it, so the user sees "in progress" until the agent actually replies.
       expect(
         slackReactions.filter((r) => r.method === "reactions.add")

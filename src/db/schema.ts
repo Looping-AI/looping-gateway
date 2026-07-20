@@ -155,12 +155,12 @@ export const agentChannels = sqliteTable(
  * A2A `pushNotificationConfig`, the remote returns a Task immediately, and later
  * POSTs Tasks back to `/a2a/notifications` — one or more intermediate progress
  * updates (non-terminal `state`) followed by a terminal Task. This row is how the
- * callback recovers where to post (channel/thread) and which ⏳ to clear
+ * callback recovers where to post (channel/thread) and which 🛑 to clear
  * (`eventId`). Callback rendering identity is read from the current `agents` row.
  *
  * Keyed by the gateway-generated `token` (the value the remote echoes back).
  * The row stays `pending` across intermediate updates and is marked `completed`
- * only by the terminal callback (which then clears the ⏳); rows are swept in the
+ * only by the terminal callback (which then clears the 🛑); rows are swept in the
  * maintenance workflow.
  */
 export const agentTasks = sqliteTable(

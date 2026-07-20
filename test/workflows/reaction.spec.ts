@@ -104,7 +104,7 @@ function makeParams(): ReactionWorkflowParams {
 }
 
 describe("ReactionWorkflow", () => {
-  it("removes the pending reaction when the collect signal arrives", async () => {
+  it("removes the stop reaction when the collect signal arrives", async () => {
     const calls = captureReactions();
     const introspector = await introspectWorkflow(env.REACTION_WORKFLOW);
     try {

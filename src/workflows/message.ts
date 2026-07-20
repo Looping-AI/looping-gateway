@@ -1,14 +1,13 @@
 import { WorkflowEntrypoint } from "cloudflare:workers";
 import type { WorkflowEvent, WorkflowStep } from "cloudflare:workers";
 import type { MessageWorkflowParams } from "@/slack/types";
-import { buildDispatchId, cancelAgentTask } from "@/agents/dispatch";
+import { buildDispatchId } from "@/agents/dispatch";
 import { postReply } from "@/wrappers/slack";
 import {
   createAgentTask,
   updateAgentTaskTaskId,
   deleteAgentTask,
-  getAgentTaskByToken,
-  completeAgentTask
+  getAgentTaskByToken
 } from "@/db/models/agent-tasks";
 import {
   type AgentPlan,
@@ -17,6 +16,8 @@ import {
   resolveMessage,
   dispatchMessage,
   collectIfEventDrained,
+  cancelAndReconcile,
+  cancelNotHonoredText,
   handleUnreachable
 } from "@/workflows/message-helpers";
 
@@ -36,7 +37,9 @@ import {
  *   1. pre-dispatch guard — if a stop was already recorded, skip the send
  *      entirely (never wake the agent);
  *   2. post-accept honor — if a stop landed during the send, `tasks/cancel` the
- *      now-known taskId (the atomic `updateAgentTaskTaskId` reports it).
+ *      now-known taskId (the atomic `updateAgentTaskTaskId` reports it) and
+ *      complete the row only if that cancel was terminal; an agent that can't be
+ *      canceled keeps its row pending so its eventual reply still reaches Slack.
  */
 async function runAgentTask(
   step: WorkflowStep,
@@ -78,11 +81,25 @@ async function runAgentTask(
       () => updateAgentTaskTaskId(token, result.taskId)
     );
     if (cancelRequested) {
-      await step.do(`honor-cancel:${plan.agent.name}`, async () => {
-        await cancelAgentTask(plan.agent, result.taskId);
-        await completeAgentTask(token);
-      });
-      return { kind: "done" };
+      const stop = await step.do(`honor-cancel:${plan.agent.name}`, () =>
+        cancelAndReconcile(plan.agent, result.taskId, token)
+      );
+      if (stop === "stopped") return { kind: "done" };
+
+      // The agent won't (or couldn't be asked to) stop, so its row stays pending
+      // and its eventual callback still delivers. Say so: the CancelWorkflow
+      // raced ahead of the taskId and already reported the intent as stopped, so
+      // this notice is the only correction the user gets.
+      await step.do(`cancel-not-honored:${plan.agent.name}`, () =>
+        postReply(
+          p.channelId,
+          threadTs,
+          cancelNotHonoredText(plan.agent.name),
+          null,
+          null
+        )
+      );
+      return { kind: "accepted" };
     }
     return { kind: "accepted" };
   }

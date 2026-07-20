@@ -3,13 +3,17 @@ import { env } from "cloudflare:workers";
 import type { MessageWorkflowParams } from "@/slack/types";
 import { buildUserAuthContext } from "@/auth";
 import {
+  cancelAgentTask,
   dispatchToAgent,
   type DispatchAgentRef,
   type DispatchMetadata,
   type DispatchResult
 } from "@/agents/dispatch";
 import { InvalidEndpointError } from "@/a2a/endpoint";
-import { getPendingAgentTasksByEventId } from "@/db/models/agent-tasks";
+import {
+  completeAgentTask,
+  getPendingAgentTasksByEventId
+} from "@/db/models/agent-tasks";
 import { renderEditDiff } from "@/util/text-diff";
 import { postReply } from "@/wrappers/slack";
 import {
@@ -180,7 +184,7 @@ export async function dispatchMessage(
 
 /**
  * Tell the parallel ReactionWorkflow that a reply was posted so it collects
- * (removes) the pending ⏳ reaction immediately. Best-effort: any failure is
+ * (removes) the 🛑 stop reaction immediately. Best-effort: any failure is
  * logged, not thrown — the reaction is cosmetic and the ReactionWorkflow's
  * timeout backstop removes it regardless.
  */
@@ -219,13 +223,62 @@ export async function collectIfEventDrained(eventId: string): Promise<void> {
 }
 
 /**
+ * What happened to one task when we tried to stop it.
+ * - `stopped`     — canceled, already terminal, unknown to the agent, or intent
+ *                   recorded for a not-yet-accepted task (all "it will stop / is
+ *                   stopped" from the user's view).
+ * - `unsupported` — the agent doesn't implement cancellation; it keeps running.
+ * - `error`       — a transport/other failure; best-effort, left to finish.
+ */
+export type CancelRowKind = "stopped" | "unsupported" | "error";
+
+/**
+ * Ask an agent to stop `taskId` and reconcile the ledger row from the outcome.
+ *
+ * Cancellation is *attempted*, not guaranteed (A2A §7.5). Only the terminal /
+ * idempotent outcomes (`canceled`, `not_cancelable`, `not_found`) mean the agent
+ * will send no further callback, so only those complete the row. On `unsupported`
+ * or `error` the task is still running and may yet deliver a valid reply — the
+ * row must stay `pending` so that callback still routes to Slack (and the 🛑
+ * lingers until it lands) instead of being dropped against a completed row.
+ */
+export async function cancelAndReconcile(
+  agent: DispatchAgentRef,
+  taskId: string,
+  token: string
+): Promise<CancelRowKind> {
+  const outcome = await cancelAgentTask(agent, taskId);
+  switch (outcome.kind) {
+    case "canceled":
+    case "not_cancelable":
+    case "not_found":
+      await completeAgentTask(token);
+      return "stopped";
+    case "unsupported":
+      return "unsupported";
+    case "error":
+      return "error";
+  }
+}
+
+/**
+ * Notice posted when a stop wasn't honored and the agent runs to completion —
+ * for both `unsupported` and `error`. The cause differs but the user-visible
+ * consequence is identical (a reply is still coming), and the gateway shouldn't
+ * leak transport detail into the thread.
+ */
+export function cancelNotHonoredText(agentName: string): string {
+  return `*Agent ${agentName}* can't be stopped mid-run and will finish on its own.`;
+}
+
+/**
  * Result of running one agent's dispatch + reply within the fan-out. The task
  * catches every *expected* failure and reports it here (rather than rejecting)
  * so the workflow can react precisely instead of collapsing everything into a
  * single "dispatch failed" notice.
  *
  * - `accepted`      — the agent took the turn and will deliver its reply later;
- *                     the ⏳ must linger until its callback (or backstop) clears it.
+ *                     the 🛑 must linger until its callback (or backstop) clears it.
  * - `done`          — handled fully now (sync reply posted, silence, or a policy
  *                     error notice posted); nothing is still working.
  * - `unreachable`   — the `dispatch` step itself exhausted retries; the user

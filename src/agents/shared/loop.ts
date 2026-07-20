@@ -128,7 +128,7 @@ export async function executeAgentTurn(
     // When generation stops at the step limit on a tool-calling step, that step's
     // text was already streamed as a non-terminal update (`:step:N`) and equals
     // `result.text`. Send an empty terminal so the task still completes and
-    // collects the ⏳ without re-posting it (different id ⇒ dedupe would miss it).
+    // collects the 🛑 without re-posting it (different id ⇒ dedupe would miss it).
     // History still keeps the full reply via `appendMessage`.
     const terminalText = reply && reply === lastStepText ? "" : reply;
     publishStatus(

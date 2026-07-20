@@ -17,13 +17,13 @@ export const STOP_REACTION = "octagonal_sign";
 
 /**
  * Event `type` the MessageWorkflow sends once a reply has been posted, telling
- * the ReactionWorkflow to collect (remove) the pending reaction immediately.
+ * the ReactionWorkflow to collect (remove) the stop reaction immediately.
  * Slack event types only allow `[a-zA-Z0-9_-]` — no dots.
  */
 export const REACTION_COLLECT_EVENT = "reply_posted";
 
 /**
- * Backstop: the longest the pending reaction may linger if the MessageWorkflow
+ * Backstop: the longest the stop reaction may linger if the MessageWorkflow
  * crashes or errors without ever sending the collect signal. When the wait times
  * out, the reaction is removed anyway.
  */
@@ -82,17 +82,18 @@ async function surfaceRejectedDeliveries(eventId: string): Promise<void> {
 }
 
 /**
- * Parallel, durable owner of the ⏳ reaction *removal* for a single Slack
+ * Parallel, durable owner of the 🛑 reaction *removal* for a single Slack
  * trigger message. The webhook handler adds the reaction inline (so it appears
  * immediately, without waiting for a workflow cold start); this workflow runs
  * alongside (never wraps) the MessageWorkflow and only removes it:
  *
  *   waitForEvent(collect | timeout) → remove-reaction
  *
- * The reply path of the MessageWorkflow sends the `reply_posted` event to collect
- * the reaction promptly. If that signal never arrives (hard crash, exhausted
+ * The MessageWorkflow sends the `reply_posted` event to collect the reaction
+ * promptly, once the *last* fan-out task for the event reaches a terminal state
+ * (see `collectIfEventDrained`). If that signal never arrives (hard crash, exhausted
  * retries), the `waitForEvent` timeout fires and the reaction is still removed —
- * so the trigger message never keeps a stale ⏳.
+ * so the trigger message never keeps a stale 🛑.
  */
 export class ReactionWorkflow extends WorkflowEntrypoint<
   Env,

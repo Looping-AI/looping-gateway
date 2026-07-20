@@ -412,18 +412,17 @@ async function triggerWorkflow(
 }
 
 /**
- * Add the ⏳ pending reaction to the trigger message inline, so it appears
- * immediately rather than after a workflow cold start. Best-effort and cosmetic:
- * any failure here is logged but never affects the Slack ack. The matching
- * ReactionWorkflow is responsible for removing it.
+ * Add the 🛑 stop reaction to the trigger message inline, so it appears
+ * immediately rather than after a workflow cold start. It both signals that
+ * agents are working and gives the human a one-tap cancel affordance.
+ * Best-effort: any failure here is logged but never affects the Slack ack. The
+ * matching ReactionWorkflow is responsible for removing it.
  */
-async function addPendingReaction(
-  params: ClassifiedMessageParams
-): Promise<void> {
+async function addStopReaction(params: ClassifiedMessageParams): Promise<void> {
   try {
     await addReaction(params.channelId, params.ts, STOP_REACTION);
   } catch (err) {
-    console.error("[gateway] failed to add pending reaction", {
+    console.error("[gateway] failed to add stop reaction", {
       eventId: params.eventId,
       err: String(err)
     });
@@ -431,7 +430,7 @@ async function addPendingReaction(
 }
 
 /**
- * Kick off the parallel ReactionWorkflow that removes the ⏳ reaction once a
+ * Kick off the parallel ReactionWorkflow that removes the 🛑 reaction once a
  * reply is posted (or on its timeout backstop). Best-effort and cosmetic: any
  * failure here is logged but never affects the Slack ack — the message
  * workflows remain authoritative. Duplicate Slack deliveries are deduped by the
@@ -592,8 +591,8 @@ export async function handleSlackEvent(
       if (guardResponse) return guardResponse;
       const base = classification.params;
       // Resolve, react, and fan out off-path so the 200 ack is never delayed.
-      // Resolving here (not in the workflow) lets us skip the ⏳ reaction and
-      // both workflows entirely when no agent is woken — no hourglass flicker on
+      // Resolving here (not in the workflow) lets us skip the 🛑 reaction and
+      // both workflows entirely when no agent is woken — no reaction flicker on
       // channels without a channel_messages agent. waitUntil keeps the isolate
       // alive until all tasks settle; each already swallows/logs its own errors.
       ctx.waitUntil(
@@ -615,7 +614,7 @@ export async function handleSlackEvent(
           // built-in and remote custom); it dispatches each by `agent.kind` and
           // owns the single collect-reaction signal for the event.
           await Promise.allSettled([
-            addPendingReaction(base),
+            addStopReaction(base),
             triggerReactionWorkflow(env.REACTION_WORKFLOW, base),
             triggerWorkflow(env.MESSAGE_WORKFLOW, { ...base, targets })
           ]);

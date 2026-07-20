@@ -216,7 +216,7 @@ describe("resolveMessage (via webhook handler)", () => {
       expect(res.status).toBe(200);
 
       // resolveMessage returns an empty target list → handler skips the
-      // workflow and the reaction entirely; no hourglass flicker.
+      // workflow and the reaction entirely; no reaction flicker.
       expect(await introspector.get()).toHaveLength(0);
     } finally {
       await introspector.dispose();
@@ -225,11 +225,11 @@ describe("resolveMessage (via webhook handler)", () => {
 });
 
 // ---------------------------------------------------------------------------
-// signalReactionCollect — ⏳ removal
+// signalReactionCollect — 🛑 removal
 // ---------------------------------------------------------------------------
 
 describe("signalReactionCollect (via MessageWorkflow)", () => {
-  it("sends reply_posted to ReactionWorkflow once the local reply is done, removing ⏳", async () => {
+  it("sends reply_posted to ReactionWorkflow once the local reply is done, removing 🛑", async () => {
     const { reactions } = captureSlackWithReactions();
     const msgIntrospector = await introspectWorkflow(env.MESSAGE_WORKFLOW);
     const reactionIntrospector = await introspectWorkflow(

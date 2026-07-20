@@ -252,7 +252,7 @@ describe("handleRemoteAgentNotification", () => {
     expect(row?.lastError).toContain("not a valid A2A Task");
   });
 
-  it("posts an intermediate (non-terminal) update, keeps the task pending, and keeps the ⏳", async () => {
+  it("posts an intermediate (non-terminal) update, keeps the task pending, and keeps the 🛑", async () => {
     const posts: SlackPost[] = [];
     stubFetch(key, posts);
     const bearer = await signJwt(key, { jku: JKU, sub: SUB, aud: AUD });
@@ -269,7 +269,7 @@ describe("handleRemoteAgentNotification", () => {
     expect(posts).toHaveLength(1);
     expect(posts[0]).toMatchObject({ channel: "C1", text: "working on it" });
     const row = await getAgentTaskByToken(NTOK);
-    // Row stays pending (⏳ not collected) and the update is recorded for dedup.
+    // Row stays pending (🛑 not collected) and the update is recorded for dedup.
     expect(row?.status).toBe("pending");
     expect(row?.receivedMessageIds).toBe("u1");
   });

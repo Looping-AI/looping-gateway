@@ -122,6 +122,22 @@ describe("cancelTaskRow", () => {
     expect((await getAgentTaskByToken("t3"))?.status).toBe("pending");
   });
 
+  it("leaves the row pending when the cancel attempt fails (error)", async () => {
+    stubCancelRemote((id) => ({
+      jsonrpc: "2.0",
+      id,
+      error: { code: -32603, message: "boom" }
+    }));
+    await seedTask("t5", "task-9");
+    const row = await getAgentTaskByToken("t5");
+
+    const res = await cancelTaskRow(row!);
+    expect(res).toEqual({ agentName: "remoteagent", kind: "error" });
+    // Never reconciled on a failed attempt — the agent may still call back, and a
+    // completed row would drop that reply.
+    expect((await getAgentTaskByToken("t5"))?.status).toBe("pending");
+  });
+
   it("treats an already-terminal task as stopped (idempotent)", async () => {
     stubCancelRemote((id) => ({
       jsonrpc: "2.0",

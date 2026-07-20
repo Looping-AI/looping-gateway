@@ -8,31 +8,18 @@ import {
   completeAgentTask,
   type AgentTaskRow
 } from "@/db/models/agent-tasks";
-import { cancelAgentTask, type DispatchAgentRef } from "@/agents/dispatch";
+import { type DispatchAgentRef } from "@/agents/dispatch";
 import { postReply } from "@/wrappers/slack";
-import { collectIfEventDrained } from "@/workflows/message-helpers";
-
-/**
- * What happened to one task when we tried to stop it.
- * - `stopped`     — canceled, already terminal, unknown to the agent, or intent
- *                   recorded for a not-yet-accepted task (all "it will stop / is
- *                   stopped" from the user's view).
- * - `unsupported` — the agent doesn't implement cancellation; it keeps running.
- * - `error`       — a transport/other failure; best-effort, left to finish.
- */
-type CancelRowKind = "stopped" | "unsupported" | "error";
+import {
+  cancelAndReconcile,
+  cancelNotHonoredText,
+  collectIfEventDrained,
+  type CancelRowKind
+} from "@/workflows/message-helpers";
 
 interface CancelRowResult {
   agentName: string;
   kind: CancelRowKind;
-}
-
-/**
- * Deterministic CancelWorkflow instance id from the reaction's Slack event id, so
- * a redelivered `reaction_added` collapses onto the same run.
- */
-export function cancelInstanceId(eventId: string): string {
-  return `cancel-${eventId}`;
 }
 
 /**
@@ -74,19 +61,10 @@ export async function cancelTaskRow(
     taskId = mark.taskId; // accept raced in — cancel directly now
   }
 
-  const outcome = await cancelAgentTask(ref, taskId);
-  switch (outcome.kind) {
-    case "canceled":
-    case "not_cancelable":
-    case "not_found":
-      // Terminal from our side — the agent will not (or need not) call back.
-      await completeAgentTask(row.token);
-      return { agentName: row.agentName, kind: "stopped" };
-    case "unsupported":
-      return { agentName: row.agentName, kind: "unsupported" };
-    case "error":
-      return { agentName: row.agentName, kind: "error" };
-  }
+  // Completes the row only for terminal outcomes; a task that can't be canceled
+  // keeps its row pending so the reply it still produces reaches Slack.
+  const kind = await cancelAndReconcile(ref, taskId, row.token);
+  return { agentName: row.agentName, kind };
 }
 
 /**
@@ -118,17 +96,19 @@ export class CancelWorkflow extends WorkflowEntrypoint<
       await step.do("finalize", async () => {
         const threadTs = rows[0].replyThreadTs;
         const stopped = results.filter((r) => r.kind === "stopped");
-        const unsupported = results.filter((r) => r.kind === "unsupported");
+        // `unsupported` and `error` both leave the agent running to completion,
+        // so the user hears the same thing for either.
+        const stillRunning = results.filter((r) => r.kind !== "stopped");
 
         // App-branded gateway notices (null username), never an agent reply.
         if (stopped.length > 0) {
           await postReply(p.channelId, threadTs, "🛑 Stopped.", null, null);
         }
-        for (const u of unsupported) {
+        for (const r of stillRunning) {
           await postReply(
             p.channelId,
             threadTs,
-            `*Agent ${u.agentName}* can't be stopped mid-run and will finish on its own.`,
+            cancelNotHonoredText(r.agentName),
             null,
             null
           );

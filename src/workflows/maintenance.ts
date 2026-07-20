@@ -14,7 +14,7 @@ export class MaintenanceWorkflow extends WorkflowEntrypoint<
   ) {
     try {
       // Drop stale remote-agent task rows. The reaction backstop already clears
-      // the ⏳ for tasks that never called back, so these rows are pure
+      // the 🛑 for tasks that never called back, so these rows are pure
       // correlation records — sweep old ones so the table stays bounded.
       await step.do("sweep-agent-tasks", () => sweepStaleAgentTasks());
     } catch (err) {

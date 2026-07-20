@@ -16,7 +16,7 @@ import { STOP_REACTION } from "@/workflows/reaction";
 import { _resetBotInfoCacheForTest } from "@/wrappers/slack";
 import { stubSlack } from "./wrappers/slack-stub";
 
-// The handler adds the ⏳ reaction inline via a real Slack API call, so every
+// The handler adds the 🛑 reaction inline via a real Slack API call, so every
 // test needs global fetch stubbed. Tests that assert on the reaction re-stub
 // with a capturing handler; this default keeps the rest benign.
 beforeEach(() => stubSlack(() => ({ ok: true })));
@@ -185,7 +185,7 @@ describe("message events", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Parallel Reaction Workflow — ⏳ on the trigger message
+// Parallel Reaction Workflow — 🛑 on the trigger message
 // ---------------------------------------------------------------------------
 
 interface ReactionAddCall {
@@ -216,7 +216,7 @@ function captureAddReactions(
 }
 
 describe("reaction workflow", () => {
-  it("adds the ⏳ reaction inline and starts the removal workflow", async () => {
+  it("adds the 🛑 reaction inline and starts the removal workflow", async () => {
     const reactionCreate = spyWorkflow("REACTION_WORKFLOW");
     const adds = captureAddReactions();
     const body = JSON.stringify({
@@ -234,7 +234,7 @@ describe("reaction workflow", () => {
     const res = await post(body);
     expect(res.status).toBe(200);
 
-    // The ⏳ reaction is added inline on the trigger message (not by the workflow).
+    // The 🛑 reaction is added inline on the trigger message (not by the workflow).
     expect(adds).toEqual([
       {
         channel: "C1",

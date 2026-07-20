@@ -58,9 +58,10 @@ export interface CancelWorkflowParams {
 }
 
 /**
- * Params for the parallel ReactionWorkflow that owns the ⏳ "thinking" reaction
- * on a trigger message: add on receipt, remove once the reply is posted (or on a
- * timeout backstop). Keyed off the same Slack `eventId` as the MessageWorkflow.
+ * Params for the parallel ReactionWorkflow that owns the 🛑 stop reaction on a
+ * trigger message: added inline by the webhook handler on receipt, removed once
+ * the fan-out has drained (or on a timeout backstop). Keyed off the same Slack
+ * `eventId` as the MessageWorkflow.
  */
 export interface ReactionWorkflowParams {
   eventId: string;
