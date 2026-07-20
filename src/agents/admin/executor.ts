@@ -10,6 +10,7 @@ import {
   type SessionLike
 } from "@/agents/shared/session";
 import { executeAgentTurn } from "@/agents/shared/loop";
+import { isCancelRequested } from "@/db/models/agent-tasks";
 import { archiveMessages } from "@/agents/shared/recall";
 import { recallTools } from "@/agents/shared/recall-tool";
 import { verifyRemoteAgentEndpoint } from "@/a2a/card-verify";
@@ -83,6 +84,9 @@ export class AdminAgentExecutor implements AgentExecutor {
   ): Promise<void> => {
     await executeAgentTurn(requestContext, eventBus, {
       models: this.models,
+      // The dispatch token is the A2A messageId, and the gateway records a 🛑
+      // against that same token — so the running turn can read its own stop flag.
+      isCanceled: isCancelRequested,
       unexpectedReply:
         "Sorry, I hit an unexpected error handling that admin request. Please reach out to your developer and check the error logs for more details.",
       prepare: async (_text, metadata) => {

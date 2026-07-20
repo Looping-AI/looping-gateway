@@ -499,3 +499,183 @@ describe("executeAgentTurn", () => {
     });
   });
 });
+
+// ---------------------------------------------------------------------------
+// Cancellation (🛑 recorded on the task row, read back between steps)
+// ---------------------------------------------------------------------------
+
+describe("executeAgentTurn — cancellation", () => {
+  /** A tool-calling first step, then a final answer — i.e. a two-step turn. */
+  function toolLoopModel(onGeneration: (n: number) => void) {
+    let generation = 0;
+    return new MockLanguageModelV3({
+      doGenerate: async () => {
+        onGeneration(generation);
+        return (
+          generation++ === 0
+            ? toolCallResult("work", {})
+            : okResult("Here is the answer.")
+        ) as never;
+      }
+    });
+  }
+
+  function runTurn(
+    session: SessionLike,
+    model: LanguageModel,
+    isCanceled?: AgentTurnConfig["isCanceled"]
+  ) {
+    const bus = fakeEventBus();
+    const done = executeAgentTurn(
+      fakeRequestContext("do some work"),
+      bus.eventBus,
+      makeCfg(session, fakeModels(model), {
+        isCanceled,
+        prepare: async () => ({
+          session,
+          systemSuffix: "",
+          tools: {
+            work: tool({
+              description: "Do some work.",
+              inputSchema: z.object({}),
+              execute: async () => "done"
+            })
+          }
+        })
+      })
+    );
+    return { bus, done };
+  }
+
+  it("stops before the next step once a 🛑 is recorded", async () => {
+    const generations: number[] = [];
+    const session = new FakeSession();
+    const { bus, done } = runTurn(
+      session,
+      toolLoopModel((n) => generations.push(n)),
+      async () => true
+    );
+    await done;
+
+    // The second model call — the one that would have produced the answer — is
+    // never made. That is the work the stop actually saves.
+    expect(generations).toEqual([0]);
+    expect(bus.published.at(-1)).toMatchObject({
+      kind: "status-update",
+      final: true,
+      status: { state: "canceled" }
+    });
+    // Empty: the gateway posts its own "🛑 Stopped." notice.
+    expect(bus.published.at(-1)?.status?.message?.parts[0]?.text).toBe("");
+    expect(bus.finished).toHaveBeenCalledTimes(1);
+  });
+
+  it("is keyed by the dispatch token so it reads its own row", async () => {
+    const seen: string[] = [];
+    const { done } = runTurn(
+      new FakeSession(),
+      toolLoopModel(() => {}),
+      async (token) => {
+        seen.push(token);
+        return true;
+      }
+    );
+    await done;
+
+    // `m1` is the messageId on the request context — the same value the gateway
+    // uses as the task row's token.
+    expect(seen).toEqual(["m1"]);
+  });
+
+  it("records the stop in history so the next turn doesn't redo the work", async () => {
+    const session = new FakeSession();
+    const { done } = runTurn(
+      session,
+      toolLoopModel(() => {}),
+      async () => true
+    );
+    await done;
+
+    expect(session.messages.map((m) => m.role)).toEqual(["user", "assistant"]);
+    expect(session.messages[1].parts[0]).toMatchObject({
+      type: "text",
+      text: expect.stringContaining("stopped by the user")
+    });
+  });
+
+  it("runs to completion when no stop is recorded", async () => {
+    const generations: number[] = [];
+    const session = new FakeSession();
+    const { bus, done } = runTurn(
+      session,
+      toolLoopModel((n) => generations.push(n)),
+      async () => false
+    );
+    await done;
+
+    expect(generations).toEqual([0, 1]);
+    expect(expectTerminalReply(bus)?.parts[0]).toMatchObject({
+      text: "Here is the answer."
+    });
+  });
+
+  it("keeps going when the stop check itself fails", async () => {
+    // The check reads D1 mid-turn. A blip there must not destroy a turn nobody
+    // asked to stop.
+    const session = new FakeSession();
+    const { bus, done } = runTurn(
+      session,
+      toolLoopModel(() => {}),
+      async () => {
+        throw new Error("d1 unavailable");
+      }
+    );
+    await done;
+
+    expect(expectTerminalReply(bus)?.parts[0]).toMatchObject({
+      text: "Here is the answer."
+    });
+  });
+
+  it("withholds the answer of a single-step turn that was stopped", async () => {
+    // A one-call turn has no step boundary to be interrupted at, so the work runs
+    // to completion — but the reply must not reach Slack after the user was told
+    // "🛑 Stopped." The post-generation check is what withholds it.
+    const session = new FakeSession();
+    const model = new MockLanguageModelV3({
+      doGenerate: async () => okResult("answered in one shot") as never
+    });
+    const { bus, done } = runTurn(session, model, async () => true);
+    await done;
+
+    expect(bus.published.at(-1)).toMatchObject({
+      final: true,
+      status: { state: "canceled" }
+    });
+    const texts = bus.published.map(
+      (e) => e.status?.message?.parts[0]?.text ?? ""
+    );
+    expect(texts.join("")).not.toContain("answered in one shot");
+    // The compute was spent, so history records the reply was abandoned, not given.
+    expect(session.messages[1]?.parts[0]).toMatchObject({
+      text: expect.stringContaining("stopped by the user")
+    });
+  });
+
+  it("checks once more after generation, not only between steps", async () => {
+    // Simulates a 🛑 landing while the final model call was in flight: no boundary
+    // is left, so only the post-generation check can catch it.
+    let stopped = false;
+    const session = new FakeSession();
+    const model = new MockLanguageModelV3({
+      doGenerate: async () => {
+        stopped = true; // the stop lands during this call
+        return okResult("too late to be useful") as never;
+      }
+    });
+    const { bus, done } = runTurn(session, model, async () => stopped);
+    await done;
+
+    expect(bus.published.at(-1)?.status?.state).toBe("canceled");
+  });
+});

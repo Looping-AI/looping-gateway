@@ -10,6 +10,7 @@ import {
   type SessionLike
 } from "@/agents/shared/session";
 import { executeAgentTurn } from "@/agents/shared/loop";
+import { isCancelRequested } from "@/db/models/agent-tasks";
 import { callerContext } from "@/agents/shared/prompt";
 import { archiveMessages } from "@/agents/shared/recall";
 import { recallTools } from "@/agents/shared/recall-tool";
@@ -65,6 +66,9 @@ export class OnboardingAgentExecutor implements AgentExecutor {
   ): Promise<void> => {
     await executeAgentTurn(requestContext, eventBus, {
       models: this.models,
+      // The dispatch token is the A2A messageId, and the gateway records a 🛑
+      // against that same token — so the running turn can read its own stop flag.
+      isCanceled: isCancelRequested,
       unexpectedReply:
         "Sorry, I hit an unexpected error. Please try again in a moment.",
       prepare: async (_text, metadata) => {
