@@ -155,12 +155,12 @@ export const agentChannels = sqliteTable(
  * A2A `pushNotificationConfig`, the remote returns a Task immediately, and later
  * POSTs Tasks back to `/a2a/notifications` — one or more intermediate progress
  * updates (non-terminal `state`) followed by a terminal Task. This row is how the
- * callback recovers where to post (channel/thread) and which ⏳ to clear
+ * callback recovers where to post (channel/thread) and which 🛑 to clear
  * (`eventId`). Callback rendering identity is read from the current `agents` row.
  *
  * Keyed by the gateway-generated `token` (the value the remote echoes back).
  * The row stays `pending` across intermediate updates and is marked `completed`
- * only by the terminal callback (which then clears the ⏳); rows are swept in the
+ * only by the terminal callback (which then clears the 🛑); rows are swept in the
  * maintenance workflow.
  */
 export const agentTasks = sqliteTable(
@@ -176,14 +176,23 @@ export const agentTasks = sqliteTable(
       .notNull()
       .references(() => agents.name),
     channelId: text("channel_id").notNull(),
+    // Slack `ts` of the trigger message — the correlation key a 🛑 stop reaction
+    // uses (a reaction event carries only item.channel + item.ts) to find this
+    // task's fan-out. NOT NULL: it is the cancel path's only lookup key, so a row
+    // without one would be permanently uncancelable.
+    messageTs: text("message_ts").notNull(),
     // Thread to reply into; null = post at channel top-level (mirrors replyThreadTs).
     replyThreadTs: text("reply_thread_ts"),
-    // Slack event id of the triggering message — used to collect the ⏳ reaction.
+    // Slack event id of the triggering message — used to collect the 🛑 reaction.
     eventId: text("event_id").notNull(),
     // `pending` until a terminal callback posts (or classifies no-reply) and marks it.
     status: text("status", { enum: ["pending", "completed"] })
       .notNull()
       .default("pending"),
+    // A stop was requested (via the 🛑 reaction) before this task's accept
+    // returned its taskId. The dispatch honors it the moment the taskId is known
+    // (or skips the send entirely if seen first). 0/1.
+    cancelRequested: integer("cancel_requested").notNull().default(0),
     // Last gateway-controlled reason a callback was rejected (auth/malformed),
     // captured for the reaction backstop to surface. Never holds remote payload.
     lastError: text("last_error"),
@@ -193,7 +202,14 @@ export const agentTasks = sqliteTable(
     createdAt: timestamp("created_at"),
     completedAt: integer("completed_at")
   },
-  (t) => [index("idx_agent_tasks_created_at").on(t.createdAt)]
+  (t) => [
+    index("idx_agent_tasks_created_at").on(t.createdAt),
+    // Reverse lookup for a stop reaction: (channel, trigger ts) → pending tasks.
+    index("idx_agent_tasks_channel_message_ts").on(t.channelId, t.messageTs),
+    // Drain check: every task leaving the pending set asks "any sibling left for
+    // this event?", so this runs N+1 times per fan-out — the table's hottest read.
+    index("idx_agent_tasks_event_id").on(t.eventId)
+  ]
 );
 
 /**

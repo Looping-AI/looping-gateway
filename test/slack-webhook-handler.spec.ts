@@ -12,10 +12,11 @@ import {
   SystemConfigKeys
 } from "@/db/models/workspace-configs";
 import { ORG_WORKSPACE_ID } from "@/db/models/workspaces";
-import { PENDING_REACTION } from "@/workflows/reaction";
+import { STOP_REACTION } from "@/workflows/reaction";
+import { _resetBotInfoCacheForTest } from "@/wrappers/slack";
 import { stubSlack } from "./wrappers/slack-stub";
 
-// The handler adds the ⏳ reaction inline via a real Slack API call, so every
+// The handler adds the 🛑 reaction inline via a real Slack API call, so every
 // test needs global fetch stubbed. Tests that assert on the reaction re-stub
 // with a capturing handler; this default keeps the rest benign.
 beforeEach(() => stubSlack(() => ({ ok: true })));
@@ -28,7 +29,11 @@ afterEach(() => {
 // Returns the spy so tests can assert on it. Because the handler now reads the
 // workflow bindings off the global `env`, the spy replaces the real create.
 function spyWorkflow(
-  binding: "MESSAGE_WORKFLOW" | "REACTION_WORKFLOW" | "LIFECYCLE_WORKFLOW"
+  binding:
+    | "MESSAGE_WORKFLOW"
+    | "REACTION_WORKFLOW"
+    | "LIFECYCLE_WORKFLOW"
+    | "CANCEL_WORKFLOW"
 ) {
   return vi
     .spyOn(env[binding], "create")
@@ -180,7 +185,7 @@ describe("message events", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Parallel Reaction Workflow — ⏳ on the trigger message
+// Parallel Reaction Workflow — 🛑 on the trigger message
 // ---------------------------------------------------------------------------
 
 interface ReactionAddCall {
@@ -211,7 +216,7 @@ function captureAddReactions(
 }
 
 describe("reaction workflow", () => {
-  it("adds the ⏳ reaction inline and starts the removal workflow", async () => {
+  it("adds the 🛑 reaction inline and starts the removal workflow", async () => {
     const reactionCreate = spyWorkflow("REACTION_WORKFLOW");
     const adds = captureAddReactions();
     const body = JSON.stringify({
@@ -229,12 +234,12 @@ describe("reaction workflow", () => {
     const res = await post(body);
     expect(res.status).toBe(200);
 
-    // The ⏳ reaction is added inline on the trigger message (not by the workflow).
+    // The 🛑 reaction is added inline on the trigger message (not by the workflow).
     expect(adds).toEqual([
       {
         channel: "C1",
         timestamp: "1700000000.000100",
-        name: PENDING_REACTION
+        name: STOP_REACTION
       }
     ]);
 
@@ -310,6 +315,81 @@ describe("reaction workflow", () => {
     expect(res.status).toBe(200);
     expect(adds).toEqual([]);
     expect(reactionCreate).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Stop reaction → Cancel Workflow
+// ---------------------------------------------------------------------------
+
+describe("stop reaction (cancel)", () => {
+  beforeEach(() => _resetBotInfoCacheForTest());
+
+  function reactionBody(
+    over: {
+      eventId?: string;
+      type?: string;
+      user?: string;
+      reaction?: string;
+    } = {}
+  ) {
+    return JSON.stringify({
+      type: "event_callback",
+      event_id: over.eventId ?? "EvStop",
+      team_id: "T1",
+      event: {
+        type: over.type ?? "reaction_added",
+        user: over.user ?? "U2",
+        reaction: over.reaction ?? STOP_REACTION,
+        item: { type: "message", channel: "C1", ts: "1700.1" }
+      }
+    });
+  }
+
+  it("triggers the CancelWorkflow for a human 🛑 on a message", async () => {
+    const create = spyWorkflow("CANCEL_WORKFLOW");
+    const res = await post(reactionBody());
+    expect(res.status).toBe(200);
+    expect(create).toHaveBeenCalledOnce();
+    expect(create).toHaveBeenCalledWith({
+      id: "EvStop",
+      params: expect.objectContaining({
+        channelId: "C1",
+        ts: "1700.1",
+        userId: "U2"
+      })
+    });
+  });
+
+  it("ignores a non-stop emoji reaction", async () => {
+    const create = spyWorkflow("CANCEL_WORKFLOW");
+    const res = await post(
+      reactionBody({ eventId: "EvOther", reaction: "thumbsup" })
+    );
+    expect(res.status).toBe(200);
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it("ignores reaction_removed", async () => {
+    const create = spyWorkflow("CANCEL_WORKFLOW");
+    const res = await post(
+      reactionBody({ eventId: "EvRem", type: "reaction_removed" })
+    );
+    expect(res.status).toBe(200);
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it("does not cancel on the gateway's own 🛑 (self-reaction filter)", async () => {
+    // auth.test resolves the bot user id; a reaction by that same user is ours.
+    stubSlack((method) =>
+      method === "auth.test"
+        ? { ok: true, user_id: "UBOT", team_id: "T1" }
+        : { ok: true }
+    );
+    const create = spyWorkflow("CANCEL_WORKFLOW");
+    const res = await post(reactionBody({ eventId: "EvSelf", user: "UBOT" }));
+    expect(res.status).toBe(200);
+    expect(create).not.toHaveBeenCalled();
   });
 });
 
@@ -656,6 +736,88 @@ describe("ignored events", () => {
       ...(await slackHeaders(body)),
       "Content-Type": "application/x-www-form-urlencoded"
     });
+    expect(res.status).toBe(200);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Missing event_id — the idempotency gate
+// ---------------------------------------------------------------------------
+
+describe("malformed envelopes", () => {
+  // `event_id` anchors every dedupe point (workflow instance ids, the
+  // agent_tasks token PK). Without it a Slack retry would double-dispatch, so
+  // the delivery is rejected rather than handled with a substituted id.
+  it("rejects an app_mention with no event_id", async () => {
+    const create = spyWorkflow("MESSAGE_WORKFLOW");
+    const body = JSON.stringify({
+      type: "event_callback",
+      team_id: "T1",
+      event: {
+        type: "app_mention",
+        user: "U1",
+        text: "<@B1> hi",
+        channel: "C1",
+        ts: "1700000000.1"
+      }
+    });
+    const res = await post(body);
+    expect(res.status).toBe(400);
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it("rejects a channel message with no event_id", async () => {
+    const create = spyWorkflow("MESSAGE_WORKFLOW");
+    const body = JSON.stringify({
+      type: "event_callback",
+      team_id: "T1",
+      event: {
+        type: "message",
+        channel_type: "channel",
+        user: "U1",
+        text: "hello",
+        channel: "C1",
+        ts: "1700000000.1"
+      }
+    });
+    const res = await post(body);
+    expect(res.status).toBe(400);
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it("rejects a 🛑 reaction with no event_id", async () => {
+    const create = spyWorkflow("CANCEL_WORKFLOW");
+    const body = JSON.stringify({
+      type: "event_callback",
+      team_id: "T1",
+      event: {
+        type: "reaction_added",
+        user: "U2",
+        reaction: STOP_REACTION,
+        item: { type: "message", channel: "C1", ts: "1700.1" }
+      }
+    });
+    const res = await post(body);
+    expect(res.status).toBe(400);
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  // The gate keys off `type === "event_callback"`, not off the payload kind, so
+  // that everything below still acks 200. These are the regression guards that
+  // keep it from over-reaching onto traffic that never carries an event_id.
+  it("acks 200 for a non-event_callback envelope (app_rate_limited)", async () => {
+    const body = JSON.stringify({
+      type: "app_rate_limited",
+      team_id: "T1",
+      minute_rate_limited: 1700000000
+    });
+    const res = await post(body);
+    expect(res.status).toBe(200);
+  });
+
+  it("acks 200 for an arbitrary non-Slack-shaped POST", async () => {
+    const body = JSON.stringify({ type: "some_unknown_thing" });
+    const res = await post(body);
     expect(res.status).toBe(200);
   });
 });

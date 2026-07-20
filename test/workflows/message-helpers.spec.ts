@@ -2,13 +2,16 @@ import { afterEach, beforeEach, describe, it, expect, vi } from "vitest";
 import { env } from "cloudflare:workers";
 import { introspectWorkflow } from "cloudflare:test";
 import { setWorkspaceAdminChannel } from "@/db/models/workspaces";
-import { PENDING_REACTION } from "@/workflows/reaction";
+import { STOP_REACTION } from "@/workflows/reaction";
 import {
   dispatchMessage,
   feedText,
   replyThreadTs,
+  collectIfEventDrained,
   type AgentPlan
 } from "@/workflows/message-helpers";
+import { registerAgent } from "@/db/models/agents";
+import { createAgentTask, completeAgentTask } from "@/db/models/agent-tasks";
 import type { MessageWorkflowParams } from "@/slack/types";
 import { stubSlack } from "../wrappers/slack-stub";
 import {
@@ -213,7 +216,7 @@ describe("resolveMessage (via webhook handler)", () => {
       expect(res.status).toBe(200);
 
       // resolveMessage returns an empty target list → handler skips the
-      // workflow and the reaction entirely; no hourglass flicker.
+      // workflow and the reaction entirely; no reaction flicker.
       expect(await introspector.get()).toHaveLength(0);
     } finally {
       await introspector.dispose();
@@ -222,11 +225,11 @@ describe("resolveMessage (via webhook handler)", () => {
 });
 
 // ---------------------------------------------------------------------------
-// signalReactionCollect — ⏳ removal
+// signalReactionCollect — 🛑 removal
 // ---------------------------------------------------------------------------
 
 describe("signalReactionCollect (via MessageWorkflow)", () => {
-  it("sends reply_posted to ReactionWorkflow once the local reply is done, removing ⏳", async () => {
+  it("sends reply_posted to ReactionWorkflow once the local reply is done, removing 🛑", async () => {
     const { reactions } = captureSlackWithReactions();
     const msgIntrospector = await introspectWorkflow(env.MESSAGE_WORKFLOW);
     const reactionIntrospector = await introspectWorkflow(
@@ -251,11 +254,62 @@ describe("signalReactionCollect (via MessageWorkflow)", () => {
       expect(reactions[0]).toMatchObject({
         channel: "C_ORGADMIN",
         timestamp: "1700.1",
-        name: PENDING_REACTION
+        name: STOP_REACTION
       });
     } finally {
       await reactionIntrospector.dispose();
       await msgIntrospector.dispose();
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// collectIfEventDrained — the 🛑 clears only when the last fan-out task is done
+// ---------------------------------------------------------------------------
+
+describe("collectIfEventDrained (fan-out drain)", () => {
+  beforeEach(async () => {
+    await registerAgent({
+      name: "wf-agent",
+      kind: "custom",
+      a2aEndpoint: "https://a.example.com/a2a",
+      notifyOn: "channel_messages",
+      workspaceId: 0
+    });
+  });
+
+  const seed = (token: string) =>
+    createAgentTask({
+      token,
+      taskId: "task-1",
+      agentName: "wf-agent",
+      channelId: "C1",
+      messageTs: "1700.1",
+      replyThreadTs: null,
+      eventId: "EvDrain"
+    });
+
+  it("signals collect only once the last pending task of the event is done", async () => {
+    const sendEvent = vi.fn(async () => {});
+    vi.spyOn(env.REACTION_WORKFLOW, "get").mockResolvedValue({
+      sendEvent
+    } as unknown as WorkflowInstance);
+
+    await seed("d1");
+    await seed("d2");
+
+    // Two agents of one trigger still working → the 🛑 must stay.
+    await collectIfEventDrained("EvDrain");
+    expect(sendEvent).not.toHaveBeenCalled();
+
+    // First agent finishes — one still pending, so still no collect.
+    await completeAgentTask("d1");
+    await collectIfEventDrained("EvDrain");
+    expect(sendEvent).not.toHaveBeenCalled();
+
+    // Last agent finishes — the fan-out is drained, so now we collect.
+    await completeAgentTask("d2");
+    await collectIfEventDrained("EvDrain");
+    expect(sendEvent).toHaveBeenCalledTimes(1);
   });
 });

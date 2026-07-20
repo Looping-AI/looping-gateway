@@ -2,13 +2,17 @@ import {
   ClientFactory,
   ClientFactoryOptions,
   JsonRpcTransportFactory,
+  TaskNotCancelableError,
+  TaskNotFoundError,
+  UnsupportedOperationError,
   type Client
 } from "@a2a-js/sdk/client";
 import type {
   AgentCard,
   Message,
   MessageSendParams,
-  PushNotificationConfig
+  PushNotificationConfig,
+  Task
 } from "@a2a-js/sdk";
 
 /**
@@ -189,4 +193,52 @@ export async function sendA2ARemote(
     configuration: { pushNotificationConfig }
   };
   return acceptedTask(await client.sendMessage(params), message);
+}
+
+/**
+ * Outcome of asking a remote agent to cancel a task (A2A `tasks/cancel`).
+ * Cancellation is *attempted*, not guaranteed (A2A §7.5): the terminal outcomes
+ * below all mean "stop trying" from the gateway's side.
+ * - `canceled`      — the agent transitioned the task to a terminal `canceled`.
+ * - `not_cancelable`— the task was already terminal (e.g. it just completed);
+ *                     `TaskNotCancelableError` (-32002). Idempotent no-op.
+ * - `not_found`     — the agent has no such task (-32001). Idempotent no-op.
+ * - `unsupported`   — the agent doesn't implement cancellation (-32004); the task
+ *                     keeps running and the gateway should say so.
+ * - `error`         — transport/other failure; the caller may surface or retry.
+ */
+export type CancelOutcome =
+  | { kind: "canceled"; task: Task }
+  | { kind: "not_cancelable" }
+  | { kind: "not_found" }
+  | { kind: "unsupported" }
+  | { kind: "error"; message: string };
+
+/**
+ * Ask a **remote** agent to cancel a task via the standard A2A `tasks/cancel`
+ * method. Synchronous by contract — the agent returns the updated Task
+ * immediately — so the gateway self-reconciles from this response and does NOT
+ * wait for a push callback (a conformant agent sends none after cancellation).
+ * The SDK maps A2A error codes to typed errors, which we fold into a
+ * {@link CancelOutcome} the caller can act on without touching the SDK surface.
+ */
+export async function cancelA2ARemote(
+  target: A2ARemoteTarget,
+  taskId: string
+): Promise<CancelOutcome> {
+  const client = await buildRemoteClient(target);
+  try {
+    const task = await client.cancelTask({ id: taskId });
+    return { kind: "canceled", task };
+  } catch (err) {
+    if (err instanceof TaskNotCancelableError)
+      return { kind: "not_cancelable" };
+    if (err instanceof TaskNotFoundError) return { kind: "not_found" };
+    if (err instanceof UnsupportedOperationError)
+      return { kind: "unsupported" };
+    return {
+      kind: "error",
+      message: err instanceof Error ? err.message : String(err)
+    };
+  }
 }

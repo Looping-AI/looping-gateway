@@ -2,7 +2,7 @@ import { afterEach, describe, it, expect, vi } from "vitest";
 import { env } from "cloudflare:workers";
 import { introspectWorkflow } from "cloudflare:test";
 import {
-  PENDING_REACTION,
+  STOP_REACTION,
   REACTION_COLLECT_EVENT,
   reactionInstanceId
 } from "@/workflows/reaction";
@@ -91,6 +91,7 @@ async function seedPendingTask(
     taskId: "task-1",
     agentName: token,
     channelId: "C1",
+    messageTs: "1700.1",
     replyThreadTs: null,
     eventId
   });
@@ -103,7 +104,7 @@ function makeParams(): ReactionWorkflowParams {
 }
 
 describe("ReactionWorkflow", () => {
-  it("removes the pending reaction when the collect signal arrives", async () => {
+  it("removes the stop reaction when the collect signal arrives", async () => {
     const calls = captureReactions();
     const introspector = await introspectWorkflow(env.REACTION_WORKFLOW);
     try {
@@ -127,7 +128,7 @@ describe("ReactionWorkflow", () => {
       expect(calls[0]).toMatchObject({
         channel: "C1",
         timestamp: "1700.1",
-        name: PENDING_REACTION
+        name: STOP_REACTION
       });
     } finally {
       await introspector.dispose();

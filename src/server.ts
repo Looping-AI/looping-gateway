@@ -11,6 +11,7 @@ export { MessageWorkflow } from "./workflows/message";
 export { LifecycleWorkflow } from "./workflows/lifecycle";
 export { ReconcileWorkflow } from "./workflows/reconcile";
 export { ReactionWorkflow } from "./workflows/reaction";
+export { CancelWorkflow } from "./workflows/cancel";
 export { MaintenanceWorkflow } from "./workflows/maintenance";
 
 // In-repo agents — each is its own A2A server. The Message Workflow reaches them

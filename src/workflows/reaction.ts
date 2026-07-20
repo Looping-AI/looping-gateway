@@ -5,22 +5,25 @@ import { removeReaction, postReply } from "@/wrappers/slack";
 import { getPendingAgentTasksByEventId } from "@/db/models/agent-tasks";
 
 /**
- * Emoji reaction used to signal "the agent is working on this message". Slack's
- * animated hourglass; configurable here in one place. The reaction is *added*
- * inline by the webhook handler (so it shows immediately); this workflow only
- * owns its removal.
+ * Emoji reaction the gateway pre-adds to a trigger message while its agents work.
+ * It doubles as the **cancel affordance**: the human taps this same 🛑 to stop
+ * the run (see the `reaction_added` → CancelWorkflow path), so there's a single
+ * one-tap control instead of a separate "working" indicator and stop emoji.
+ * Configurable here in one place. The reaction is *added* inline by the webhook
+ * handler (so it shows immediately); this workflow only owns its removal, which
+ * happens once the last fan-out task for the message reaches a terminal state.
  */
-export const PENDING_REACTION = "hourglass_flowing_sand";
+export const STOP_REACTION = "octagonal_sign";
 
 /**
  * Event `type` the MessageWorkflow sends once a reply has been posted, telling
- * the ReactionWorkflow to collect (remove) the pending reaction immediately.
+ * the ReactionWorkflow to collect (remove) the stop reaction immediately.
  * Slack event types only allow `[a-zA-Z0-9_-]` — no dots.
  */
 export const REACTION_COLLECT_EVENT = "reply_posted";
 
 /**
- * Backstop: the longest the pending reaction may linger if the MessageWorkflow
+ * Backstop: the longest the stop reaction may linger if the MessageWorkflow
  * crashes or errors without ever sending the collect signal. When the wait times
  * out, the reaction is removed anyway.
  */
@@ -79,17 +82,18 @@ async function surfaceRejectedDeliveries(eventId: string): Promise<void> {
 }
 
 /**
- * Parallel, durable owner of the ⏳ reaction *removal* for a single Slack
+ * Parallel, durable owner of the 🛑 reaction *removal* for a single Slack
  * trigger message. The webhook handler adds the reaction inline (so it appears
  * immediately, without waiting for a workflow cold start); this workflow runs
  * alongside (never wraps) the MessageWorkflow and only removes it:
  *
  *   waitForEvent(collect | timeout) → remove-reaction
  *
- * The reply path of the MessageWorkflow sends the `reply_posted` event to collect
- * the reaction promptly. If that signal never arrives (hard crash, exhausted
+ * The MessageWorkflow sends the `reply_posted` event to collect the reaction
+ * promptly, once the *last* fan-out task for the event reaches a terminal state
+ * (see `collectIfEventDrained`). If that signal never arrives (hard crash, exhausted
  * retries), the `waitForEvent` timeout fires and the reaction is still removed —
- * so the trigger message never keeps a stale ⏳.
+ * so the trigger message never keeps a stale 🛑.
  */
 export class ReactionWorkflow extends WorkflowEntrypoint<
   Env,
@@ -128,7 +132,7 @@ export class ReactionWorkflow extends WorkflowEntrypoint<
       }
 
       await step.do("remove-reaction", () =>
-        removeReaction(p.channelId, p.ts, PENDING_REACTION)
+        removeReaction(p.channelId, p.ts, STOP_REACTION)
       );
     } catch (err) {
       console.error("[reaction] workflow run failed", {

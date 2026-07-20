@@ -8,7 +8,7 @@ import {
 import { extractText, isTerminalTaskState } from "@/a2a/parts";
 import { sanitizeAgentReply } from "@/a2a/client";
 import { postReply } from "@/wrappers/slack";
-import { signalReactionCollect } from "@/workflows/message-helpers";
+import { collectIfEventDrained } from "@/workflows/message-helpers";
 
 /** A malformed Task snapshot that is safe to report to a task's owner. */
 export class TaskDeliveryValidationError extends Error {}
@@ -75,7 +75,9 @@ export async function deliverTaskToSlack(
     );
   }
 
+  // Clear the 🛑 only when this was the last pending task of the fan-out; other
+  // agents woken by the same trigger message may still be working.
   if (await completeAgentTask(token)) {
-    await signalReactionCollect(row.eventId);
+    await collectIfEventDrained(row.eventId);
   }
 }

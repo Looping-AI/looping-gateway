@@ -228,10 +228,10 @@ describe("addReaction", () => {
       if (method === "reactions.add") captured = body;
       return { ok: true };
     });
-    await addReaction("C1", "1700.1", "hourglass_flowing_sand");
+    await addReaction("C1", "1700.1", "octagonal_sign");
     expect(captured?.get("channel")).toBe("C1");
     expect(captured?.get("timestamp")).toBe("1700.1");
-    expect(captured?.get("name")).toBe("hourglass_flowing_sand");
+    expect(captured?.get("name")).toBe("octagonal_sign");
   });
 
   it("treats already_reacted as success (idempotent)", async () => {
@@ -262,10 +262,10 @@ describe("removeReaction", () => {
       if (method === "reactions.remove") captured = body;
       return { ok: true };
     });
-    await removeReaction("C1", "1700.1", "hourglass_flowing_sand");
+    await removeReaction("C1", "1700.1", "octagonal_sign");
     expect(captured?.get("channel")).toBe("C1");
     expect(captured?.get("timestamp")).toBe("1700.1");
-    expect(captured?.get("name")).toBe("hourglass_flowing_sand");
+    expect(captured?.get("name")).toBe("octagonal_sign");
   });
 
   it("treats no_reaction and message_not_found as success (idempotent)", async () => {

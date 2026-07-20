@@ -129,6 +129,7 @@ beforeEach(async () => {
     taskId: "task-1",
     agentName: "remoteagent",
     channelId: "C1",
+    messageTs: "1700.1",
     replyThreadTs: null,
     eventId: "Ev1"
   });
@@ -251,7 +252,7 @@ describe("handleRemoteAgentNotification", () => {
     expect(row?.lastError).toContain("not a valid A2A Task");
   });
 
-  it("posts an intermediate (non-terminal) update, keeps the task pending, and keeps the ⏳", async () => {
+  it("posts an intermediate (non-terminal) update, keeps the task pending, and keeps the 🛑", async () => {
     const posts: SlackPost[] = [];
     stubFetch(key, posts);
     const bearer = await signJwt(key, { jku: JKU, sub: SUB, aud: AUD });
@@ -268,7 +269,7 @@ describe("handleRemoteAgentNotification", () => {
     expect(posts).toHaveLength(1);
     expect(posts[0]).toMatchObject({ channel: "C1", text: "working on it" });
     const row = await getAgentTaskByToken(NTOK);
-    // Row stays pending (⏳ not collected) and the update is recorded for dedup.
+    // Row stays pending (🛑 not collected) and the update is recorded for dedup.
     expect(row?.status).toBe("pending");
     expect(row?.receivedMessageIds).toBe("u1");
   });
@@ -370,6 +371,7 @@ describe("handleRemoteAgentNotification", () => {
       taskId: "local-task",
       agentName: "adminlocal",
       channelId: "C-local",
+      messageTs: "1700.1",
       replyThreadTs: null,
       eventId: "Ev-local"
     });
@@ -410,6 +412,7 @@ describe("handleRemoteAgentNotification", () => {
       taskId: "local-sanitize-task",
       agentName: "adminsanitize",
       channelId: "C-local",
+      messageTs: "1700.1",
       replyThreadTs: null,
       eventId: "Ev-local-sanitize"
     });
@@ -443,6 +446,7 @@ describe("handleRemoteAgentNotification", () => {
       taskId: "local-public-task",
       agentName: "adminpublic",
       channelId: "C-local",
+      messageTs: "1700.1",
       replyThreadTs: null,
       eventId: "Ev-local-public"
     });
@@ -481,6 +485,7 @@ describe("handleRemoteAgentNotification", () => {
       taskId: "local-sender-task",
       agentName: "adminsender",
       channelId: "C-local",
+      messageTs: "1700.1",
       replyThreadTs: null,
       eventId: "Ev-local-sender"
     });

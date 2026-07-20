@@ -14,6 +14,8 @@ export interface CreateAgentTaskInput {
   taskId: string | null;
   agentName: string;
   channelId: string;
+  /** Slack `ts` of the trigger message — the correlation key for a 🛑 stop reaction. */
+  messageTs: string;
   /** Thread to reply into; null = post at channel top-level. */
   replyThreadTs: string | null;
   eventId: string;
@@ -35,10 +37,35 @@ export async function createAgentTask(
       taskId: input.taskId,
       agentName: input.agentName,
       channelId: input.channelId,
+      messageTs: input.messageTs,
       replyThreadTs: input.replyThreadTs,
       eventId: input.eventId
     })
     .onConflictDoNothing();
+}
+
+/**
+ * Pending (not-yet-completed) tasks triggered by a specific Slack message,
+ * looked up by `(channelId, messageTs)`. This is the reverse index a 🛑 stop
+ * reaction uses: the reaction event carries only the reacted message's channel
+ * and ts, and one trigger message can fan out to several agents (all sharing the
+ * same trigger ts), so this returns the whole fan-out to cancel together.
+ */
+export async function getPendingAgentTasksByChannelAndTs(
+  channelId: string,
+  messageTs: string
+): Promise<AgentTaskRow[]> {
+  const db = getDb();
+  return db
+    .select()
+    .from(schema.agentTasks)
+    .where(
+      and(
+        eq(schema.agentTasks.channelId, channelId),
+        eq(schema.agentTasks.messageTs, messageTs),
+        eq(schema.agentTasks.status, "pending")
+      )
+    );
 }
 
 /** Look up a pending/known task by its validation token (the callback's correlation key). */
@@ -71,17 +98,24 @@ export async function getPendingAgentTasksByEventId(
 }
 
 /**
- * Fill in the A2A Task id once the accept response is known.
- * The row is written before dispatch (with `taskId` null) to close the
- * accept→record race, so this best-effort update backfills the id afterwards.
- * Conditional on `pending` so a task the callback already completed is untouched.
+ * Fill in the A2A Task id once the accept response is known, and atomically
+ * report whether a stop was requested in the meantime. The row is written before
+ * dispatch (with `taskId` null) to close the accept→record race, so this
+ * backfills the id afterwards. Conditional on `pending` so a task the callback
+ * already completed is untouched.
+ *
+ * Returns `true` iff the row was still pending **and** `cancel_requested` was
+ * already set — i.e. a 🛑 landed during the send and the caller must now honor it
+ * by issuing `tasks/cancel`. This single atomic `UPDATE … RETURNING` pairs with
+ * {@link markCancelRequested}: SQLite serializes the two, so whichever commits
+ * second observes both the taskId and the intent, and exactly one path cancels.
  */
 export async function updateAgentTaskTaskId(
   token: string,
   taskId: string
-): Promise<void> {
+): Promise<boolean> {
   const db = getDb();
-  await db
+  const rows = await db
     .update(schema.agentTasks)
     .set({ taskId })
     .where(
@@ -89,7 +123,43 @@ export async function updateAgentTaskTaskId(
         eq(schema.agentTasks.token, token),
         eq(schema.agentTasks.status, "pending")
       )
-    );
+    )
+    .returning({ cancelRequested: schema.agentTasks.cancelRequested });
+  return rows.length > 0 && rows[0].cancelRequested === 1;
+}
+
+/** Outcome of flagging a stop on a task row. */
+export interface MarkCancelResult {
+  /** A pending row was matched (false = already completed/purged — nothing to do). */
+  matched: boolean;
+  /** The task's A2A id if the accept already returned it (else null → intent recorded). */
+  taskId: string | null;
+}
+
+/**
+ * Flag that a stop was requested for a task, and atomically report the current
+ * `taskId`. Conditional on `pending` so a completed/purged task is a no-op
+ * (`matched: false`). Pairs with {@link updateAgentTaskTaskId} as the race
+ * handshake (§ the two atomic statements): if this returns a non-null `taskId`,
+ * the accept already committed and the caller cancels directly; if null, the
+ * intent is now recorded and the dispatch's accept path honors it.
+ */
+export async function markCancelRequested(
+  token: string
+): Promise<MarkCancelResult> {
+  const db = getDb();
+  const rows = await db
+    .update(schema.agentTasks)
+    .set({ cancelRequested: 1 })
+    .where(
+      and(
+        eq(schema.agentTasks.token, token),
+        eq(schema.agentTasks.status, "pending")
+      )
+    )
+    .returning({ taskId: schema.agentTasks.taskId });
+  if (rows.length === 0) return { matched: false, taskId: null };
+  return { matched: true, taskId: rows[0].taskId };
 }
 
 /**
