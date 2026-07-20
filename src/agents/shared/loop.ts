@@ -22,7 +22,7 @@ const TRANSIENT_REPLY =
   "The AI service is temporarily unavailable. Please try again in a moment.";
 
 /** Recorded in history when a turn is stopped, so it doesn't read as unanswered. */
-const CANCELED_NOTE = "(stopped by the user before a reply was produced)";
+const CANCELED_NOTE = "(stopped by the user; reply was not delivered)";
 
 export function isTransientAiError(err: unknown): boolean {
   if (!(err instanceof Error)) return false;
