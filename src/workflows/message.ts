@@ -7,7 +7,7 @@ import {
   createAgentTask,
   updateAgentTaskTaskId,
   deleteAgentTask,
-  getAgentTaskByToken
+  isCancelRequested
 } from "@/db/models/agent-tasks";
 import {
   type AgentPlan,
@@ -126,12 +126,6 @@ async function runAgentTask(
       error: err instanceof Error ? err.message : String(err)
     };
   }
-}
-
-/** True when a stop was recorded for this task before/while it was dispatched. */
-async function isCancelRequested(token: string): Promise<boolean> {
-  const row = await getAgentTaskByToken(token);
-  return Boolean(row?.cancelRequested);
 }
 
 /**

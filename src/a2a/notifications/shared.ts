@@ -59,9 +59,12 @@ export async function deliverTaskToSlack(
     return;
   }
 
+  // A stop is an outcome the user chose, not a failure to explain — and the
+  // cancel workflow already posted "🛑 Stopped." Treat `canceled` like
+  // `completed` and stay silent; only real failures get the notice.
+  const isChosenOutcome = state === "completed" || state === "canceled";
   const body =
-    text ||
-    (state === "completed" ? "" : terminalFailureNotice(displayName, state));
+    text || (isChosenOutcome ? "" : terminalFailureNotice(displayName, state));
 
   // Post before completion so a delivery failure leaves the row pending for a
   // retry. A replay after completion becomes a no-op at the boundary.

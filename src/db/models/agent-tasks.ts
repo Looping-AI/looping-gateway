@@ -81,6 +81,20 @@ export async function getAgentTaskByToken(
   return rows[0] ?? null;
 }
 
+/**
+ * Whether a 🛑 stop has been recorded for this task.
+ *
+ * Two readers, both needing the same answer at different moments: the dispatch's
+ * pre-send guard (never wake an agent that was already stopped), and a *running*
+ * local turn, which re-reads this between steps. The cancel workflow runs on its
+ * own request and can't reach into a Durable Object mid-turn, so this row is the
+ * only channel it has to the agent — see the stop condition in `shared/loop`.
+ */
+export async function isCancelRequested(token: string): Promise<boolean> {
+  const row = await getAgentTaskByToken(token);
+  return Boolean(row?.cancelRequested);
+}
+
 /** Pending (not-yet-completed) tasks for a Slack trigger event — the reaction backstop reads these. */
 export async function getPendingAgentTasksByEventId(
   eventId: string

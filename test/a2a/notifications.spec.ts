@@ -534,6 +534,27 @@ describe("handleRemoteAgentNotification", () => {
     expect((await getAgentTaskByToken(NTOK))?.status).toBe("completed");
   });
 
+  it("stays silent on a terminal `canceled` with no text", async () => {
+    // The counterpart of the failure notice above: a stop is an outcome the user
+    // chose, and the cancel workflow already posted "🛑 Stopped." A notice here
+    // would contradict it. The row still completes so the 🛑 can be collected.
+    const posts: SlackPost[] = [];
+    stubFetch(key, posts);
+    const bearer = await signJwt(key, { jku: JKU, sub: SUB, aud: AUD });
+    const canceled: Task = {
+      ...makeTask("ignored"),
+      status: { state: "canceled" }
+    };
+
+    const res = await handleRemoteAgentNotification(
+      callbackRequest(bearer, NTOK, canceled)
+    );
+
+    expect(res.status).toBe(200);
+    expect(posts).toHaveLength(0);
+    expect((await getAgentTaskByToken(NTOK))?.status).toBe("completed");
+  });
+
   it("404s an unknown notification token", async () => {
     const posts: SlackPost[] = [];
     stubFetch(key, posts);
