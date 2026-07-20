@@ -1,5 +1,5 @@
 import type { Task } from "@a2a-js/sdk";
-import type { AgentRow } from "@/db/models/agents";
+import { agentRenderIdentity, type AgentRow } from "@/db/models/agents";
 import {
   completeAgentTask,
   recordReceivedMessageId,
@@ -35,8 +35,12 @@ export async function deliverTaskToSlack(
 ): Promise<void> {
   const state = task.status.state;
   const text = sanitizeAgentReply(extractText(task));
-  const displayName = agent.displayName ?? agent.name;
-  const iconUrl = agent.iconUrl ?? null;
+  // Resolved per delivery rather than carried from dispatch, so a rename or a
+  // regenerated avatar mid-turn takes effect on the reply it produced.
+  const { displayName, iconUrl } = await agentRenderIdentity(
+    agent,
+    row.channelId
+  );
 
   if (!isTerminalTaskState(state)) {
     const updateId = task.status.message?.messageId;

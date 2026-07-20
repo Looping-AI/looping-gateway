@@ -156,7 +156,9 @@ export const agentChannels = sqliteTable(
  * POSTs Tasks back to `/a2a/notifications` — one or more intermediate progress
  * updates (non-terminal `state`) followed by a terminal Task. This row is how the
  * callback recovers where to post (channel/thread) and which 🛑 to clear
- * (`eventId`). Callback rendering identity is read from the current `agents` row.
+ * (`eventId`). Callback rendering identity is resolved from current state at
+ * delivery time via `agentRenderIdentity` (the agent row, plus the workspace's
+ * admin overrides), never carried over from dispatch.
  *
  * Keyed by the gateway-generated `token` (the value the remote echoes back).
  * The row stays `pending` across intermediate updates and is marked `completed`

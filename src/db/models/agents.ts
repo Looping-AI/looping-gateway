@@ -1,6 +1,8 @@
 import { and, eq, inArray, sql } from "drizzle-orm";
 import { getDb } from "../client";
 import * as schema from "../schema";
+import { getWorkspaceByAdminChannel } from "./workspaces";
+import { getAdminDisplayName, getAdminIconUrl } from "./workspace-configs";
 
 export type AgentRow = typeof schema.agents.$inferSelect;
 export type AgentKind = AgentRow["kind"];
@@ -88,6 +90,48 @@ export async function getAgent(name: string): Promise<AgentRow | null> {
     .where(eq(schema.agents.name, name))
     .limit(1);
   return rows[0] ?? null;
+}
+
+/** How an agent presents in Slack: `chat.postMessage`'s `username` + `icon_url`. */
+export interface AgentRenderIdentity {
+  /** Never null — the display name, falling back to the machine name. */
+  displayName: string;
+  /** Null = Slack renders the default bot icon. */
+  iconUrl: string | null;
+}
+
+/**
+ * Resolve how `agent` should render when posting into `channelId`.
+ *
+ * For every agent this is just its registry row — except the admin. `agents.name`
+ * is the primary key, so the admin is ONE row backing one Durable Object instance
+ * per workspace; its avatar and display name are therefore per-workspace values in
+ * `workspace_configs` (written by the `self_write` tool), not row fields. Reading
+ * the row directly renders every workspace's admin as the seeded "Admin Agent"
+ * with no avatar, so every path that posts as an agent must go through here.
+ */
+export async function agentRenderIdentity(
+  agent: AgentRow,
+  channelId: string
+): Promise<AgentRenderIdentity> {
+  const row: AgentRenderIdentity = {
+    displayName: agent.displayName ?? agent.name,
+    iconUrl: agent.iconUrl ?? null
+  };
+  if (agent.kind !== "admin") return row;
+
+  // The admin only ever posts in its own workspace's admin channel, which is what
+  // put it on this turn in the first place (see router/resolve.ts).
+  const ws = await getWorkspaceByAdminChannel(channelId);
+  if (!ws) return row;
+  const [displayName, iconUrl] = await Promise.all([
+    getAdminDisplayName(ws.id),
+    getAdminIconUrl(ws.id)
+  ]);
+  return {
+    displayName: displayName || row.displayName,
+    iconUrl: iconUrl || row.iconUrl
+  };
 }
 
 export async function listAgents(): Promise<AgentRow[]> {
