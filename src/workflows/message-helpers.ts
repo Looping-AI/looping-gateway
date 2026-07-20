@@ -9,6 +9,7 @@ import {
   type DispatchResult
 } from "@/agents/dispatch";
 import { InvalidEndpointError } from "@/a2a/endpoint";
+import { getPendingAgentTasksByEventId } from "@/db/models/agent-tasks";
 import { renderEditDiff } from "@/util/text-diff";
 import { postReply } from "@/wrappers/slack";
 import {
@@ -194,6 +195,26 @@ export async function signalReactionCollect(eventId: string): Promise<void> {
       eventId,
       err: String(err)
     });
+  }
+}
+
+/**
+ * Collect (remove) the 🛑 reaction only once the whole fan-out for a trigger
+ * event has drained — i.e. no `pending` task remains for it. A single Slack
+ * message can wake several agents; each finishes independently, so the reaction
+ * must linger until the *last* one is terminal (otherwise it clears on the first
+ * completion and the user loses the ability to stop the rest). Called at every
+ * point a task leaves the pending set: a terminal delivery, and the end of the
+ * MessageWorkflow (after non-accepts/unreachables have been unrecorded).
+ *
+ * Race note: this is only reliable because every fan-out row is recorded up front
+ * (before any dispatch), so a fast terminal callback can never observe an
+ * incomplete sibling set and drain early.
+ */
+export async function collectIfEventDrained(eventId: string): Promise<void> {
+  const pending = await getPendingAgentTasksByEventId(eventId);
+  if (pending.length === 0) {
+    await signalReactionCollect(eventId);
   }
 }
 

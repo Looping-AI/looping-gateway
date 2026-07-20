@@ -5,12 +5,15 @@ import { removeReaction, postReply } from "@/wrappers/slack";
 import { getPendingAgentTasksByEventId } from "@/db/models/agent-tasks";
 
 /**
- * Emoji reaction used to signal "the agent is working on this message". Slack's
- * animated hourglass; configurable here in one place. The reaction is *added*
- * inline by the webhook handler (so it shows immediately); this workflow only
- * owns its removal.
+ * Emoji reaction the gateway pre-adds to a trigger message while its agents work.
+ * It doubles as the **cancel affordance**: the human taps this same 🛑 to stop
+ * the run (see the `reaction_added` → CancelWorkflow path), so there's a single
+ * one-tap control instead of a separate "working" indicator and stop emoji.
+ * Configurable here in one place. The reaction is *added* inline by the webhook
+ * handler (so it shows immediately); this workflow only owns its removal, which
+ * happens once the last fan-out task for the message reaches a terminal state.
  */
-export const PENDING_REACTION = "hourglass_flowing_sand";
+export const STOP_REACTION = "octagonal_sign";
 
 /**
  * Event `type` the MessageWorkflow sends once a reply has been posted, telling
@@ -128,7 +131,7 @@ export class ReactionWorkflow extends WorkflowEntrypoint<
       }
 
       await step.do("remove-reaction", () =>
-        removeReaction(p.channelId, p.ts, PENDING_REACTION)
+        removeReaction(p.channelId, p.ts, STOP_REACTION)
       );
     } catch (err) {
       console.error("[reaction] workflow run failed", {

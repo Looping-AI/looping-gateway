@@ -76,6 +76,11 @@
       "class_name": "ReactionWorkflow"
     },
     {
+      "name": "cancel-workflow",
+      "binding": "CANCEL_WORKFLOW",
+      "class_name": "CancelWorkflow"
+    },
+    {
       "name": "maintenance-workflow",
       "binding": "MAINTENANCE_WORKFLOW",
       "class_name": "MaintenanceWorkflow"

@@ -9,16 +9,22 @@ import { isRecord, str } from "@/util/json";
 import { normalizeWhitespace } from "@/util/text-diff";
 import { pickDisplayName } from "@/util/display-name";
 import { getSlackTeamId, setPublicUrl } from "@/db/models/workspace-configs";
-import { PENDING_REACTION, reactionInstanceId } from "@/workflows/reaction";
-import { addReaction } from "@/wrappers/slack";
+import { STOP_REACTION, reactionInstanceId } from "@/workflows/reaction";
+import { addReaction, getBotUserId } from "@/wrappers/slack";
 import { resolveTargets } from "@/router/resolve";
 import type {
   ClassifiedMessageParams,
   MessageWorkflowParams,
   LifecycleWorkflowParams,
+  CancelWorkflowParams,
   Classification
 } from "@/slack/types";
-export type { MessageWorkflowParams, LifecycleWorkflowParams, Classification };
+export type {
+  MessageWorkflowParams,
+  LifecycleWorkflowParams,
+  CancelWorkflowParams,
+  Classification
+};
 
 const LIFECYCLE_EVENT_TYPES = new Set([
   "member_joined_channel",
@@ -106,10 +112,47 @@ function isNoOpEdit(edit: MessageEdit): boolean {
  * envelope on payload.raw, so we classify those from raw.
  */
 export function classifyEvent(payload: SlackWebhookPayload): Classification {
-  switch (payload.kind) {
-    case "url_verification":
-      return { kind: "challenge", challenge: payload.challenge };
+  // Returned above the event-id gate: a challenge carries no `event_id`.
+  if (payload.kind === "url_verification") {
+    return { kind: "challenge", challenge: payload.challenge };
+  }
 
+  // `unsupported` is the adapter's catch-all (`raw: unknown`), so it carries both
+  // real Events API envelopes (lifecycle, reactions, channel messages) and any
+  // other POST that reached this route. Only an `event_callback` envelope is an
+  // event delivery and therefore owes us an `event_id`.
+  const envelope =
+    payload.kind === "unsupported" && isRecord(payload.raw)
+      ? payload.raw
+      : undefined;
+  const isEventDelivery =
+    payload.kind === "app_mention" ||
+    payload.kind === "direct_message" ||
+    str(envelope?.type) === "event_callback";
+  if (!isEventDelivery) {
+    // Slash commands, interactive payloads, `app_rate_limited`, non-Slack POSTs —
+    // acked and dropped as before. These never carry an `event_id`, so they must
+    // clear the gate below rather than be rejected by it.
+    return payload.kind === "unsupported"
+      ? { kind: "ignore", reason: `unsupported event: ${payload.type}` }
+      : { kind: "ignore", reason: `interactive: ${payload.kind}` };
+  }
+
+  // `event_id` is Slack's idempotency key and this gateway's dedupe anchor — the
+  // Message/Reaction/Cancel workflow instance ids and the `agent_tasks` token PK
+  // all derive from it. Minting a substitute (a random UUID) would make a Slack
+  // retry miss every one of those and double-dispatch the whole fan-out, so an
+  // event delivery without one is rejected rather than guessed at. Narrowing this
+  // once here is what lets every branch below use `eventId` directly.
+  const eventId =
+    payload.kind === "app_mention" || payload.kind === "direct_message"
+      ? payload.eventId
+      : str(envelope?.event_id);
+  if (!eventId) {
+    return { kind: "invalid", reason: `${payload.kind} without an event id` };
+  }
+
+  switch (payload.kind) {
     case "app_mention":
       if (!payload.userId) {
         return { kind: "ignore", reason: "app_mention without a user id" };
@@ -117,7 +160,7 @@ export function classifyEvent(payload: SlackWebhookPayload): Classification {
       return {
         kind: "message",
         params: {
-          eventId: payload.eventId ?? crypto.randomUUID(),
+          eventId,
           eventType: "app_mention",
           channelId: payload.channelId,
           threadTs: payload.threadTs,
@@ -147,7 +190,7 @@ export function classifyEvent(payload: SlackWebhookPayload): Classification {
         return {
           kind: "message",
           params: {
-            eventId: payload.eventId ?? crypto.randomUUID(),
+            eventId,
             eventType: "message",
             channelId: payload.channelId,
             threadTs: edit.threadTs ?? payload.threadTs,
@@ -170,7 +213,7 @@ export function classifyEvent(payload: SlackWebhookPayload): Classification {
       return {
         kind: "message",
         params: {
-          eventId: payload.eventId ?? crypto.randomUUID(),
+          eventId,
           eventType: "message",
           channelId: payload.channelId,
           threadTs: payload.threadTs,
@@ -185,10 +228,46 @@ export function classifyEvent(payload: SlackWebhookPayload): Classification {
 
     case "unsupported": {
       const eventType = payload.type;
-      const envelope = isRecord(payload.raw) ? payload.raw : undefined;
       const event =
         envelope && isRecord(envelope.event) ? envelope.event : undefined;
       const subtype = event ? str(event.subtype) : undefined;
+
+      // 🛑 stop reaction → cancel the reacted message's in-flight fan-out. Only
+      // the STOP_REACTION on a message item is actionable; every other emoji and
+      // `reaction_removed` falls through to `ignore`. The reactor (event.user) is
+      // carried so the handler can drop the gateway's own initial reaction.
+      if (eventType === "reaction_added" && event) {
+        const reaction = str(event.reaction);
+        if (reaction !== STOP_REACTION) {
+          return {
+            kind: "ignore",
+            reason: `reaction: ${reaction ?? "unknown"}`
+          };
+        }
+        const item = isRecord(event.item) ? event.item : undefined;
+        const channelId = item ? str(item.channel) : undefined;
+        const ts = item ? str(item.ts) : undefined;
+        const userId = userIdOf(event.user);
+        if (!channelId || !ts) {
+          return {
+            kind: "ignore",
+            reason: "stop reaction without a message item"
+          };
+        }
+        if (!userId) {
+          return { kind: "ignore", reason: "stop reaction without a user id" };
+        }
+        return {
+          kind: "cancel",
+          params: {
+            eventId,
+            channelId,
+            ts,
+            userId,
+            teamId: envelope ? str(envelope.team_id) : undefined
+          }
+        };
+      }
 
       const isLifecycle = LIFECYCLE_EVENT_TYPES.has(eventType);
       if (isLifecycle) {
@@ -210,7 +289,7 @@ export function classifyEvent(payload: SlackWebhookPayload): Classification {
         return {
           kind: "lifecycle",
           params: {
-            eventId: str(envelope?.event_id) ?? crypto.randomUUID(),
+            eventId,
             type: eventType,
             subtype,
             channelId: event ? str(event.channel) : undefined,
@@ -248,7 +327,7 @@ export function classifyEvent(payload: SlackWebhookPayload): Classification {
           return {
             kind: "message",
             params: {
-              eventId: str(envelope?.event_id) ?? crypto.randomUUID(),
+              eventId,
               eventType: "message",
               channelId,
               threadTs: edit.threadTs ?? edit.ts ?? "",
@@ -276,7 +355,7 @@ export function classifyEvent(payload: SlackWebhookPayload): Classification {
         return {
           kind: "message",
           params: {
-            eventId: str(envelope?.event_id) ?? crypto.randomUUID(),
+            eventId,
             eventType: "message",
             channelId,
             threadTs: str(event.thread_ts) ?? ts,
@@ -315,7 +394,7 @@ function isInstanceExistsError(err: unknown): boolean {
 
 async function triggerWorkflow(
   workflow: Workflow,
-  params: MessageWorkflowParams | LifecycleWorkflowParams
+  params: MessageWorkflowParams | LifecycleWorkflowParams | CancelWorkflowParams
 ): Promise<void> {
   const id = params.eventId;
   try {
@@ -342,7 +421,7 @@ async function addPendingReaction(
   params: ClassifiedMessageParams
 ): Promise<void> {
   try {
-    await addReaction(params.channelId, params.ts, PENDING_REACTION);
+    await addReaction(params.channelId, params.ts, STOP_REACTION);
   } catch (err) {
     console.error("[gateway] failed to add pending reaction", {
       eventId: params.eventId,
@@ -475,10 +554,11 @@ async function guardTeamId(
  * Verify the Slack signature, classify the event, run the team-id guard,
  * trigger the matching Workflow, and return 200 before any agent work runs.
  *
- * Returns 401 on bad signature, 403 on team_id mismatch, and 200 for
- * everything else — including ignored events, duplicate event_ids (native
- * dedupe via instance id), and Workflow create failures (logged but not
- * surfaced, since all three tasks run in ctx.waitUntil after the ack).
+ * Returns 401 on bad signature, 403 on team_id mismatch, 400 on a malformed
+ * delivery (an event envelope with no `event_id`), and 200 for everything else —
+ * including ignored events, duplicate event_ids (native dedupe via instance id),
+ * and Workflow create failures (logged but not surfaced, since all three tasks
+ * run in ctx.waitUntil after the ack).
  */
 export async function handleSlackEvent(
   request: Request,
@@ -553,8 +633,35 @@ export async function handleSlackEvent(
       return OK();
     }
 
+    case "cancel": {
+      const guardResponse = await guardTeamId(classification.params.teamId);
+      if (guardResponse) return guardResponse;
+      const params = classification.params;
+      // The gateway pre-adds the 🛑 itself, which fires a reaction_added for the
+      // bot. Filter it here (getBotUserId is cached) so we don't spin a workflow
+      // — and never self-cancel — on our own reaction. Off-path so the ack is
+      // never delayed; the CancelWorkflow dedupes Slack retries by event_id.
+      ctx.waitUntil(
+        (async () => {
+          const botUserId = await getBotUserId();
+          if (botUserId && params.userId === botUserId) return;
+          await triggerWorkflow(env.CANCEL_WORKFLOW, params);
+        })()
+      );
+      return OK();
+    }
+
     case "ignore":
       console.log("[gateway] event ignored", { reason: classification.reason });
       return OK();
+
+    // Malformed enough that acking 200 would hide it. Slack retries a non-2xx up
+    // to 3×, but the defect is deterministic so those also fail and the delivery
+    // surfaces in the app dashboard — which is the point.
+    case "invalid":
+      console.warn("[gateway] event rejected", {
+        reason: classification.reason
+      });
+      return new Response("Bad Request", { status: 400 });
   }
 }

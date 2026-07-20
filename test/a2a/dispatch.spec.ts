@@ -4,6 +4,7 @@ import { jwtVerify } from "jose";
 import {
   _resetIssuerCacheForTest,
   dispatchToAgent,
+  cancelAgentTask,
   buildDispatchId
 } from "@/agents/dispatch";
 import { slackTsToIso } from "@/agents/shared/messages";
@@ -338,5 +339,38 @@ describe("dispatchToAgent (local Durable Object)", () => {
       expect(result.text).toContain("required task acknowledgment");
     }
     expect(posts).toHaveLength(1);
+  });
+});
+
+describe("cancelAgentTask", () => {
+  it("is a no-op for local built-in agents (never contacts them)", async () => {
+    const fetchSpy = vi.fn(async () => new Response("x", { status: 500 }));
+    vi.stubGlobal("fetch", fetchSpy);
+
+    const out = await cancelAgentTask(
+      {
+        name: "admin",
+        kind: "admin",
+        a2aEndpoint: "http://admin.local",
+        workspaceId: 0
+      },
+      "task-1"
+    );
+    expect(out).toEqual({ kind: "not_cancelable" });
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("signs a gateway JWT and cancels a remote task", async () => {
+    await setPublicUrl("https://gateway.test");
+    await setAllowedRemoteAgentDomains(["example.com"]);
+    const posts: RemotePost[] = [];
+    stubRemote(posts);
+
+    const out = await cancelAgentTask(
+      { name: "alpha", kind: "custom", a2aEndpoint: ENDPOINT, workspaceId: 7 },
+      "task-9"
+    );
+    expect(out.kind).toBe("canceled");
+    expect(posts.at(-1)?.authorization).toMatch(/^Bearer /);
   });
 });

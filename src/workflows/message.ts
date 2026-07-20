@@ -1,12 +1,14 @@
 import { WorkflowEntrypoint } from "cloudflare:workers";
 import type { WorkflowEvent, WorkflowStep } from "cloudflare:workers";
 import type { MessageWorkflowParams } from "@/slack/types";
-import { buildDispatchId } from "@/agents/dispatch";
+import { buildDispatchId, cancelAgentTask } from "@/agents/dispatch";
 import { postReply } from "@/wrappers/slack";
 import {
   createAgentTask,
   updateAgentTaskTaskId,
-  deleteAgentTask
+  deleteAgentTask,
+  getAgentTaskByToken,
+  completeAgentTask
 } from "@/db/models/agent-tasks";
 import {
   type AgentPlan,
@@ -14,7 +16,7 @@ import {
   replyThreadTs,
   resolveMessage,
   dispatchMessage,
-  signalReactionCollect,
+  collectIfEventDrained,
   handleUnreachable
 } from "@/workflows/message-helpers";
 
@@ -25,28 +27,34 @@ import {
  * authenticated `/a2a/notifications` callback. Routing by `agent.kind` lives
  * entirely in `dispatchToAgent`, so this path is identical for both.
  *
- * The correlation row is written *before* dispatch so a status update can never
- * outrun the record that routes it to Slack. `createAgentTask` is idempotent on
- * the token PK, so step retries are safe.
+ * The correlation rows are written by a single `record-tasks` step *before* any
+ * dispatch (see {@link MessageWorkflow.run}), so a status update can never outrun
+ * the record that routes it — and a fast terminal callback can never see an
+ * incomplete sibling set and clear the 🛑 early. `token` is that pre-written row.
+ *
+ * Two checkpoints honor a 🛑 that arrives while this dispatch is in flight:
+ *   1. pre-dispatch guard — if a stop was already recorded, skip the send
+ *      entirely (never wake the agent);
+ *   2. post-accept honor — if a stop landed during the send, `tasks/cancel` the
+ *      now-known taskId (the atomic `updateAgentTaskTaskId` reports it).
  */
 async function runAgentTask(
   step: WorkflowStep,
   p: MessageWorkflowParams,
   plan: AgentPlan,
-  threadTs: string | null
+  threadTs: string | null,
+  token: string
 ): Promise<TaskOutcome> {
-  const token = await step.do(`record-task:${plan.agent.name}`, async () => {
-    const dispatchId = await buildDispatchId(p.eventId, plan.agent);
-    await createAgentTask({
-      token: dispatchId,
-      taskId: null,
-      agentName: plan.agent.name,
-      channelId: p.channelId,
-      replyThreadTs: threadTs,
-      eventId: p.eventId
-    });
-    return dispatchId;
-  });
+  // Pre-dispatch guard: a 🛑 already flagged this task → never contact the agent.
+  const guardCanceled = await step.do(`guard-cancel:${plan.agent.name}`, () =>
+    isCancelRequested(token)
+  );
+  if (guardCanceled) {
+    await step.do(`skip-canceled:${plan.agent.name}`, () =>
+      deleteAgentTask(token)
+    );
+    return { kind: "done" };
+  }
 
   let result;
   try {
@@ -64,9 +72,18 @@ async function runAgentTask(
   }
 
   if (result.kind === "accepted") {
-    await step.do(`update-task:${plan.agent.name}`, () =>
-      updateAgentTaskTaskId(token, result.taskId)
+    // Backfill the taskId and atomically learn whether a 🛑 landed mid-send.
+    const cancelRequested = await step.do(
+      `update-task:${plan.agent.name}`,
+      () => updateAgentTaskTaskId(token, result.taskId)
     );
+    if (cancelRequested) {
+      await step.do(`honor-cancel:${plan.agent.name}`, async () => {
+        await cancelAgentTask(plan.agent, result.taskId);
+        await completeAgentTask(token);
+      });
+      return { kind: "done" };
+    }
     return { kind: "accepted" };
   }
 
@@ -94,6 +111,12 @@ async function runAgentTask(
   }
 }
 
+/** True when a stop was recorded for this task before/while it was dispatched. */
+async function isCancelRequested(token: string): Promise<boolean> {
+  const row = await getAgentTaskByToken(token);
+  return Boolean(row?.cancelRequested);
+}
+
 /**
  * Durable workflow for Slack messages dispatched to agents. One instance per
  * Slack `event_id`, handling every woken agent (local built-in and remote
@@ -101,12 +124,12 @@ async function runAgentTask(
  *
  * All agents accept the turn and deliver status snapshots asynchronously:
  * built-ins through a trusted in-process push sender, remotes through the
- * authenticated `/a2a/notifications` callback. While any accepted task is still
- * pending (`anyAccepted`), the ⏳ reaction lingers until its terminal delivery
- * (or the ReactionWorkflow backstop) removes it.
+ * authenticated `/a2a/notifications` callback. The 🛑 reaction lingers until the
+ * *last* pending task of the fan-out is terminal — `collectIfEventDrained` at the
+ * end here (and in every terminal delivery) clears it only when nothing is left.
  *
- * Steps: `resolve` → one `record-task:{name}` + `dispatch:{name}` per agent →
- * `update-task:{name}` on accept → `collect-reaction` when nothing is pending.
+ * Steps: `resolve` → one `record-tasks` (all rows up front) → per agent
+ * `guard-cancel` + `dispatch` + `update-task` (+ `honor-cancel`) → `collect`.
  */
 export class MessageWorkflow extends WorkflowEntrypoint<
   Env,
@@ -119,11 +142,31 @@ export class MessageWorkflow extends WorkflowEntrypoint<
     try {
       const plans = await step.do("resolve", () => resolveMessage(p));
 
+      // Record every fan-out row up front (before any dispatch) so a fast
+      // terminal callback can't observe an incomplete sibling set and drain the
+      // 🛑 early. Deterministic tokens keep this idempotent under step retries.
+      const tokens = await step.do("record-tasks", async () => {
+        const out: string[] = [];
+        for (const plan of plans) {
+          const token = await buildDispatchId(p.eventId, plan.agent);
+          await createAgentTask({
+            token,
+            taskId: null,
+            agentName: plan.agent.name,
+            channelId: p.channelId,
+            messageTs: p.ts,
+            replyThreadTs: threadTs,
+            eventId: p.eventId
+          });
+          out.push(token);
+        }
+        return out;
+      });
+
       const results = await Promise.allSettled(
-        plans.map((plan) => runAgentTask(step, p, plan, threadTs))
+        plans.map((plan, i) => runAgentTask(step, p, plan, threadTs, tokens[i]))
       );
 
-      let anyAccepted = false;
       for (const [i, r] of results.entries()) {
         const plan = plans[i];
         if (r.status === "rejected") {
@@ -136,9 +179,7 @@ export class MessageWorkflow extends WorkflowEntrypoint<
         }
 
         const outcome = r.value;
-        if (outcome.kind === "accepted") {
-          anyAccepted = true;
-        } else if (outcome.kind === "unreachable") {
+        if (outcome.kind === "unreachable") {
           await handleUnreachable(
             step,
             p,
@@ -154,14 +195,10 @@ export class MessageWorkflow extends WorkflowEntrypoint<
         }
       }
 
-      // Clear the ⏳ only when no agent is still working. A pending accepted
-      // task keeps it alive until its push-notification delivery (or the
-      // ReactionWorkflow backstop) removes it.
-      if (!anyAccepted) {
-        await step.do("collect-reaction", () =>
-          signalReactionCollect(p.eventId)
-        );
-      }
+      // Clear the 🛑 only when no agent is still working. A pending accepted task
+      // keeps it alive until its push-notification delivery (or the
+      // ReactionWorkflow backstop) drains the fan-out and removes it.
+      await step.do("collect-reaction", () => collectIfEventDrained(p.eventId));
     } catch (err) {
       console.error("[message] workflow run failed", {
         instanceId: event.instanceId,

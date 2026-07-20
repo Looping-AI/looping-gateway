@@ -1,11 +1,14 @@
 import { describe, it, expect, beforeEach } from "vitest";
+import { env } from "cloudflare:workers";
 import { registerAgent } from "@/db/models/agents";
 import {
   createAgentTask,
   getAgentTaskByToken,
+  getPendingAgentTasksByChannelAndTs,
   completeAgentTask,
   recordReceivedMessageId,
   updateAgentTaskTaskId,
+  markCancelRequested,
   deleteAgentTask,
   sweepStaleAgentTasks,
   type CreateAgentTaskInput
@@ -28,6 +31,7 @@ function input(token: string, over: Partial<CreateAgentTaskInput> = {}) {
     taskId: "task-1",
     agentName: "remoteagent",
     channelId: "C1",
+    messageTs: "1700.1",
     replyThreadTs: null,
     eventId: "Ev1",
     ...over
@@ -42,6 +46,18 @@ describe("agent-tasks model", () => {
     expect(row?.status).toBe("pending");
     expect(row?.channelId).toBe("C1");
     expect(row?.replyThreadTs).toBeNull();
+  });
+
+  // message_ts is the 🛑 stop reaction's only lookup key (a reaction event
+  // carries just item.channel + item.ts), so a NULL would make the row
+  // permanently uncancelable. Pinned at the DB level via raw SQL — the drizzle
+  // types make it unrepresentable through createAgentTask.
+  it("rejects a task row without a message_ts", async () => {
+    await expect(
+      env.DB.prepare(
+        "INSERT INTO agent_tasks (token, agent_name, channel_id, event_id) VALUES ('tok-null-ts', 'remoteagent', 'C1', 'Ev1')"
+      ).run()
+    ).rejects.toThrow(/NOT NULL/i);
   });
 
   it("is idempotent on the token PK (no throw, no clobber)", async () => {
@@ -165,6 +181,77 @@ describe("agent-tasks model", () => {
 
     it("returns false for an unknown token", async () => {
       expect(await recordReceivedMessageId("tok-nope", "msg-1")).toBe(false);
+    });
+  });
+
+  describe("getPendingAgentTasksByChannelAndTs", () => {
+    it("returns every pending task of a trigger message's fan-out", async () => {
+      await createAgentTask(
+        input("fan-a", { channelId: "C9", messageTs: "1800.1" })
+      );
+      await createAgentTask(
+        input("fan-b", { channelId: "C9", messageTs: "1800.1" })
+      );
+      const rows = await getPendingAgentTasksByChannelAndTs("C9", "1800.1");
+      expect(rows.map((r) => r.token).sort()).toEqual(["fan-a", "fan-b"]);
+    });
+
+    it("excludes completed tasks and other channels/timestamps", async () => {
+      await createAgentTask(
+        input("keep", { channelId: "C9", messageTs: "1800.2" })
+      );
+      await createAgentTask(
+        input("done", { channelId: "C9", messageTs: "1800.2" })
+      );
+      await completeAgentTask("done");
+      await createAgentTask(
+        input("other-ts", { channelId: "C9", messageTs: "1800.9" })
+      );
+      await createAgentTask(
+        input("other-ch", { channelId: "C_OTHER", messageTs: "1800.2" })
+      );
+      const rows = await getPendingAgentTasksByChannelAndTs("C9", "1800.2");
+      expect(rows.map((r) => r.token)).toEqual(["keep"]);
+    });
+  });
+
+  describe("cancel handshake (markCancelRequested / updateAgentTaskTaskId)", () => {
+    it("markCancelRequested returns the taskId when the accept already committed", async () => {
+      await createAgentTask(input("mc-a", { taskId: "task-x" }));
+      const res = await markCancelRequested("mc-a");
+      expect(res).toEqual({ matched: true, taskId: "task-x" });
+      expect((await getAgentTaskByToken("mc-a"))?.cancelRequested).toBe(1);
+    });
+
+    it("markCancelRequested records intent (null taskId) before the accept", async () => {
+      await createAgentTask(input("mc-b", { taskId: null }));
+      const res = await markCancelRequested("mc-b");
+      expect(res).toEqual({ matched: true, taskId: null });
+      expect((await getAgentTaskByToken("mc-b"))?.cancelRequested).toBe(1);
+    });
+
+    it("markCancelRequested is a no-op (matched:false) on a completed/unknown row", async () => {
+      await createAgentTask(input("mc-c"));
+      await completeAgentTask("mc-c");
+      expect(await markCancelRequested("mc-c")).toEqual({
+        matched: false,
+        taskId: null
+      });
+      expect(await markCancelRequested("mc-nope")).toEqual({
+        matched: false,
+        taskId: null
+      });
+    });
+
+    it("updateAgentTaskTaskId reports a stop that landed during the send", async () => {
+      // No stop yet → backfills and reports false.
+      await createAgentTask(input("upd-clean", { taskId: null }));
+      expect(await updateAgentTaskTaskId("upd-clean", "task-1")).toBe(false);
+
+      // Stop recorded first (accept-then-tap handshake) → reports true.
+      await createAgentTask(input("upd-stop", { taskId: null }));
+      await markCancelRequested("upd-stop");
+      expect(await updateAgentTaskTaskId("upd-stop", "task-2")).toBe(true);
     });
   });
 });

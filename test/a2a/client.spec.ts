@@ -1,6 +1,10 @@
 import { describe, it, expect, afterEach, vi } from "vitest";
 import type { Message, Task } from "@a2a-js/sdk";
-import { sendA2ARemote, sanitizeAgentReply } from "@/a2a/client";
+import {
+  sendA2ARemote,
+  cancelA2ARemote,
+  sanitizeAgentReply
+} from "@/a2a/client";
 import { buildAgentCard } from "@/a2a/card";
 
 const ENDPOINT = "https://remote.example.com/a2a";
@@ -151,6 +155,113 @@ describe("sendA2ARemote — async remote accept", () => {
       { url: "https://gw.example.com/a2a/notifications", token: "n" }
     );
     expect(result).toEqual({ kind: "contract_violation" });
+  });
+});
+
+/**
+ * Stub a remote whose GET serves the card and whose POST returns a fixed
+ * JSON-RPC payload (a result or an error), so we can drive `tasks/cancel`
+ * through the SDK client's typed-error mapping.
+ */
+function stubRemoteRpc(postPayload: (id: unknown) => unknown) {
+  const card = buildAgentCard({
+    name: "Remote",
+    description: "remote test agent",
+    url: ENDPOINT
+  });
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const isReq = input instanceof Request;
+      const method = init?.method ?? (isReq ? input.method : "GET");
+      const body = isReq
+        ? await input.clone().text()
+        : String(init?.body ?? "");
+      if (method.toUpperCase() === "POST") {
+        let id: unknown = 1;
+        try {
+          id = JSON.parse(body).id ?? 1;
+        } catch {
+          /* ignore */
+        }
+        return new Response(JSON.stringify(postPayload(id)), {
+          status: 200,
+          headers: { "content-type": "application/json" }
+        });
+      }
+      return new Response(JSON.stringify(card), {
+        status: 200,
+        headers: { "content-type": "application/json" }
+      });
+    })
+  );
+}
+
+const rpcResult = (id: unknown, result: unknown) => ({
+  jsonrpc: "2.0",
+  id,
+  result
+});
+const rpcError = (id: unknown, code: number, message = "err") => ({
+  jsonrpc: "2.0",
+  id,
+  error: { code, message }
+});
+
+describe("cancelA2ARemote — A2A tasks/cancel", () => {
+  it("returns canceled with the updated task on success", async () => {
+    const canceled: Task = {
+      kind: "task",
+      id: "task-9",
+      contextId: "C1:T1",
+      status: { state: "canceled" }
+    };
+    stubRemoteRpc((id) => rpcResult(id, canceled));
+
+    const out = await cancelA2ARemote(
+      { endpoint: ENDPOINT, authToken: "t" },
+      "task-9"
+    );
+    expect(out.kind).toBe("canceled");
+    if (out.kind === "canceled") {
+      expect(out.task.status.state).toBe("canceled");
+    }
+  });
+
+  it("maps -32002 to not_cancelable (already terminal)", async () => {
+    stubRemoteRpc((id) => rpcError(id, -32002));
+    const out = await cancelA2ARemote(
+      { endpoint: ENDPOINT, authToken: "t" },
+      "task-9"
+    );
+    expect(out).toEqual({ kind: "not_cancelable" });
+  });
+
+  it("maps -32001 to not_found (idempotent no-op)", async () => {
+    stubRemoteRpc((id) => rpcError(id, -32001));
+    const out = await cancelA2ARemote(
+      { endpoint: ENDPOINT, authToken: "t" },
+      "task-9"
+    );
+    expect(out).toEqual({ kind: "not_found" });
+  });
+
+  it("maps -32004 to unsupported (agent doesn't implement cancel)", async () => {
+    stubRemoteRpc((id) => rpcError(id, -32004));
+    const out = await cancelA2ARemote(
+      { endpoint: ENDPOINT, authToken: "t" },
+      "task-9"
+    );
+    expect(out).toEqual({ kind: "unsupported" });
+  });
+
+  it("maps any other error code to error", async () => {
+    stubRemoteRpc((id) => rpcError(id, -32603, "boom"));
+    const out = await cancelA2ARemote(
+      { endpoint: ENDPOINT, authToken: "t" },
+      "task-9"
+    );
+    expect(out.kind).toBe("error");
   });
 });
 

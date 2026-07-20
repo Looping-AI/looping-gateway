@@ -129,6 +129,7 @@ beforeEach(async () => {
     taskId: "task-1",
     agentName: "remoteagent",
     channelId: "C1",
+    messageTs: "1700.1",
     replyThreadTs: null,
     eventId: "Ev1"
   });
@@ -370,6 +371,7 @@ describe("handleRemoteAgentNotification", () => {
       taskId: "local-task",
       agentName: "adminlocal",
       channelId: "C-local",
+      messageTs: "1700.1",
       replyThreadTs: null,
       eventId: "Ev-local"
     });
@@ -410,6 +412,7 @@ describe("handleRemoteAgentNotification", () => {
       taskId: "local-sanitize-task",
       agentName: "adminsanitize",
       channelId: "C-local",
+      messageTs: "1700.1",
       replyThreadTs: null,
       eventId: "Ev-local-sanitize"
     });
@@ -443,6 +446,7 @@ describe("handleRemoteAgentNotification", () => {
       taskId: "local-public-task",
       agentName: "adminpublic",
       channelId: "C-local",
+      messageTs: "1700.1",
       replyThreadTs: null,
       eventId: "Ev-local-public"
     });
@@ -481,6 +485,7 @@ describe("handleRemoteAgentNotification", () => {
       taskId: "local-sender-task",
       agentName: "adminsender",
       channelId: "C-local",
+      messageTs: "1700.1",
       replyThreadTs: null,
       eventId: "Ev-local-sender"
     });

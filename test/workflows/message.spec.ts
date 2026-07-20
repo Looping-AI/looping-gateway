@@ -7,7 +7,7 @@ import {
   getPendingAgentTasksByEventId
 } from "@/db/models/agent-tasks";
 import { AGENT_UNREACHABLE_BASE_TEXT } from "@/workflows/message-helpers";
-import { PENDING_REACTION } from "@/workflows/reaction";
+import { STOP_REACTION } from "@/workflows/reaction";
 import { buildDispatchId, _resetIssuerCacheForTest } from "@/agents/dispatch";
 import {
   setAllowedRemoteAgentDomains,
@@ -453,7 +453,7 @@ describe("MessageWorkflow — remote custom agents", () => {
         "reactions.remove"
       ]);
       expect(slackReactions[0]).toMatchObject({
-        name: PENDING_REACTION,
+        name: STOP_REACTION,
         channel: REMOTE_CHANNEL
       });
     } finally {

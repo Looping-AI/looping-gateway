@@ -1,0 +1,1 @@
+CREATE INDEX `idx_agent_tasks_event_id` ON `agent_tasks` (`event_id`);

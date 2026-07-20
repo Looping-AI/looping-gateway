@@ -5,7 +5,12 @@ import { signGatewayToken, type RemoteIdentity } from "@/auth/agent-outbound";
 import type { AgentRow } from "@/db/models/agents";
 import { buildAgentCard } from "@/a2a/card";
 import { localPushNotificationConfig } from "@/a2a/notifications/local";
-import { sendA2ALocal, sendA2ARemote } from "@/a2a/client";
+import {
+  sendA2ALocal,
+  sendA2ARemote,
+  cancelA2ARemote,
+  type CancelOutcome
+} from "@/a2a/client";
 import { originOf, validateRemoteEndpoint } from "@/a2a/endpoint";
 import {
   getAllowedRemoteAgentDomains,
@@ -320,4 +325,45 @@ export async function dispatchToAgent(
     kind: "error_reply",
     text: "Local agent did not provide the required task acknowledgment."
   };
+}
+
+/**
+ * Ask an agent to cancel an in-flight task via the standard A2A `tasks/cancel`.
+ * Mirrors the remote branch of {@link dispatchToAgent}: SSRF/allowlist validation
+ * plus a freshly signed gateway-identity JWT (audience = the endpoint origin),
+ * then the cancel call. The response is authoritative — the gateway reconciles
+ * from it and expects no push callback afterwards.
+ *
+ * Local built-ins run as a single blocking turn (no concurrent request can
+ * interrupt them and they finish in seconds), so cancellation is a no-op for
+ * them in v1 — reported as `not_cancelable` so the caller still reconciles its
+ * ledger row without contacting anything.
+ */
+export async function cancelAgentTask(
+  agent: DispatchAgentRef,
+  taskId: string
+): Promise<CancelOutcome> {
+  if (LOCAL_BINDINGS[agent.kind]) {
+    return { kind: "not_cancelable" };
+  }
+
+  const allowedDomains = await getAllowedRemoteAgentDomains();
+  validateRemoteEndpoint(agent.a2aEndpoint, allowedDomains);
+
+  const issuer = await resolveIssuer();
+  if (!issuer) {
+    throw new Error(
+      "Gateway public URL has not been discovered yet; cannot sign a cancel request."
+    );
+  }
+  const gatewayToken = await signGatewayToken({
+    audience: originOf(agent.a2aEndpoint),
+    issuer,
+    identity: buildRemoteIdentity(agent)
+  });
+
+  return cancelA2ARemote(
+    { endpoint: agent.a2aEndpoint, authToken: gatewayToken },
+    taskId
+  );
 }

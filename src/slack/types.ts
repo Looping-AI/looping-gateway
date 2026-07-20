@@ -41,6 +41,23 @@ export interface LifecycleWorkflowParams {
 }
 
 /**
+ * CancelWorkflow input — a human tapped the 🛑 stop reaction on a trigger
+ * message. Carries the reacted message's coordinates (`channelId` + `ts`) so the
+ * workflow can look up that message's pending fan-out, plus the reactor (`userId`,
+ * so the gateway's own initial 🛑 can be filtered out).
+ */
+export interface CancelWorkflowParams {
+  /** The reaction event's own Slack `event_id` (dedupe key for Slack retries). */
+  eventId: string;
+  channelId: string;
+  /** `ts` of the reacted-to (trigger) message. */
+  ts: string;
+  /** Slack user who added the reaction. */
+  userId: string;
+  teamId?: string;
+}
+
+/**
  * Params for the parallel ReactionWorkflow that owns the ⏳ "thinking" reaction
  * on a trigger message: add on receipt, remove once the reply is posted (or on a
  * timeout backstop). Keyed off the same Slack `eventId` as the MessageWorkflow.
@@ -60,4 +77,11 @@ export type Classification =
   | { kind: "challenge"; challenge: string }
   | { kind: "message"; params: ClassifiedMessageParams }
   | { kind: "lifecycle"; params: LifecycleWorkflowParams }
-  | { kind: "ignore"; reason: string };
+  | { kind: "cancel"; params: CancelWorkflowParams }
+  | { kind: "ignore"; reason: string }
+  /**
+   * Malformed delivery — acked with a 4xx rather than a 200, so the failure is
+   * visible in Slack's app dashboard instead of silently swallowed. Distinct from
+   * `ignore`, which is a well-formed event we simply have no interest in.
+   */
+  | { kind: "invalid"; reason: string };
