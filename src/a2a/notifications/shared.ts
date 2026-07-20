@@ -36,11 +36,10 @@ export async function deliverTaskToSlack(
   const state = task.status.state;
   const text = sanitizeAgentReply(extractText(task));
   // Resolved per delivery rather than carried from dispatch, so a rename or a
-  // regenerated avatar mid-turn takes effect on the reply it produced.
-  const { displayName, iconUrl } = await agentRenderIdentity(
-    agent,
-    row.channelId
-  );
+  // regenerated avatar mid-turn takes effect on the reply it produced. Deferred
+  // until we know we are posting: most status updates are deduplicated or empty,
+  // and for the admin agent this resolution costs extra config reads.
+  const renderIdentity = () => agentRenderIdentity(agent, row.channelId);
 
   if (!isTerminalTaskState(state)) {
     const updateId = task.status.message?.messageId;
@@ -52,6 +51,7 @@ export async function deliverTaskToSlack(
 
     const isNew = await recordReceivedMessageId(token, updateId);
     if (isNew && text) {
+      const { displayName, iconUrl } = await renderIdentity();
       await postReply(
         row.channelId,
         row.replyThreadTs,
@@ -67,16 +67,15 @@ export async function deliverTaskToSlack(
   // cancel workflow already posted "🛑 Stopped." Treat `canceled` like
   // `completed` and stay silent; only real failures get the notice.
   const isChosenOutcome = state === "completed" || state === "canceled";
-  const body =
-    text || (isChosenOutcome ? "" : terminalFailureNotice(displayName, state));
 
   // Post before completion so a delivery failure leaves the row pending for a
   // retry. A replay after completion becomes a no-op at the boundary.
-  if (body) {
+  if (text || !isChosenOutcome) {
+    const { displayName, iconUrl } = await renderIdentity();
     await postReply(
       row.channelId,
       row.replyThreadTs,
-      body,
+      text || terminalFailureNotice(displayName, state),
       displayName,
       iconUrl
     );
