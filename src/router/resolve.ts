@@ -1,10 +1,6 @@
 import type { AgentRow } from "@/db/models/agents";
 import { getAgent, getAgentsForChannel } from "@/db/models/agents";
 import { getWorkspaceByAdminChannel } from "@/db/models/workspaces";
-import {
-  getAdminIconUrl,
-  getAdminDisplayName
-} from "@/db/models/workspace-configs";
 import { getSlackChannelName } from "@/db/models/channels";
 import { findAllAgentNameMentions } from "./parse";
 
@@ -87,25 +83,14 @@ export async function resolveTargets(
     }
   }
 
-  // Admin channel → admin built-in (proactive co-worker). The admin is a single
-  // shared registry row, so its workspace-specific avatar and display name (set by
-  // the admin agent and kept in workspace_configs) override the row's fields here.
+  // Admin channel → admin built-in (proactive co-worker). Its workspace-specific
+  // avatar and display name are NOT layered on here: the admin is a single shared
+  // registry row and how it renders is resolved at delivery time from the
+  // workspace it posts into (see `agentRenderIdentity`). Overriding the row here
+  // too would be a second source of truth for the same thing.
   if (ws) {
     const admin = await getAgent("admin");
-    if (admin?.enabled) {
-      const [iconUrl, displayName] = await Promise.all([
-        getAdminIconUrl(ws.id),
-        getAdminDisplayName(ws.id)
-      ]);
-      add(
-        {
-          ...admin,
-          ...(displayName ? { displayName } : {}),
-          ...(iconUrl ? { iconUrl } : {})
-        },
-        ws.id
-      );
-    }
+    if (admin?.enabled) add(admin, ws.id);
   }
   // DM → onboarding built-in (DM is an implicit mention).
   if (isDm) {

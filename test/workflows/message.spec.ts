@@ -55,6 +55,18 @@ describe("MessageWorkflow — local built-in agents", () => {
     return calls;
   }
 
+  /**
+   * A built-in agent's reply is delivered by the DO's push sender on
+   * `ctx.waitUntil`, not by the workflow — so the workflow reaching `complete`
+   * says nothing about the reply having landed. Poll for it (same reason the
+   * delivery-failure test below polls its task row).
+   */
+  async function waitForCalls(calls: PostCall[], n: number): Promise<void> {
+    for (let i = 0; i < 50 && calls.length < n; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+  }
+
   let seq = 0;
   function makeDmRequest(channelId: string, text: string) {
     const eventId = `Ev-local-dm-${++seq}`;
@@ -91,6 +103,7 @@ describe("MessageWorkflow — local built-in agents", () => {
       // either way this asserts the plumbing: Workflow → A2A → AdminAgent DO
       // (Session over SQLite) → channel-level reply. The AI text itself is covered
       // by the executor unit test and the manual e2e.
+      await waitForCalls(calls, 1);
       expect(calls).toHaveLength(1);
       expect(calls[0]).toMatchObject({ channel: "C_ORGADMIN" });
       expect(calls[0].thread_ts).toBeUndefined();
@@ -117,6 +130,7 @@ describe("MessageWorkflow — local built-in agents", () => {
       // plumbing: Workflow → A2A → OnboardingAgent DO (Session over SQLite) →
       // channel-level reply (no thread). The AI text is covered by the executor
       // unit test and the manual e2e.
+      await waitForCalls(calls, 1);
       expect(calls).toHaveLength(1);
       expect(calls[0]).toMatchObject({ channel: "D1" });
       expect(calls[0].thread_ts).toBeUndefined();

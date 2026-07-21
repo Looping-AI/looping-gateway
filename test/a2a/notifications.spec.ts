@@ -4,8 +4,11 @@ import { InMemoryPushNotificationStore } from "@a2a-js/sdk/server";
 import { registerAgent } from "@/db/models/agents";
 import {
   setPublicUrl,
-  setAllowedRemoteAgentDomains
+  setAllowedRemoteAgentDomains,
+  setAdminDisplayName,
+  setAdminIconUrl
 } from "@/db/models/workspace-configs";
+import { upsertWorkspace } from "@/db/models/workspaces";
 import {
   createAgentTask,
   getAgentTaskByToken,
@@ -34,6 +37,8 @@ interface SlackPost {
   channel: string;
   text: string;
   thread_ts?: string;
+  username?: string;
+  icon_url?: string;
 }
 
 /** Stub fetch to serve the pinned JWKS and capture Slack chat.postMessage calls. */
@@ -61,7 +66,9 @@ function stubFetch(key: TestKey, posts: SlackPost[]) {
         posts.push({
           channel: body.get("channel") ?? "",
           text: body.get("text") ?? "",
-          thread_ts: body.get("thread_ts") ?? undefined
+          thread_ts: body.get("thread_ts") ?? undefined,
+          username: body.get("username") ?? undefined,
+          icon_url: body.get("icon_url") ?? undefined
         });
         return Response.json({ ok: true, ts: "1700.9" });
       }
@@ -394,6 +401,70 @@ describe("handleRemoteAgentNotification", () => {
     expect((await getAgentTaskByToken("local-token"))?.status).toBe(
       "completed"
     );
+  });
+
+  it("renders the admin under its per-workspace avatar and display name", async () => {
+    const posts: SlackPost[] = [];
+    stubFetch(key, posts);
+    // The real admin: one shared registry row (no icon, seeded display name)
+    // whose identity lives per workspace in workspace_configs.
+    await upsertWorkspace({
+      id: 7,
+      name: "ws7",
+      adminChannelId: "C-ws7-admin"
+    });
+    await setAdminDisplayName(7, "Ops Bot");
+    await setAdminIconUrl(7, "https://gw.example.com/icons/7/admin/abc123.jpg");
+    await createAgentTask({
+      token: "admin-ws-token",
+      taskId: "admin-ws-task",
+      agentName: "admin",
+      channelId: "C-ws7-admin",
+      messageTs: "1700.1",
+      replyThreadTs: null,
+      eventId: "Ev-admin-ws"
+    });
+
+    await deliverLocalAgentTask(
+      "admin-ws-token",
+      makeTask("registry updated"),
+      "admin"
+    );
+
+    expect(posts).toHaveLength(1);
+    expect(posts[0].username).toBe("Ops Bot");
+    expect(posts[0].icon_url).toBe(
+      "https://gw.example.com/icons/7/admin/abc123.jpg"
+    );
+  });
+
+  it("falls back to the admin registry row when the workspace set no avatar", async () => {
+    const posts: SlackPost[] = [];
+    stubFetch(key, posts);
+    await upsertWorkspace({
+      id: 8,
+      name: "ws8",
+      adminChannelId: "C-ws8-admin"
+    });
+    await createAgentTask({
+      token: "admin-plain-token",
+      taskId: "admin-plain-task",
+      agentName: "admin",
+      channelId: "C-ws8-admin",
+      messageTs: "1700.1",
+      replyThreadTs: null,
+      eventId: "Ev-admin-plain"
+    });
+
+    await deliverLocalAgentTask(
+      "admin-plain-token",
+      makeTask("registry updated"),
+      "admin"
+    );
+
+    expect(posts).toHaveLength(1);
+    expect(posts[0].username).toBe("Admin Agent");
+    expect(posts[0].icon_url).toBeUndefined();
   });
 
   it("sanitizes a local built-in reply before posting (defangs broadcast sequences)", async () => {

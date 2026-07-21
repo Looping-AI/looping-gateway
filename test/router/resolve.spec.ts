@@ -57,36 +57,16 @@ describe("resolveTargets — built-in context routing", () => {
     expect(t.find((x) => x.agent.name === "admin")?.workspaceId).toBe(1);
   });
 
-  it("overrides the admin iconUrl with the per-workspace avatar when set", async () => {
+  // Routing resolves WHICH agent runs, not how it renders — the admin's
+  // per-workspace avatar/display name are layered on at delivery time by
+  // `agentRenderIdentity` (see test/db/models/agents.spec.ts).
+  it("returns the shared admin row unmodified by the workspace's overrides", async () => {
     await setAdminIconUrl(1, "https://gw.example.com/icons/1/admin/abc.jpg");
-    const t = await resolveTargets({ channelId: "C_WS1ADMIN", text: "hi" });
-    const admin = t.find((x) => x.agent.name === "admin");
-    expect(admin?.agent.iconUrl).toBe(
-      "https://gw.example.com/icons/1/admin/abc.jpg"
-    );
-    // Other workspaces are unaffected (seeded admin row has no icon).
-    const org = await resolveTargets({
-      channelId: "C_ORGADMIN",
-      text: "hi"
-    });
-    expect(
-      org.find((x) => x.agent.name === "admin")?.agent.iconUrl ?? null
-    ).toBeNull();
-  });
-
-  it("overrides the admin displayName with the per-workspace value when set", async () => {
     await setAdminDisplayName(1, "Ops Bot");
     const t = await resolveTargets({ channelId: "C_WS1ADMIN", text: "hi" });
     const admin = t.find((x) => x.agent.name === "admin");
-    expect(admin?.agent.displayName).toBe("Ops Bot");
-    // Other workspaces keep the seeded admin displayName.
-    const org = await resolveTargets({
-      channelId: "C_ORGADMIN",
-      text: "hi"
-    });
-    expect(
-      org.find((x) => x.agent.name === "admin")?.agent.displayName
-    ).not.toBe("Ops Bot");
+    expect(admin?.agent.iconUrl ?? null).toBeNull();
+    expect(admin?.agent.displayName).toBe("Admin Agent");
   });
 
   it("a DM always includes onboarding (DM is an implicit mention)", async () => {

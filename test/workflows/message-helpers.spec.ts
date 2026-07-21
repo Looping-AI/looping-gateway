@@ -179,8 +179,6 @@ describe("dispatchMessage", () => {
       workspaceId: 1,
       text: "hello",
       channelName: null,
-      displayName: "Blocked Agent",
-      iconUrl: null,
       user: {
         slackUserId: "U1",
         displayName: null,
