@@ -53,7 +53,7 @@ describe("renderEditDiff", () => {
     expect(out).toContain("[-aa-][+AA+] mid [-bb-][+BB+]");
   });
 
-  it("completes in under 50ms for a fully-different 4000-char input", () => {
+  it("completes in under 100ms for a fully-different 4000-char input", () => {
     // Build two strings of 4000 printable chars (codes 33–126), spaced every 5
     // chars. Offset the second by 47 (half of the 94-char range) so every word
     // is a different token — worst case for the LCS diff.
@@ -74,7 +74,7 @@ describe("renderEditDiff", () => {
 
     // Baseline is ~25ms locally; the loose ceiling guards against an algorithmic
     // regression (O(n³) or worse would be seconds) without flaking on slower CI.
-    expect(elapsed).toBeLessThan(50);
+    expect(elapsed).toBeLessThan(100);
 
     // Wholesale rewrite: the new side is sent in full (the agent needs it), but
     // the old side is peeked — so we still send far less than resending both.
