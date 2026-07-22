@@ -1,8 +1,12 @@
 import type { Message } from "@a2a-js/sdk";
-import type { UserAuthContext } from "@/auth";
+import { buildUserAuthContext, type UserAuthContext } from "@/auth";
 import { env } from "cloudflare:workers";
 import { signGatewayToken, type RemoteIdentity } from "@/auth/agent-outbound";
-import type { AgentRow } from "@/db/models/agents";
+import { getAgent, type AgentRow } from "@/db/models/agents";
+import { getWorkspaceByAdminChannel } from "@/db/models/workspaces";
+import { resumeFromInput } from "@/db/models/agent-tasks";
+import type { HitlRequestRow } from "@/db/models/hitl-requests";
+import { buildHitlResponseParts, buildHitlTimeoutParts } from "@/a2a/hitl";
 import { buildAgentCard } from "@/a2a/card";
 import { localPushNotificationConfig } from "@/a2a/notifications/local";
 import {
@@ -325,6 +329,207 @@ export async function dispatchToAgent(
     kind: "error_reply",
     text: "Local agent did not provide the required task acknowledgment."
   };
+}
+
+/** A human's answer to a HITL prompt, as captured from Slack. */
+export interface HitlAnswer {
+  /** The chosen option id (absent for a pure freeform answer). */
+  optionId?: string;
+  /** Freeform text the human typed, if any. */
+  text?: string;
+  /** Slack user id of whoever answered. */
+  answeredBy: string;
+  /** Human-readable answer for the resume TextPart (option label or freeform). */
+  humanText: string;
+}
+
+/**
+ * The caller a system-initiated continuation (a HITL timeout) authorizes as when
+ * there is no human answerer. Zero permissions: a timed-out prompt should let a
+ * local agent finalize, never perform a privileged write on nobody's behalf.
+ */
+const SYSTEM_CALLER: UserAuthContext = {
+  slackUserId: "gateway",
+  displayName: "gateway",
+  isPrimaryOwner: false,
+  isOrgAdmin: false,
+  adminWorkspaces: []
+};
+
+/**
+ * Continue a task parked on a human-in-the-loop prompt. Mirrors
+ * {@link dispatchToAgent}'s two branches but *continues* an existing task rather
+ * than starting one: the message carries the paused `taskId` + `contextId` +
+ * `referenceTaskIds` (A2A multi-turn), and the push config reuses the original
+ * `token` so continued callbacks land on the same `agent_tasks` row. On a
+ * successful accept the row is un-parked (`resumeFromInput`) so the resumed
+ * turn's callbacks are honored again. Shared by the human-answer path
+ * ({@link resumeAgentTask}) and the TTL-timeout path ({@link timeoutAgentTask});
+ * the `messageId` is deterministic so a retried continuation dedupes at the agent.
+ */
+async function sendTaskContinuation(
+  row: HitlRequestRow,
+  input: { parts: Message["parts"]; messageId: string; caller: UserAuthContext }
+): Promise<void> {
+  const agent = await getAgent(row.agentName);
+  if (!agent) {
+    console.error("[hitl] continuation: agent no longer registered", {
+      agent: row.agentName,
+      requestId: row.requestId
+    });
+    return;
+  }
+  if (!row.taskId) {
+    // A parked task always has a taskId (it was accepted before it could park),
+    // so this is defensive — without one there is nothing to continue.
+    console.error("[hitl] continuation: request has no taskId", {
+      requestId: row.requestId
+    });
+    return;
+  }
+
+  const bindingName = LOCAL_BINDINGS[agent.kind];
+
+  if (!bindingName) {
+    // Custom agent → real HTTP, same identity/endpoint checks as dispatch.
+    const allowedDomains = await getAllowedRemoteAgentDomains();
+    validateRemoteEndpoint(agent.a2aEndpoint, allowedDomains);
+    const issuer = await resolveIssuer();
+    if (!issuer) {
+      console.error("[hitl] continuation: gateway public URL not discovered", {
+        requestId: row.requestId
+      });
+      return;
+    }
+    const ref: DispatchAgentRef = {
+      name: agent.name,
+      kind: agent.kind,
+      a2aEndpoint: agent.a2aEndpoint,
+      workspaceId: agent.workspaceId
+    };
+    const gatewayToken = await signGatewayToken({
+      audience: originOf(agent.a2aEndpoint),
+      issuer,
+      identity: buildRemoteIdentity(ref)
+    });
+    const message: Message = {
+      kind: "message",
+      messageId: input.messageId,
+      role: "user",
+      taskId: row.taskId,
+      contextId: row.contextId,
+      referenceTaskIds: [row.taskId],
+      parts: input.parts,
+      metadata: { agentKind: "custom", workspaceId: agent.workspaceId }
+    };
+    const accept = await sendA2ARemote(
+      { endpoint: agent.a2aEndpoint, authToken: gatewayToken },
+      message,
+      { url: `${issuer}/a2a/notifications`, token: row.token }
+    );
+    if (accept.kind === "accepted") {
+      await resumeFromInput(row.token);
+    } else {
+      console.error("[hitl] continuation: remote did not accept", {
+        agent: agent.name,
+        requestId: row.requestId
+      });
+    }
+    return;
+  }
+
+  // Local built-in → in-process via DO stub.fetch. The DO instance is
+  // reconstructed from the caller/channel — the same keys the message workflow
+  // used (admin: the channel's workspace; onboarding: the DM's user).
+  let metadata: AgentTurnMetadata;
+  if (agent.kind === "admin") {
+    const workspace = await getWorkspaceByAdminChannel(row.channelId);
+    if (!workspace) {
+      console.error("[hitl] continuation: admin channel has no workspace", {
+        channelId: row.channelId,
+        requestId: row.requestId
+      });
+      return;
+    }
+    metadata = {
+      user: input.caller,
+      agentKind: "admin",
+      adminWorkspaceId: workspace.id
+    };
+  } else {
+    metadata = { user: input.caller, agentKind: "onboarding" };
+  }
+
+  const message: Message = {
+    kind: "message",
+    messageId: input.messageId,
+    role: "user",
+    taskId: row.taskId,
+    contextId: row.contextId,
+    referenceTaskIds: [row.taskId],
+    parts: input.parts,
+    metadata: { ...metadata }
+  };
+  const instanceName = instanceNameFor(metadata);
+  const ns = (env as unknown as Record<string, unknown>)[
+    bindingName
+  ] as DurableObjectNamespace;
+  const stub = ns.get(ns.idFromName(instanceName));
+  const fetchImpl = ((input2: RequestInfo | URL, init?: RequestInit) =>
+    stub.fetch(input2 as RequestInfo, init)) as typeof fetch;
+  const card = buildAgentCard({
+    name: agent.name,
+    description: `Local ${agent.kind} agent`,
+    pushNotifications: true
+  });
+  const accept = await sendA2ALocal(
+    { card, fetchImpl },
+    message,
+    localPushNotificationConfig(row.token)
+  );
+  if (accept.kind === "accepted") {
+    await resumeFromInput(row.token);
+  } else {
+    console.error("[hitl] continuation: local agent did not accept", {
+      agent: agent.name,
+      requestId: row.requestId
+    });
+  }
+}
+
+/**
+ * Resume a parked task with a human's answer. The answerer becomes the caller
+ * (anyone in the thread may answer), so a resumed local turn authorizes as them.
+ */
+export async function resumeAgentTask(
+  row: HitlRequestRow,
+  answer: HitlAnswer
+): Promise<void> {
+  const caller = await buildUserAuthContext(answer.answeredBy);
+  await sendTaskContinuation(row, {
+    parts: buildHitlResponseParts({
+      requestId: row.requestId,
+      optionId: answer.optionId,
+      text: answer.text,
+      answeredBy: answer.answeredBy,
+      humanText: answer.humanText
+    }),
+    messageId: `${row.token}:r:${row.requestId}`,
+    caller
+  });
+}
+
+/**
+ * End a parked task whose HITL prompt hit its TTL: send a timeout signal so the
+ * agent can finalize gracefully. Authorizes as the zero-permission
+ * {@link SYSTEM_CALLER} since no human answered.
+ */
+export async function timeoutAgentTask(row: HitlRequestRow): Promise<void> {
+  await sendTaskContinuation(row, {
+    parts: buildHitlTimeoutParts(row.requestId),
+    messageId: `${row.token}:t:${row.requestId}`,
+    caller: SYSTEM_CALLER
+  });
 }
 
 /**

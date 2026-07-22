@@ -1,4 +1,4 @@
-import { and, eq, lt, sql } from "drizzle-orm";
+import { and, eq, lt, ne, sql } from "drizzle-orm";
 import { getDb } from "../client";
 import * as schema from "../schema";
 
@@ -45,11 +45,12 @@ export async function createAgentTask(
 }
 
 /**
- * Pending (not-yet-completed) tasks triggered by a specific Slack message,
- * looked up by `(channelId, messageTs)`. This is the reverse index a 🛑 stop
- * reaction uses: the reaction event carries only the reacted message's channel
- * and ts, and one trigger message can fan out to several agents (all sharing the
- * same trigger ts), so this returns the whole fan-out to cancel together.
+ * Not-yet-completed tasks triggered by a specific Slack message, looked up by
+ * `(channelId, messageTs)`. This is the reverse index a 🛑 stop reaction uses:
+ * the reaction event carries only the reacted message's channel and ts, and one
+ * trigger message can fan out to several agents (all sharing the same trigger
+ * ts), so this returns the whole fan-out to cancel together. Includes
+ * `awaiting-input` tasks so a 🛑 can still stop a run parked on a human prompt.
  */
 export async function getPendingAgentTasksByChannelAndTs(
   channelId: string,
@@ -63,7 +64,7 @@ export async function getPendingAgentTasksByChannelAndTs(
       and(
         eq(schema.agentTasks.channelId, channelId),
         eq(schema.agentTasks.messageTs, messageTs),
-        eq(schema.agentTasks.status, "pending")
+        ne(schema.agentTasks.status, "completed")
       )
     );
 }
@@ -95,7 +96,12 @@ export async function isCancelRequested(token: string): Promise<boolean> {
   return Boolean(row?.cancelRequested);
 }
 
-/** Pending (not-yet-completed) tasks for a Slack trigger event — the reaction backstop reads these. */
+/**
+ * Not-yet-completed tasks for a Slack trigger event — the drain check and the
+ * reaction backstop read these. Includes `awaiting-input` so a task parked on a
+ * human prompt keeps the fan-out from draining early (the 🛑 lingers while any
+ * sibling is still working or awaiting an answer).
+ */
 export async function getPendingAgentTasksByEventId(
   eventId: string
 ): Promise<AgentTaskRow[]> {
@@ -106,7 +112,7 @@ export async function getPendingAgentTasksByEventId(
     .where(
       and(
         eq(schema.agentTasks.eventId, eventId),
-        eq(schema.agentTasks.status, "pending")
+        ne(schema.agentTasks.status, "completed")
       )
     );
 }
@@ -251,9 +257,54 @@ export async function recordReceivedMessageId(
 }
 
 /**
- * Mark a task completed. Conditional on it still being `pending` so a duplicate
- * or replayed callback flips exactly one row — the returned count is the caller's
- * idempotency signal (1 = we own this callback; 0 = already handled).
+ * Park a task while a human-in-the-loop prompt is open: `pending` →
+ * `awaiting-input`. Non-terminal, so the fan-out stays undrained (🛑 still
+ * cancels), but every `pending`-conditional mutator becomes a safe no-op until
+ * {@link resumeFromInput}. Conditional on `pending` so a task the callback
+ * already completed (or a duplicate `input-required` push) is untouched.
+ */
+export async function suspendForInput(token: string): Promise<boolean> {
+  const db = getDb();
+  const rows = await db
+    .update(schema.agentTasks)
+    .set({ status: "awaiting-input" })
+    .where(
+      and(
+        eq(schema.agentTasks.token, token),
+        eq(schema.agentTasks.status, "pending")
+      )
+    )
+    .returning({ token: schema.agentTasks.token });
+  return rows.length > 0;
+}
+
+/**
+ * Un-park a task after its human answer is sent back onto it: `awaiting-input`
+ * → `pending`, so the resumed turn's callbacks (progress + terminal) are honored
+ * again. Conditional on `awaiting-input` so an already-resumed/cancelled row is a
+ * no-op.
+ */
+export async function resumeFromInput(token: string): Promise<boolean> {
+  const db = getDb();
+  const rows = await db
+    .update(schema.agentTasks)
+    .set({ status: "pending" })
+    .where(
+      and(
+        eq(schema.agentTasks.token, token),
+        eq(schema.agentTasks.status, "awaiting-input")
+      )
+    )
+    .returning({ token: schema.agentTasks.token });
+  return rows.length > 0;
+}
+
+/**
+ * Mark a task completed. Conditional on it not already being `completed` so a
+ * duplicate or replayed callback flips exactly one row — the returned count is
+ * the caller's idempotency signal (1 = we own this callback; 0 = already
+ * handled). Completes from `pending` (the normal terminal callback) or from
+ * `awaiting-input` (a 🛑 that cancels a task parked on a human prompt).
  */
 export async function completeAgentTask(token: string): Promise<boolean> {
   const db = getDb();
@@ -263,7 +314,7 @@ export async function completeAgentTask(token: string): Promise<boolean> {
     .where(
       and(
         eq(schema.agentTasks.token, token),
-        eq(schema.agentTasks.status, "pending")
+        ne(schema.agentTasks.status, "completed")
       )
     )
     .returning({ token: schema.agentTasks.token });

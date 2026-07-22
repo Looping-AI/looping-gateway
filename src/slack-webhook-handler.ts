@@ -514,7 +514,7 @@ async function discoverPublicUrl(request: Request): Promise<void> {
  * Uses an isolate-level memo so D1 is read at most once per isolate lifetime.
  * Until the anchor is pinned in D1, each request does a single D1 read.
  */
-async function guardTeamId(
+export async function guardTeamId(
   eventTeamId: string | undefined
 ): Promise<Response | null> {
   if (!eventTeamId) return null; // no team_id in this event — skip check

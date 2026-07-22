@@ -187,8 +187,14 @@ export const agentTasks = sqliteTable(
     replyThreadTs: text("reply_thread_ts"),
     // Slack event id of the triggering message — used to collect the 🛑 reaction.
     eventId: text("event_id").notNull(),
-    // `pending` until a terminal callback posts (or classifies no-reply) and marks it.
-    status: text("status", { enum: ["pending", "completed"] })
+    // `pending` until a terminal callback posts (or classifies no-reply) and marks
+    // it `completed`. `awaiting-input` is the parked state while a human-in-the-loop
+    // prompt is open (see `hitl_requests`): the row is non-terminal (so the fan-out
+    // stays undrained and 🛑 still cancels) but every `pending`-conditional mutator
+    // is a safe no-op until `resumeFromInput` flips it back to `pending`.
+    status: text("status", {
+      enum: ["pending", "awaiting-input", "completed"]
+    })
       .notNull()
       .default("pending"),
     // A stop was requested (via the 🛑 reaction) before this task's accept
@@ -211,6 +217,78 @@ export const agentTasks = sqliteTable(
     // Drain check: every task leaving the pending set asks "any sibling left for
     // this event?", so this runs N+1 times per fan-out — the table's hottest read.
     index("idx_agent_tasks_event_id").on(t.eventId)
+  ]
+);
+
+/**
+ * Human-in-the-loop (HITL) prompts — one row per open approval/question an agent
+ * raised by transitioning its task to `input-required`. This is the correlation
+ * store between a Slack interactive message and the paused A2A task: when a human
+ * clicks a button (or submits the freeform modal), the interactivity handler
+ * looks the row up by `requestId` (the value encoded into the Slack action id),
+ * records the answer atomically (first-click-wins), and resumes the task on the
+ * same `token` (so continued callbacks land on the paired `agent_tasks` row).
+ *
+ * Keyed by the agent-chosen `requestId`. Lifecycle: `awaiting` → `answered`
+ * (a human decided) | `expired` (TTL swept) | `canceled` (🛑 while parked).
+ */
+export const hitlRequests = sqliteTable(
+  "hitl_requests",
+  {
+    // Agent-chosen unique id for this prompt (PK). Encoded into the Slack action
+    // ids by inputRequestToSlackBlocks, echoed back on the interaction, and used
+    // to correlate the answer to this row. `createHitlRequest` is idempotent on
+    // it so an at-least-once push redelivery does not double-post the prompt.
+    requestId: text("request_id").primaryKey(),
+    // The paired agent_tasks correlation token (= A2A push token). Resume reuses
+    // it so the continued task's callbacks land on the same agent_tasks row.
+    token: text("token").notNull(),
+    // A2A Task id being paused (captured from the delivered Task, for the resume).
+    taskId: text("task_id"),
+    // A2A contextId of the paused task — required to resume on the same thread of
+    // conversation (A2A multi-turn continues with the same taskId + contextId).
+    contextId: text("context_id").notNull(),
+    agentName: text("agent_name")
+      .notNull()
+      .references(() => agents.name),
+    channelId: text("channel_id").notNull(),
+    // Thread the prompt was posted into; null = channel top-level.
+    threadTs: text("thread_ts"),
+    // ts of the posted Block Kit prompt — used to chat.update it to an answered /
+    // expired / canceled state (a Slack response_url expires after ~30 min, and a
+    // 7-day TTL far outlives that, so we always update by ts, never response_url).
+    slackMessageTs: text("slack_message_ts"),
+    requestKind: text("request_kind", {
+      enum: ["approval", "choice"]
+    }).notNull(),
+    promptText: text("prompt_text").notNull(),
+    // JSON-encoded SlackInputOption[] as rendered — the source of truth for the
+    // answered-state label and for validating/looking up the chosen optionId.
+    optionsJson: text("options_json"),
+    allowFreeform: integer("allow_freeform").notNull().default(0),
+    status: text("status", {
+      enum: ["awaiting", "answered", "expired", "canceled"]
+    })
+      .notNull()
+      .default("awaiting"),
+    // Slack user id of whoever answered (anyone in the thread may).
+    answeredBy: text("answered_by"),
+    answeredOptionId: text("answered_option_id"),
+    answerText: text("answer_text"),
+    createdAt: timestamp("created_at"),
+    // Unix-seconds expiry (createdAt + HITL_REQUEST_TTL_SECONDS). The maintenance
+    // sweep expires any `awaiting` row past this.
+    deadlineAt: integer("deadline_at").notNull(),
+    answeredAt: integer("answered_at")
+  },
+  (t) => [
+    // Cancel/expire-by-task: a 🛑 on the trigger message resolves the whole
+    // fan-out's open prompts by their shared token.
+    index("idx_hitl_requests_token").on(t.token),
+    // Expiry sweep: scan open prompts by deadline.
+    index("idx_hitl_requests_status_deadline").on(t.status, t.deadlineAt),
+    // Retention sweep: delete resolved rows older than the cutoff by createdAt.
+    index("idx_hitl_requests_created_at").on(t.createdAt)
   ]
 );
 

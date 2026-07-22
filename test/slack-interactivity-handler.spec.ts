@@ -1,0 +1,259 @@
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import {
+  createExecutionContext,
+  waitOnExecutionContext
+} from "cloudflare:test";
+import type { Message } from "@a2a-js/sdk";
+import { registerAgent } from "@/db/models/agents";
+import {
+  setPublicUrl,
+  setAllowedRemoteAgentDomains
+} from "@/db/models/workspace-configs";
+import {
+  createAgentTask,
+  suspendForInput,
+  getAgentTaskByToken
+} from "@/db/models/agent-tasks";
+import {
+  createHitlRequest,
+  setHitlSlackMessageTs,
+  getHitlRequest
+} from "@/db/models/hitl-requests";
+import { _resetIssuerCacheForTest } from "@/agents/dispatch";
+import { buildAgentCard } from "@/a2a/card";
+import { HITL_RESPONSE_TYPE } from "@/a2a/hitl";
+import { handleSlackInteractivity } from "@/slack-interactivity-handler";
+import { slackHeaders } from "./helpers/slack";
+
+const ENDPOINT = "https://remote.example.com/a2a";
+const ISSUER = "https://gw.example.com";
+
+interface Captured {
+  slackUpdates: URLSearchParams[];
+  slackEphemerals: URLSearchParams[];
+  resumeMessages: Message[];
+}
+
+/** Route Slack API calls and the remote A2A send to a single capturing stub. */
+function stub(captured: Captured) {
+  const card = buildAgentCard({
+    name: "Remote",
+    description: "remote agent",
+    url: ENDPOINT
+  });
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const request =
+        input instanceof Request ? input : new Request(input, init);
+      const url = request.url;
+      if (url.includes("chat.update")) {
+        captured.slackUpdates.push(
+          new URLSearchParams(await request.clone().text())
+        );
+        return Response.json({ ok: true, ts: "1700.9" });
+      }
+      if (url.includes("chat.postEphemeral")) {
+        captured.slackEphemerals.push(
+          new URLSearchParams(await request.clone().text())
+        );
+        return Response.json({ ok: true, message_ts: "1700.99" });
+      }
+      // A2A: card discovery (GET) + message/send (POST).
+      if (request.method.toUpperCase() === "POST") {
+        const rpc = (await request.clone().json()) as {
+          id?: unknown;
+          params?: { message?: Message };
+        };
+        captured.resumeMessages.push(rpc.params?.message as Message);
+        return Response.json({
+          jsonrpc: "2.0",
+          id: rpc.id ?? 1,
+          result: {
+            kind: "task",
+            id: "task-remote-1",
+            contextId: "reply",
+            status: { state: "submitted" }
+          }
+        });
+      }
+      return Response.json(card);
+    })
+  );
+}
+
+/** A signed Slack Interactivity POST (form-encoded `payload=`). */
+async function interactivityRequest(payload: unknown): Promise<Request> {
+  const body = `payload=${encodeURIComponent(JSON.stringify(payload))}`;
+  const headers = await slackHeaders(body);
+  return new Request(`${ISSUER}/slack/interactivity`, {
+    method: "POST",
+    headers: {
+      ...headers,
+      "Content-Type": "application/x-www-form-urlencoded"
+    },
+    body
+  });
+}
+
+function buttonAction(requestId: string, optionId: string) {
+  return {
+    type: "block_actions",
+    user: { id: "U1" },
+    trigger_id: "trig-1",
+    channel: { id: "C1" },
+    message: { ts: "1700.9" },
+    actions: [
+      {
+        action_id: `input:${requestId}:button:0`,
+        value: optionId,
+        type: "button"
+      }
+    ]
+  };
+}
+
+async function seedParkedRequest(requestId: string) {
+  await createAgentTask({
+    token: "tok-1",
+    taskId: "task-1",
+    agentName: "remoteagent",
+    channelId: "C1",
+    messageTs: "1700.1",
+    replyThreadTs: "1700.1",
+    eventId: "Ev1"
+  });
+  await suspendForInput("tok-1");
+  await createHitlRequest({
+    requestId,
+    token: "tok-1",
+    taskId: "task-1",
+    contextId: "reply",
+    agentName: "remoteagent",
+    channelId: "C1",
+    threadTs: "1700.1",
+    requestKind: "approval",
+    promptText: "Proceed?",
+    optionsJson: JSON.stringify([
+      { id: "approve", label: "Approve" },
+      { id: "reject", label: "Reject" }
+    ]),
+    allowFreeform: false,
+    deadlineAt: Math.floor(Date.now() / 1000) + 600
+  });
+  // Simulate the prompt having been posted, so the answered-state update targets it.
+  await setHitlSlackMessageTs(requestId, "1700.9");
+}
+
+beforeEach(async () => {
+  _resetIssuerCacheForTest();
+  await setPublicUrl(ISSUER);
+  await setAllowedRemoteAgentDomains(["remote.example.com"]);
+  await registerAgent({
+    name: "remoteagent",
+    kind: "custom",
+    a2aEndpoint: ENDPOINT,
+    notifyOn: "mention",
+    workspaceId: 0
+  });
+});
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
+
+describe("handleSlackInteractivity", () => {
+  it("rejects a request with a bad signature", async () => {
+    const req = new Request(`${ISSUER}/slack/interactivity`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+        "x-slack-request-timestamp": "1",
+        "x-slack-signature": "v0=deadbeef"
+      },
+      body: "payload=%7B%7D"
+    });
+    const ctx = createExecutionContext();
+    const res = await handleSlackInteractivity(req, ctx);
+    await waitOnExecutionContext(ctx);
+    expect(res.status).toBe(401);
+  });
+
+  it("claims a button answer, updates Slack, and resumes the task", async () => {
+    await seedParkedRequest("req-1");
+    const captured: Captured = {
+      slackUpdates: [],
+      slackEphemerals: [],
+      resumeMessages: []
+    };
+    stub(captured);
+
+    const ctx = createExecutionContext();
+    const res = await handleSlackInteractivity(
+      await interactivityRequest(buttonAction("req-1", "approve")),
+      ctx
+    );
+    await waitOnExecutionContext(ctx);
+
+    expect(res.status).toBe(200);
+
+    // Request is now answered by U1.
+    const row = await getHitlRequest("req-1");
+    expect(row?.status).toBe("answered");
+    expect(row?.answeredBy).toBe("U1");
+    expect(row?.answeredOptionId).toBe("approve");
+
+    // Slack prompt updated to the answered state.
+    expect(captured.slackUpdates).toHaveLength(1);
+
+    // Task resumed: an A2A continuation went to the remote carrying the answer.
+    expect(captured.resumeMessages).toHaveLength(1);
+    const resume = captured.resumeMessages[0];
+    expect(resume.taskId).toBe("task-1");
+    expect(resume.referenceTaskIds).toEqual(["task-1"]);
+    const dataPart = resume.parts.find((p) => p.kind === "data");
+    expect(dataPart).toMatchObject({
+      data: {
+        type: HITL_RESPONSE_TYPE,
+        requestId: "req-1",
+        optionId: "approve"
+      }
+    });
+    // The human-readable option label rides in the TextPart.
+    const textPart = resume.parts.find((p) => p.kind === "text");
+    expect(textPart).toMatchObject({ text: "Approve" });
+
+    // The paired task row is un-parked.
+    expect((await getAgentTaskByToken("tok-1"))?.status).toBe("pending");
+  });
+
+  it("posts an ephemeral and does not resume when already answered", async () => {
+    await seedParkedRequest("req-2");
+    const captured: Captured = {
+      slackUpdates: [],
+      slackEphemerals: [],
+      resumeMessages: []
+    };
+    stub(captured);
+
+    // First answer wins.
+    const ctx1 = createExecutionContext();
+    await handleSlackInteractivity(
+      await interactivityRequest(buttonAction("req-2", "approve")),
+      ctx1
+    );
+    await waitOnExecutionContext(ctx1);
+
+    // Second click on the same (now answered) prompt.
+    const ctx2 = createExecutionContext();
+    await handleSlackInteractivity(
+      await interactivityRequest(buttonAction("req-2", "reject")),
+      ctx2
+    );
+    await waitOnExecutionContext(ctx2);
+
+    expect(captured.resumeMessages).toHaveLength(1); // only the first resumed
+    expect(captured.slackEphemerals).toHaveLength(1); // second got a notice
+    expect(captured.slackEphemerals[0].get("user")).toBe("U1");
+  });
+});
