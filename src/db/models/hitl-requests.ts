@@ -162,9 +162,10 @@ export async function expireStaleHitlRequests(
 }
 
 /**
- * Delete resolved rows older than `olderThanSeconds` (default 30 days). Keeps
- * the table bounded; open (`awaiting`) rows are never swept — they expire via
- * {@link expireStaleHitlRequests} first, which is bounded by the 7-day TTL.
+ * Delete rows older than `olderThanSeconds` (default 30 days) regardless of
+ * status, keeping the table bounded. In practice `awaiting` rows are resolved
+ * long before the cutoff — they expire via {@link expireStaleHitlRequests},
+ * bounded by the 7-day TTL — so this reaps only already-terminal rows.
  */
 export async function sweepStaleHitlRequests(
   olderThanSeconds = ONE_MONTH_SECONDS

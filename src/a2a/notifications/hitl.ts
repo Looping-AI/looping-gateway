@@ -84,8 +84,15 @@ export async function deliverHitlRequest(
     }
   }
 
-  // Park the task: non-terminal, so 🛑 still cancels and the fan-out doesn't drain.
-  await suspendForInput(token);
+  // Park the task (pending → awaiting-input): non-terminal, so 🛑 still cancels
+  // and the fan-out doesn't drain. When we recorded this request fresh but the
+  // park matched no `pending` row, a terminal callback or a 🛑 completed the task
+  // between the boundary's `row` snapshot and here — it can no longer be resumed,
+  // so don't post an unanswerable prompt. (A `created`-false re-post is the
+  // crash-recovery path, whose task was already parked, so a false park there is
+  // expected — let it re-post.)
+  const parked = await suspendForInput(token);
+  if (created && !parked) return;
 
   const { displayName, iconUrl } = await agentRenderIdentity(
     agent,

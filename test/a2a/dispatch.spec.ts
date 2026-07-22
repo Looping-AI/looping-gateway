@@ -1,10 +1,11 @@
-import { describe, it, expect, afterEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import type { Message } from "@a2a-js/sdk";
 import { jwtVerify } from "jose";
 import {
   _resetIssuerCacheForTest,
   dispatchToAgent,
   cancelAgentTask,
+  timeoutAgentTask,
   buildDispatchId
 } from "@/agents/dispatch";
 import { slackTsToIso } from "@/agents/shared/messages";
@@ -12,6 +13,18 @@ import type { UserAuthContext } from "@/auth";
 import { IDENTITY_CLAIM } from "@/auth/agent-outbound";
 import { importGatewayPublicKey } from "../helpers/auth";
 import { buildAgentCard } from "@/a2a/card";
+import { HITL_TIMEOUT_TYPE } from "@/a2a/hitl";
+import { registerAgent } from "@/db/models/agents";
+import {
+  createAgentTask,
+  suspendForInput,
+  getAgentTaskByToken
+} from "@/db/models/agent-tasks";
+import {
+  createHitlRequest,
+  getHitlRequest,
+  type HitlRequestRow
+} from "@/db/models/hitl-requests";
 import {
   setAllowedRemoteAgentDomains,
   setPublicUrl
@@ -372,5 +385,127 @@ describe("cancelAgentTask", () => {
     );
     expect(out.kind).toBe("canceled");
     expect(posts.at(-1)?.authorization).toMatch(/^Bearer /);
+  });
+});
+
+// The TTL-timeout continuation: when a HITL prompt expires with no answer, the
+// gateway continues the parked task with a HITL_TIMEOUT DataPart so the agent can
+// finalize, authorizing as the zero-permission SYSTEM_CALLER. This exercises the
+// remote branch of sendTaskContinuation (custom-agent HTTP), which the human-answer
+// path (resumeAgentTask) shares — the timeout branch was previously uncovered.
+describe("timeoutAgentTask (remote continuation)", () => {
+  const TOKEN = "tok-timeout";
+  const TASK_ID = "task-1";
+  const CONTEXT_ID = "C1:1700.1";
+  const REQUEST_ID = "req-timeout-1";
+
+  // Register a custom (remote) agent, record its dispatched task, and park it on an
+  // open HITL prompt — the exact state a timeout sweep continues from. Returns the
+  // persisted request row that timeoutAgentTask consumes.
+  async function setupParkedRow(): Promise<HitlRequestRow> {
+    await registerAgent({
+      name: "alpha",
+      kind: "custom",
+      a2aEndpoint: ENDPOINT,
+      notifyOn: "mention",
+      workspaceId: 0
+    });
+    await createAgentTask({
+      token: TOKEN,
+      taskId: TASK_ID,
+      agentName: "alpha",
+      channelId: "C1",
+      messageTs: "1700.1",
+      replyThreadTs: "1700.1",
+      eventId: "Ev-timeout"
+    });
+    // pending → awaiting-input: the task is suspended while the prompt is open.
+    await suspendForInput(TOKEN);
+    await createHitlRequest({
+      requestId: REQUEST_ID,
+      token: TOKEN,
+      taskId: TASK_ID,
+      contextId: CONTEXT_ID,
+      agentName: "alpha",
+      channelId: "C1",
+      threadTs: "1700.1",
+      requestKind: "approval",
+      promptText: "Proceed?",
+      optionsJson: null,
+      allowFreeform: false,
+      deadlineAt: Math.floor(Date.now() / 1000) - 1
+    });
+    const row = await getHitlRequest(REQUEST_ID);
+    if (!row) throw new Error("failed to seed HITL request row");
+    return row;
+  }
+
+  beforeEach(async () => {
+    await setPublicUrl("https://gateway.test");
+    await setAllowedRemoteAgentDomains(["example.com"]);
+  });
+
+  it("continues the paused task with a timeout DataPart, then un-parks it on accept", async () => {
+    const posts: RemotePost[] = [];
+    stubRemote(posts);
+    const row = await setupParkedRow();
+
+    await timeoutAgentTask(row);
+
+    expect(posts).toHaveLength(1);
+    const msg = posts[0].message;
+    // Authorized as the signed gateway identity (SYSTEM_CALLER never crosses the
+    // remote boundary — only the gateway-agent JWT does).
+    expect(posts[0].authorization?.startsWith("Bearer ")).toBe(true);
+    // A2A multi-turn: continue the same task on the same thread of conversation.
+    expect(msg.taskId).toBe(TASK_ID);
+    expect(msg.contextId).toBe(CONTEXT_ID);
+    expect(msg.referenceTaskIds).toEqual([TASK_ID]);
+    // Deterministic, request-scoped messageId so a retried timeout dedupes at the remote.
+    expect(msg.messageId).toBe(`${TOKEN}:t:${REQUEST_ID}`);
+    // Carries the HITL timeout signal (human-readable TextPart + structured DataPart).
+    expect(msg.parts).toEqual([
+      {
+        kind: "text",
+        text: "(No response was received within the allotted time.)"
+      },
+      { kind: "data", data: { type: HITL_TIMEOUT_TYPE, requestId: REQUEST_ID } }
+    ]);
+    // Only routing extras on the wire — no caller/permission context.
+    expect(msg.metadata).toEqual({ agentKind: "custom", workspaceId: 0 });
+
+    // Accepted → the row is un-parked (awaiting-input → pending) so the resumed
+    // turn's terminal callback is honored on the same agent_tasks row.
+    expect((await getAgentTaskByToken(TOKEN))?.status).toBe("pending");
+  });
+
+  it("reuses a stable messageId across an at-least-once retry and only un-parks once", async () => {
+    const posts: RemotePost[] = [];
+    stubRemote(posts);
+    const row = await setupParkedRow();
+
+    await timeoutAgentTask(row);
+    await timeoutAgentTask(row); // same timeout redelivered
+
+    expect(posts).toHaveLength(2);
+    // Identical id both times → the remote collapses the duplicate rather than
+    // appending the timeout turn twice.
+    expect(posts[0].message.messageId).toBe(`${TOKEN}:t:${REQUEST_ID}`);
+    expect(posts[1].message.messageId).toBe(posts[0].message.messageId);
+    // Still pending: the second resumeFromInput is a no-op (already un-parked).
+    expect((await getAgentTaskByToken(TOKEN))?.status).toBe("pending");
+  });
+
+  it("leaves the task parked when the remote does not accept the continuation", async () => {
+    const posts: RemotePost[] = [];
+    stubRemoteContractViolation(posts);
+    const row = await setupParkedRow();
+
+    await timeoutAgentTask(row);
+
+    expect(posts).toHaveLength(1);
+    // No Task ack → resumeFromInput is skipped, so the row stays suspended and a
+    // later sweep can retry rather than stranding it as un-parked-but-unresumed.
+    expect((await getAgentTaskByToken(TOKEN))?.status).toBe("awaiting-input");
   });
 });

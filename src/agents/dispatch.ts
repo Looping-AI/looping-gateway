@@ -164,13 +164,23 @@ export function buildRemoteContextId(
   );
 }
 
-// Built-in local agents map their `kind` to a Durable Object namespace binding.
-// Routing is decided by `kind` (not the endpoint): a kind in this map is local,
-// everything else (custom) is reached over HTTP at its `a2aEndpoint`.
-const LOCAL_BINDINGS: Partial<Record<AgentRow["kind"], keyof Env>> = {
-  admin: "AdminAgent",
-  onboarding: "OnboardingAgent"
-};
+// The Durable Object namespace for a built-in local agent `kind`, or `undefined`
+// for custom agents (reached over HTTP at their `a2aEndpoint`). Routing is decided
+// by `kind`, not the endpoint: a kind that resolves to a namespace here is local.
+// Direct `env` access keeps the binding types intact — renaming a binding fails to
+// compile here rather than string-indexing `env` and casting the type away.
+function localNamespaceFor(
+  kind: AgentRow["kind"]
+): DurableObjectNamespace | undefined {
+  switch (kind) {
+    case "admin":
+      return env.AdminAgent;
+    case "onboarding":
+      return env.OnboardingAgent;
+    default:
+      return undefined;
+  }
+}
 
 /**
  * Durable Object instance name for a local agent. The admin agent runs **one
@@ -214,7 +224,7 @@ export async function dispatchToAgent(
   payload: DispatchPayload
 ): Promise<DispatchResult> {
   const localContextId = buildContextId(payload.channelId, payload.threadTs);
-  const bindingName = LOCAL_BINDINGS[agent.kind];
+  const ns = localNamespaceFor(agent.kind);
 
   // Deterministic per-dispatch id → the A2A `messageId` (dedupe key) and, for
   // remotes, the push `token`. Stable across retries so re-delivery is idempotent.
@@ -226,7 +236,7 @@ export async function dispatchToAgent(
   // it back from the text. See renderTurn / parseTurn in shared/messages.
   const text = renderTurn(payload.text, turnContextFromPayload(payload));
 
-  if (!bindingName) {
+  if (!ns) {
     // Custom agent → real HTTP. The caller's identity travels in a short-lived,
     // EdDSA-signed gateway JWT (verified by the remote against our public JWKS),
     // NOT as plaintext `message.metadata` — so a remote agent can neither read
@@ -305,9 +315,6 @@ export async function dispatchToAgent(
 
   const instanceName = instanceNameFor(metadata);
 
-  const ns = (env as unknown as Record<string, unknown>)[
-    bindingName
-  ] as DurableObjectNamespace;
   const stub = ns.get(ns.idFromName(instanceName));
   const fetchImpl = ((input: RequestInfo | URL, init?: RequestInit) =>
     stub.fetch(input as RequestInfo, init)) as typeof fetch;
@@ -388,9 +395,9 @@ async function sendTaskContinuation(
     return;
   }
 
-  const bindingName = LOCAL_BINDINGS[agent.kind];
+  const ns = localNamespaceFor(agent.kind);
 
-  if (!bindingName) {
+  if (!ns) {
     // Custom agent → real HTTP, same identity/endpoint checks as dispatch.
     const allowedDomains = await getAllowedRemoteAgentDomains();
     validateRemoteEndpoint(agent.a2aEndpoint, allowedDomains);
@@ -471,9 +478,6 @@ async function sendTaskContinuation(
     metadata: { ...metadata }
   };
   const instanceName = instanceNameFor(metadata);
-  const ns = (env as unknown as Record<string, unknown>)[
-    bindingName
-  ] as DurableObjectNamespace;
   const stub = ns.get(ns.idFromName(instanceName));
   const fetchImpl = ((input2: RequestInfo | URL, init?: RequestInit) =>
     stub.fetch(input2 as RequestInfo, init)) as typeof fetch;
@@ -548,7 +552,7 @@ export async function cancelAgentTask(
   agent: DispatchAgentRef,
   taskId: string
 ): Promise<CancelOutcome> {
-  if (LOCAL_BINDINGS[agent.kind]) {
+  if (localNamespaceFor(agent.kind)) {
     return { kind: "not_cancelable" };
   }
 

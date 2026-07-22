@@ -1,7 +1,11 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import type { Task, TaskState } from "@a2a-js/sdk";
 import { registerAgent, getAgent } from "@/db/models/agents";
-import { createAgentTask, getAgentTaskByToken } from "@/db/models/agent-tasks";
+import {
+  completeAgentTask,
+  createAgentTask,
+  getAgentTaskByToken
+} from "@/db/models/agent-tasks";
 import { getHitlRequest } from "@/db/models/hitl-requests";
 import { deliverTaskToSlack } from "@/a2a/notifications/shared";
 import { HITL_REQUEST_TYPE } from "@/a2a/hitl";
@@ -137,6 +141,31 @@ describe("deliverTaskToSlack — HITL input-required branch", () => {
     await deliver(hitlTask("req-del-2"));
     await deliver(hitlTask("req-del-2")); // same requestId redelivered
     expect(posts).toHaveLength(1);
+  });
+
+  it("does not post a prompt when the task completed concurrently", async () => {
+    const posts: SlackPost[] = [];
+    stubFetch(posts);
+
+    // A stale snapshot: the delivery boundary reads `row` (still pending) before
+    // dispatching, then a terminal callback or 🛑 completes the task before this
+    // input-required update parks it. `suspendForInput` no-ops against the now
+    // completed row, so posting would strand a prompt whose answer can't resume.
+    const staleRow = await getAgentTaskByToken("tok-del");
+    await completeAgentTask("tok-del");
+
+    const agent = await getAgent("remoteagent");
+    await deliverTaskToSlack(
+      "tok-del",
+      staleRow!,
+      agent!,
+      hitlTask("req-race")
+    );
+
+    // No interactive prompt for a task that can no longer be resumed.
+    expect(posts).toHaveLength(0);
+    // The task stays terminal — the park was a no-op.
+    expect((await getAgentTaskByToken("tok-del"))?.status).toBe("completed");
   });
 
   it("falls back to a plain reply for input-required without a HITL DataPart", async () => {
