@@ -174,13 +174,17 @@ export function buildHitlRequestParts(req: HitlRequest): Part[] {
   ];
 }
 
-const hitlResponseSchema = z.object({
-  type: z.literal(HITL_RESPONSE_TYPE),
-  requestId: z.string().min(1),
-  optionId: z.string().optional(),
-  text: z.string().optional(),
-  answeredBy: z.string().min(1)
-});
+const hitlResponseSchema = z
+  .object({
+    type: z.literal(HITL_RESPONSE_TYPE),
+    requestId: z.string().min(1),
+    optionId: z.string().min(1).optional(),
+    text: z.string().min(1).optional(),
+    answeredBy: z.string().min(1)
+  })
+  .refine((data) => data.optionId !== undefined || data.text !== undefined, {
+    message: "HITL response must include optionId or text"
+  });
 
 export type HitlResponse = z.infer<typeof hitlResponseSchema>;
 

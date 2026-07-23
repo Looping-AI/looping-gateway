@@ -253,6 +253,23 @@ describe("parseHitlResponse", () => {
     expect(parseHitlResponse(msg(parts))?.text).toBe("something else");
     expect(parseHitlResponse(msg([{ kind: "text", text: "hi" }]))).toBeNull();
   });
+
+  it("returns null for a malformed response with neither optionId nor text", () => {
+    expect(
+      parseHitlResponse(
+        msg([
+          {
+            kind: "data",
+            data: {
+              type: HITL_RESPONSE_TYPE,
+              requestId: "req-3",
+              answeredBy: "U9"
+            }
+          }
+        ])
+      )
+    ).toBeNull();
+  });
 });
 
 describe("parseHitlTimeout", () => {
