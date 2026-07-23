@@ -115,7 +115,13 @@ export class LocalPushNotificationSender implements PushNotificationSender {
     // The terminal snapshot is the last delivery for this task; release the
     // liveness barrier only once it has settled (delivered, or failed and
     // recorded — `deliver` never rejects), so `ctx.waitUntil` spans the whole turn.
-    if (isTerminalTaskState(task.status.state)) {
+    // A local agent emits `input-required` only via the HITL park path, which ends
+    // the turn (the human answers on a later, separate invocation), so treat it as
+    // a settle point too — otherwise the DO idles until the safety timeout.
+    if (
+      isTerminalTaskState(task.status.state) ||
+      task.status.state === "input-required"
+    ) {
       void this.deliveryChain.finally(() => this.resolveSettled(task.id));
     }
     return delivery;
