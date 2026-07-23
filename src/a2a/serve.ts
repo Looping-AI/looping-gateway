@@ -37,7 +37,7 @@ export async function serveA2A(
 
     // Async generators are only returned for streaming methods, which we don't
     // advertise; reject rather than half-consume a stream.
-    if (Symbol.asyncIterator in (result as object)) {
+    if (Symbol.asyncIterator in result) {
       return {
         response: new Response("streaming not supported", { status: 501 })
       };
