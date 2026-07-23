@@ -4,12 +4,20 @@ import type { HitlRequest } from "@/a2a/hitl";
 import type { GatedAction } from "@/agents/admin/approvals";
 import {
   agentsRead,
-  agentsWrite,
+  agentsCreate,
+  agentsUpdate,
+  agentsAllowChannel,
+  agentsRevokeChannel,
+  agentsRegenerateAvatar,
+  agentsDelete,
   askUser,
   workspaceRead,
-  workspaceWrite,
-  remoteAgentDomains,
-  selfWrite,
+  workspaceCreate,
+  agentsDomainsList,
+  agentsDomainsAdd,
+  agentsDomainsRemove,
+  selfSetAvatar,
+  selfSetDisplayName,
   buildAdminTools,
   type AdminToolDeps
 } from "@/agents/admin/tools";
@@ -44,12 +52,11 @@ function deps(wsId: number, c: UserAuthContext | null): AdminToolDeps {
   };
 }
 
-describe("admin tools — agents_write / agents_read", () => {
+describe("admin tools — agents_create / agents_read", () => {
   it("registers a custom agent scoped to the workspace and reads it back", async () => {
     const wsId = await freshWsId("tools-ws-a");
     const d = deps(wsId, ctx({ adminWorkspaces: [wsId] }));
-    const reg = await agentsWrite(d, {
-      operation: "register",
+    const reg = await agentsCreate(d, {
       name: "tool-agent-a",
       displayName: "Tool Agent A",
       a2aEndpoint: "https://example.com/tool-agent-a",
@@ -72,8 +79,7 @@ describe("admin tools — agents_write / agents_read", () => {
     const d = deps(101, ctx({ adminWorkspaces: [999] }));
     expect(await agentsRead(d, {})).toHaveProperty("error");
     expect(
-      await agentsWrite(d, {
-        operation: "register",
+      await agentsCreate(d, {
         name: "nope",
         a2aEndpoint: "https://example.com/nope",
         notifyOn: "mention"
@@ -89,29 +95,24 @@ describe("admin tools — agents_write / agents_read", () => {
   it("refuses reserved/built-in names and duplicates", async () => {
     const d = deps(ORG_WORKSPACE_ID, orgAdmin);
     expect(
-      await agentsWrite(d, {
-        operation: "register",
+      await agentsCreate(d, {
         name: "admin",
         a2aEndpoint: "https://example.com/admin",
         notifyOn: "mention"
       })
     ).toHaveProperty("error");
     // built-in admin row cannot be modified
-    expect(
-      await agentsWrite(d, { operation: "unregister", name: "admin" })
-    ).toHaveProperty("error");
+    expect(await agentsDelete(d, { name: "admin" })).toHaveProperty("error");
 
     const wsId = await freshWsId("tools-ws-dup");
     const d2 = deps(wsId, ctx({ adminWorkspaces: [wsId] }));
-    await agentsWrite(d2, {
-      operation: "register",
+    await agentsCreate(d2, {
       name: "dup-agent",
       a2aEndpoint: "https://example.com/dup-agent",
       notifyOn: "mention"
     });
     expect(
-      await agentsWrite(d2, {
-        operation: "register",
+      await agentsCreate(d2, {
         name: "dup-agent",
         a2aEndpoint: "https://example.com/dup-agent",
         notifyOn: "mention"
@@ -122,24 +123,20 @@ describe("admin tools — agents_write / agents_read", () => {
   it("adds and removes channels one at a time", async () => {
     const wsId = await freshWsId("tools-ws-chan");
     const d = deps(wsId, ctx({ adminWorkspaces: [wsId] }));
-    await agentsWrite(d, {
-      operation: "register",
+    await agentsCreate(d, {
       name: "chan-agent",
       a2aEndpoint: "https://example.com/chan-agent",
       notifyOn: "mention"
     });
-    await agentsWrite(d, {
-      operation: "update",
+    await agentsUpdate(d, {
       name: "chan-agent",
       displayName: "Channeled"
     });
-    await agentsWrite(d, {
-      operation: "add_channel",
+    await agentsAllowChannel(d, {
       name: "chan-agent",
       channelId: "C_A"
     });
-    await agentsWrite(d, {
-      operation: "add_channel",
+    await agentsAllowChannel(d, {
       name: "chan-agent",
       channelId: "C_B"
     });
@@ -149,8 +146,7 @@ describe("admin tools — agents_write / agents_read", () => {
     expect(afterAttach.agents[0].displayName).toBe("Channeled");
     expect(afterAttach.agents[0].channels.sort()).toEqual(["C_A", "C_B"]);
 
-    await agentsWrite(d, {
-      operation: "remove_channel",
+    await agentsRevokeChannel(d, {
       name: "chan-agent",
       channelId: "C_A"
     });
@@ -164,60 +160,53 @@ describe("admin tools — agents_write / agents_read", () => {
     const wsA = await freshWsId("tools-ws-chan-owner");
     const wsB = await freshWsId("tools-ws-chan-other");
     const owner = deps(wsA, ctx({ adminWorkspaces: [wsA] }));
-    await agentsWrite(owner, {
-      operation: "register",
+    await agentsCreate(owner, {
       name: "chan-owned",
       a2aEndpoint: "https://example.com/chan-owned",
       notifyOn: "mention"
     });
     const other = deps(wsB, ctx({ adminWorkspaces: [wsB] }));
     expect(
-      await agentsWrite(other, {
-        operation: "add_channel",
+      await agentsAllowChannel(other, {
         name: "chan-owned",
         channelId: "C_X"
       })
     ).toHaveProperty("error");
     expect(
-      await agentsWrite(owner, {
-        operation: "remove_channel",
+      await agentsRevokeChannel(owner, {
         name: "admin",
         channelId: "C_X"
       })
     ).toHaveProperty("error");
   });
 
-  it("rejects add_channel for DM (onboarding) channels", async () => {
+  it("rejects agents_allow_channel for DM (onboarding) channels", async () => {
     const wsId = await freshWsId("tools-ws-dm-guard");
     const d = deps(wsId, ctx({ adminWorkspaces: [wsId] }));
-    await agentsWrite(d, {
-      operation: "register",
+    await agentsCreate(d, {
       name: "dm-guard-agent",
       a2aEndpoint: "https://example.com/dm-guard-agent",
       notifyOn: "mention"
     });
     expect(
-      await agentsWrite(d, {
-        operation: "add_channel",
+      await agentsAllowChannel(d, {
         name: "dm-guard-agent",
         channelId: "DABC123"
       })
     ).toHaveProperty("error");
   });
 
-  it("rejects add_channel for admin channels", async () => {
+  it("rejects agents_allow_channel for admin channels", async () => {
     const wsId = await freshWsId("tools-ws-admin-guard");
     const d = deps(wsId, ctx({ adminWorkspaces: [wsId] }));
-    await agentsWrite(d, {
-      operation: "register",
+    await agentsCreate(d, {
       name: "admin-guard-agent",
       a2aEndpoint: "https://example.com/admin-guard-agent",
       notifyOn: "mention"
     });
     await setWorkspaceAdminChannel(wsId, "C_ADMIN_CH");
     expect(
-      await agentsWrite(d, {
-        operation: "add_channel",
+      await agentsAllowChannel(d, {
         name: "admin-guard-agent",
         channelId: "C_ADMIN_CH"
       })
@@ -228,16 +217,15 @@ describe("admin tools — agents_write / agents_read", () => {
     const wsA = await freshWsId("tools-ws-owner");
     const wsB = await freshWsId("tools-ws-other");
     const owner = deps(wsA, ctx({ adminWorkspaces: [wsA] }));
-    await agentsWrite(owner, {
-      operation: "register",
+    await agentsCreate(owner, {
       name: "wsa-agent",
       a2aEndpoint: "https://example.com/wsa-agent",
       notifyOn: "mention"
     });
     const other = deps(wsB, ctx({ adminWorkspaces: [wsB] }));
-    expect(
-      await agentsWrite(other, { operation: "unregister", name: "wsa-agent" })
-    ).toHaveProperty("error");
+    expect(await agentsDelete(other, { name: "wsa-agent" })).toHaveProperty(
+      "error"
+    );
   });
 });
 
@@ -282,23 +270,19 @@ describe("admin tools — human-in-the-loop", () => {
     expect(res).toHaveProperty("error");
   });
 
-  it("gates unregister behind an approval instead of deleting", async () => {
+  it("gates agents_delete behind an approval instead of deleting", async () => {
     const wsId = await freshWsId("tools-ws-gate");
     const { d, parked, stored } = hitlDeps(
       wsId,
       ctx({ adminWorkspaces: [wsId] })
     );
-    await agentsWrite(d, {
-      operation: "register",
+    await agentsCreate(d, {
       name: "gate-agent",
       a2aEndpoint: "https://example.com/gate-agent",
       notifyOn: "mention"
     });
 
-    const res = await agentsWrite(d, {
-      operation: "unregister",
-      name: "gate-agent"
-    });
+    const res = await agentsDelete(d, { name: "gate-agent" });
 
     expect(res).toMatchObject({ status: "awaiting_approval" });
     // Not deleted yet — it awaits the human's approval.
@@ -315,11 +299,9 @@ describe("admin tools — human-in-the-loop", () => {
     expect(stored[0].requestId).toBe(parked[0].requestId);
   });
 
-  it("still denies unregister for a reserved name before parking", async () => {
+  it("still denies agents_delete for a reserved name before parking", async () => {
     const { d, parked } = hitlDeps(ORG_WORKSPACE_ID, orgAdmin);
-    expect(
-      await agentsWrite(d, { operation: "unregister", name: "admin" })
-    ).toHaveProperty("error");
+    expect(await agentsDelete(d, { name: "admin" })).toHaveProperty("error");
     expect(parked).toHaveLength(0);
   });
 });
@@ -343,8 +325,7 @@ describe("admin tools — card-signing verification + pin (TOFU)", () => {
       },
       displayName: "Pinned Agent"
     }));
-    const reg = await agentsWrite(d, {
-      operation: "register",
+    const reg = await agentsCreate(d, {
       name: "pinned-agent",
       a2aEndpoint: "https://signed.example.com/a2a",
       notifyOn: "mention"
@@ -363,8 +344,7 @@ describe("admin tools — card-signing verification + pin (TOFU)", () => {
     const d = depsWith(wsId, ctx({ adminWorkspaces: [wsId] }), async () => {
       throw new Error("AgentCard is not signed");
     });
-    const res = await agentsWrite(d, {
-      operation: "register",
+    const res = await agentsCreate(d, {
       name: "unsigned-agent",
       a2aEndpoint: "https://unsigned.example.com/a2a",
       notifyOn: "mention"
@@ -387,8 +367,7 @@ describe("admin tools — card-signing verification + pin (TOFU)", () => {
         displayName: "Agent A"
       })
     );
-    await agentsWrite(original, {
-      operation: "register",
+    await agentsCreate(original, {
       name: "tofu-agent",
       a2aEndpoint: "https://a.example.com/a2a",
       notifyOn: "mention"
@@ -406,8 +385,7 @@ describe("admin tools — card-signing verification + pin (TOFU)", () => {
         displayName: "Agent B"
       })
     );
-    const res = await agentsWrite(repointed, {
-      operation: "update",
+    const res = await agentsUpdate(repointed, {
       name: "tofu-agent",
       a2aEndpoint: "https://b.example.com/a2a"
     });
@@ -430,14 +408,12 @@ describe("admin tools — card-signing verification + pin (TOFU)", () => {
       pin,
       displayName: "Same Agent"
     }));
-    await agentsWrite(d, {
-      operation: "register",
+    await agentsCreate(d, {
       name: "tofu-ok-agent",
       a2aEndpoint: "https://same.example.com/a2a",
       notifyOn: "mention"
     });
-    const res = await agentsWrite(d, {
-      operation: "update",
+    const res = await agentsUpdate(d, {
       name: "tofu-ok-agent",
       a2aEndpoint: "https://same.example.com/v2"
     });
@@ -465,8 +441,7 @@ describe("admin tools — derive displayName from card (iconUrl is never card-so
       },
       displayName: "From Card"
     }));
-    await agentsWrite(d, {
-      operation: "register",
+    await agentsCreate(d, {
       name: "derive-agent",
       a2aEndpoint: "https://derive.example.com/a2a",
       notifyOn: "mention"
@@ -486,8 +461,7 @@ describe("admin tools — derive displayName from card (iconUrl is never card-so
       },
       displayName: "From Card"
     }));
-    await agentsWrite(d, {
-      operation: "register",
+    await agentsCreate(d, {
       name: "derive-override-agent",
       displayName: "My Override",
       a2aEndpoint: "https://derive2.example.com/a2a",
@@ -507,8 +481,7 @@ describe("admin tools — derive displayName from card (iconUrl is never card-so
       pin,
       displayName: "New Card Name"
     }));
-    await agentsWrite(d, {
-      operation: "register",
+    await agentsCreate(d, {
       name: "rederive-agent",
       a2aEndpoint: "https://rederive.example.com/v1",
       notifyOn: "mention"
@@ -526,8 +499,7 @@ describe("admin tools — derive displayName from card (iconUrl is never card-so
       })
     };
     await setPublicUrl("https://gw.example.com");
-    await agentsWrite(withSeams, {
-      operation: "regenerate_avatar",
+    await agentsRegenerateAvatar(withSeams, {
       name: "rederive-agent"
     });
     const generated = (await getAgent("rederive-agent"))?.iconUrl;
@@ -535,8 +507,7 @@ describe("admin tools — derive displayName from card (iconUrl is never card-so
       `https://gw.example.com/icons/${wsId}/rederive-agent/deadbeefdeadbeef.jpg`
     );
 
-    await agentsWrite(d, {
-      operation: "update",
+    await agentsUpdate(d, {
       name: "rederive-agent",
       a2aEndpoint: "https://rederive.example.com/v2"
     });
@@ -557,14 +528,12 @@ describe("admin tools — derive displayName from card (iconUrl is never card-so
       pin,
       displayName: "Card Name"
     }));
-    await agentsWrite(d, {
-      operation: "register",
+    await agentsCreate(d, {
       name: "override2-agent",
       a2aEndpoint: "https://override2.example.com/v1",
       notifyOn: "mention"
     });
-    await agentsWrite(d, {
-      operation: "update",
+    await agentsUpdate(d, {
       name: "override2-agent",
       a2aEndpoint: "https://override2.example.com/v2",
       displayName: "Manual Override"
@@ -574,11 +543,10 @@ describe("admin tools — derive displayName from card (iconUrl is never card-so
   });
 });
 
-describe("admin tools — workspace_write instance scoping", () => {
+describe("admin tools — workspace_create instance scoping", () => {
   it("org instance (wsId 0) with org admin can create a workspace", async () => {
     const d = deps(ORG_WORKSPACE_ID, orgAdmin);
-    const res = (await workspaceWrite(d, {
-      operation: "create",
+    const res = (await workspaceCreate(d, {
       name: "tools-created-ws"
     })) as { ok?: boolean; workspace?: { id: number } };
     expect(res.ok).toBe(true);
@@ -587,65 +555,79 @@ describe("admin tools — workspace_write instance scoping", () => {
 
   it("workspace instance (wsId != 0) is denied even for an org admin", async () => {
     const d = deps(107, orgAdmin);
-    expect(
-      await workspaceWrite(d, { operation: "create", name: "should-fail" })
-    ).toHaveProperty("error");
+    expect(await workspaceCreate(d, { name: "should-fail" })).toHaveProperty(
+      "error"
+    );
   });
 
   it("org instance denies a non-org caller", async () => {
     const d = deps(ORG_WORKSPACE_ID, ctx({ adminWorkspaces: [5] }));
-    expect(
-      await workspaceWrite(d, { operation: "create", name: "should-fail" })
-    ).toHaveProperty("error");
-  });
-});
-
-describe("admin tools — buildAdminTools availability", () => {
-  it("exposes workspace_write and remote_agent_domains only on the org instance", () => {
-    const orgTools = buildAdminTools(deps(ORG_WORKSPACE_ID, orgAdmin));
-    expect(Object.keys(orgTools)).toContain("workspace_write");
-    expect(Object.keys(orgTools)).toContain("remote_agent_domains");
-
-    const wsTools = buildAdminTools(deps(3, ctx({ adminWorkspaces: [3] })));
-    expect(Object.keys(wsTools)).not.toContain("workspace_write");
-    expect(Object.keys(wsTools)).not.toContain("remote_agent_domains");
-    expect(Object.keys(wsTools)).toEqual(
-      expect.arrayContaining(["agents_read", "agents_write", "workspace_read"])
+    expect(await workspaceCreate(d, { name: "should-fail" })).toHaveProperty(
+      "error"
     );
   });
 });
 
-describe("admin tools — remote_agent_domains", () => {
+describe("admin tools — buildAdminTools availability", () => {
+  const orgOnly = [
+    "workspace_create",
+    "workspace_set_admin_channel",
+    "agents_domains_list",
+    "agents_domains_add",
+    "agents_domains_remove"
+  ];
+
+  it("exposes the org-only tools only on the org instance", () => {
+    const orgTools = buildAdminTools(deps(ORG_WORKSPACE_ID, orgAdmin));
+    expect(Object.keys(orgTools)).toEqual(expect.arrayContaining(orgOnly));
+
+    const wsTools = buildAdminTools(deps(3, ctx({ adminWorkspaces: [3] })));
+    for (const key of orgOnly) {
+      expect(Object.keys(wsTools)).not.toContain(key);
+    }
+    expect(Object.keys(wsTools)).toEqual(
+      expect.arrayContaining([
+        "agents_read",
+        "agents_create",
+        "agents_update",
+        "agents_delete",
+        "agents_allow_channel",
+        "agents_revoke_channel",
+        "agents_regenerate_avatar",
+        "workspace_read"
+      ])
+    );
+  });
+});
+
+describe("admin tools — agents_domains", () => {
   const orgDeps = deps(ORG_WORKSPACE_ID, orgAdmin);
 
   it("lists empty approved domains initially", async () => {
-    const res = (await remoteAgentDomains(orgDeps, { operation: "list" })) as {
+    const res = (await agentsDomainsList(orgDeps)) as {
       approvedDomains: string[];
     };
     expect(Array.isArray(res.approvedDomains)).toBe(true);
   });
 
   it("adds a domain and reads it back via list", async () => {
-    await remoteAgentDomains(orgDeps, {
-      operation: "add",
+    await agentsDomainsAdd(orgDeps, {
       domain: "agents.example-radt.com"
     });
-    const res = (await remoteAgentDomains(orgDeps, { operation: "list" })) as {
+    const res = (await agentsDomainsList(orgDeps)) as {
       approvedDomains: string[];
     };
     expect(res.approvedDomains).toContain("agents.example-radt.com");
   });
 
   it("is idempotent when adding the same domain twice", async () => {
-    await remoteAgentDomains(orgDeps, {
-      operation: "add",
+    await agentsDomainsAdd(orgDeps, {
       domain: "idempotent.example-radt.com"
     });
-    await remoteAgentDomains(orgDeps, {
-      operation: "add",
+    await agentsDomainsAdd(orgDeps, {
       domain: "idempotent.example-radt.com"
     });
-    const res = (await remoteAgentDomains(orgDeps, { operation: "list" })) as {
+    const res = (await agentsDomainsList(orgDeps)) as {
       approvedDomains: string[];
     };
     const count = res.approvedDomains.filter(
@@ -655,23 +637,20 @@ describe("admin tools — remote_agent_domains", () => {
   });
 
   it("removes a domain", async () => {
-    await remoteAgentDomains(orgDeps, {
-      operation: "add",
+    await agentsDomainsAdd(orgDeps, {
       domain: "remove-me.example-radt.com"
     });
-    await remoteAgentDomains(orgDeps, {
-      operation: "remove",
+    await agentsDomainsRemove(orgDeps, {
       domain: "remove-me.example-radt.com"
     });
-    const res = (await remoteAgentDomains(orgDeps, { operation: "list" })) as {
+    const res = (await agentsDomainsList(orgDeps)) as {
       approvedDomains: string[];
     };
     expect(res.approvedDomains).not.toContain("remove-me.example-radt.com");
   });
 
   it("remove is a no-op when domain is not in the list", async () => {
-    const res = await remoteAgentDomains(orgDeps, {
-      operation: "remove",
+    const res = await agentsDomainsRemove(orgDeps, {
       domain: "never-added.example-radt.com"
     });
     expect(res).toMatchObject({ ok: true });
@@ -679,8 +658,7 @@ describe("admin tools — remote_agent_domains", () => {
 
   it("rejects adding a bare shared-infra root domain", async () => {
     for (const root of ["workers.dev", "pages.dev", "vercel.app"]) {
-      const res = (await remoteAgentDomains(orgDeps, {
-        operation: "add",
+      const res = (await agentsDomainsAdd(orgDeps, {
         domain: root
       })) as { error: string };
       expect(res).toHaveProperty("error");
@@ -689,16 +667,14 @@ describe("admin tools — remote_agent_domains", () => {
   });
 
   it("allows adding an account-level subdomain of a shared-infra root", async () => {
-    const res = await remoteAgentDomains(orgDeps, {
-      operation: "add",
+    const res = await agentsDomainsAdd(orgDeps, {
       domain: "myorg.workers.dev"
     });
     expect(res).toMatchObject({ ok: true });
   });
 
   it("rejects a bare single-label domain", async () => {
-    const res = await remoteAgentDomains(orgDeps, {
-      operation: "add",
+    const res = await agentsDomainsAdd(orgDeps, {
       domain: "localhost"
     });
     expect(res).toHaveProperty("error");
@@ -706,23 +682,17 @@ describe("admin tools — remote_agent_domains", () => {
 
   it("denies a non-org-admin caller", async () => {
     const nonOrg = deps(ORG_WORKSPACE_ID, ctx({ adminWorkspaces: [5] }));
-    expect(
-      await remoteAgentDomains(nonOrg, { operation: "list" })
-    ).toHaveProperty("error");
+    expect(await agentsDomainsList(nonOrg)).toHaveProperty("error");
   });
 
   it("denies calls from a non-org workspace instance", async () => {
     const wsInstance = deps(3, orgAdmin);
-    expect(
-      await remoteAgentDomains(wsInstance, { operation: "list" })
-    ).toHaveProperty("error");
+    expect(await agentsDomainsList(wsInstance)).toHaveProperty("error");
   });
 
   it("denies unauthenticated calls", async () => {
     const noAuth = deps(ORG_WORKSPACE_ID, null);
-    expect(
-      await remoteAgentDomains(noAuth, { operation: "list" })
-    ).toHaveProperty("error");
+    expect(await agentsDomainsList(noAuth)).toHaveProperty("error");
   });
 });
 
@@ -756,7 +726,7 @@ function avatarDeps(
   };
 }
 
-describe("admin tools — self_write set_avatar", () => {
+describe("admin tools — self_set_avatar", () => {
   it("generates, stores under the 'admin' name, and records the avatar URL", async () => {
     const wsId = await freshWsId("tools-ws-avatar");
     await setPublicUrl("https://gw.example.com");
@@ -773,8 +743,7 @@ describe("admin tools — self_write set_avatar", () => {
       }
     });
 
-    const res = (await selfWrite(d, {
-      operation: "set_avatar",
+    const res = (await selfSetAvatar(d, {
       instructions: "blue robot"
     })) as { ok?: boolean; iconUrl?: string };
     expect(res.ok).toBe(true);
@@ -790,25 +759,21 @@ describe("admin tools — self_write set_avatar", () => {
   it("errors when the gateway public URL isn't known yet", async () => {
     const wsId = await freshWsId("tools-ws-avatar-nourl");
     const d = avatarDeps(wsId, ctx({ adminWorkspaces: [wsId] }));
-    expect(await selfWrite(d, { operation: "set_avatar" })).toHaveProperty(
-      "error"
-    );
+    expect(await selfSetAvatar(d, {})).toHaveProperty("error");
   });
 
   it("denies a caller who is not an admin of the workspace", async () => {
     const wsId = await freshWsId("tools-ws-avatar-deny");
     await setPublicUrl("https://gw.example.com");
     const d = avatarDeps(wsId, ctx({ adminWorkspaces: [999] }));
-    expect(await selfWrite(d, { operation: "set_avatar" })).toHaveProperty(
-      "error"
-    );
+    expect(await selfSetAvatar(d, {})).toHaveProperty("error");
   });
 
   it("errors when the image seams are absent", async () => {
     const wsId = await freshWsId("tools-ws-avatar-noseam");
     await setPublicUrl("https://gw.example.com");
     const d = deps(wsId, ctx({ adminWorkspaces: [wsId] })); // no generateImage/storeIcon
-    const res = (await selfWrite(d, { operation: "set_avatar" })) as {
+    const res = (await selfSetAvatar(d, {})) as {
       error?: string;
     };
     expect(res.error).toContain("not available");
@@ -822,19 +787,18 @@ describe("admin tools — self_write set_avatar", () => {
         throw new Error("model overloaded");
       }
     });
-    const res = (await selfWrite(d, { operation: "set_avatar" })) as {
+    const res = (await selfSetAvatar(d, {})) as {
       error?: string;
     };
     expect(res.error).toContain("Avatar generation failed");
   });
 });
 
-describe("admin tools — self_write set_display_name", () => {
+describe("admin tools — self_set_display_name", () => {
   it("records the per-workspace admin display name", async () => {
     const wsId = await freshWsId("tools-ws-selfname");
     const d = deps(wsId, ctx({ adminWorkspaces: [wsId] }));
-    const res = (await selfWrite(d, {
-      operation: "set_display_name",
+    const res = (await selfSetDisplayName(d, {
       displayName: "  Ops Bot  "
     })) as { ok?: boolean; displayName?: string };
     expect(res.ok).toBe(true);
@@ -845,41 +809,43 @@ describe("admin tools — self_write set_display_name", () => {
   it("rejects an empty display name", async () => {
     const wsId = await freshWsId("tools-ws-selfname-empty");
     const d = deps(wsId, ctx({ adminWorkspaces: [wsId] }));
-    expect(
-      await selfWrite(d, { operation: "set_display_name", displayName: "   " })
-    ).toHaveProperty("error");
+    expect(await selfSetDisplayName(d, { displayName: "   " })).toHaveProperty(
+      "error"
+    );
   });
 
   it("denies a non-admin caller", async () => {
     const wsId = await freshWsId("tools-ws-selfname-deny");
     const d = deps(wsId, ctx({ adminWorkspaces: [999] }));
-    expect(
-      await selfWrite(d, { operation: "set_display_name", displayName: "X" })
-    ).toHaveProperty("error");
+    expect(await selfSetDisplayName(d, { displayName: "X" })).toHaveProperty(
+      "error"
+    );
   });
 });
 
-describe("admin tools — self_write is always registered", () => {
-  it("registers self_write with and without the image seams", () => {
+describe("admin tools — self_* tools are always registered", () => {
+  it("registers self_set_avatar and self_set_display_name with and without the image seams", () => {
     const wsId = 3;
     const base = ctx({ adminWorkspaces: [wsId] });
     const without = buildAdminTools(deps(wsId, base));
-    expect(Object.keys(without)).toContain("self_write");
-    expect(Object.keys(without)).not.toContain("avatar_regenerate");
+    expect(Object.keys(without)).toEqual(
+      expect.arrayContaining(["self_set_avatar", "self_set_display_name"])
+    );
 
     const withSeams = buildAdminTools(avatarDeps(wsId, base));
-    expect(Object.keys(withSeams)).toContain("self_write");
+    expect(Object.keys(withSeams)).toEqual(
+      expect.arrayContaining(["self_set_avatar", "self_set_display_name"])
+    );
   });
 });
 
-describe("admin tools — agents_write regenerate_avatar", () => {
+describe("admin tools — agents_regenerate_avatar", () => {
   async function registerAgentFor(
     wsId: number,
     name: string,
     d: AdminToolDeps
   ): Promise<void> {
-    await agentsWrite(d, {
-      operation: "register",
+    await agentsCreate(d, {
       name,
       a2aEndpoint: `https://${name}.example.com/a2a`,
       notifyOn: "mention"
@@ -903,8 +869,7 @@ describe("admin tools — agents_write regenerate_avatar", () => {
     });
     await registerAgentFor(wsId, "paint-agent", d);
 
-    const res = (await agentsWrite(d, {
-      operation: "regenerate_avatar",
+    const res = (await agentsRegenerateAvatar(d, {
       name: "paint-agent",
       instructions: "teal owl"
     })) as { ok?: boolean; agent?: { iconUrl?: string } };
@@ -924,9 +889,9 @@ describe("admin tools — agents_write regenerate_avatar", () => {
     const wsId = await freshWsId("tools-ws-agent-avatar-builtin");
     await setPublicUrl("https://gw.example.com");
     const d = avatarDeps(wsId, ctx({ adminWorkspaces: [wsId] }));
-    expect(
-      await agentsWrite(d, { operation: "regenerate_avatar", name: "admin" })
-    ).toHaveProperty("error");
+    expect(await agentsRegenerateAvatar(d, { name: "admin" })).toHaveProperty(
+      "error"
+    );
   });
 
   it("rejects an agent that doesn't belong to this workspace", async () => {
@@ -934,8 +899,7 @@ describe("admin tools — agents_write regenerate_avatar", () => {
     await setPublicUrl("https://gw.example.com");
     const d = avatarDeps(wsId, ctx({ adminWorkspaces: [wsId] }));
     expect(
-      await agentsWrite(d, {
-        operation: "regenerate_avatar",
+      await agentsRegenerateAvatar(d, {
         name: "nonexistent-agent"
       })
     ).toHaveProperty("error");
@@ -946,8 +910,7 @@ describe("admin tools — agents_write regenerate_avatar", () => {
     await setPublicUrl("https://gw.example.com");
     const d = deps(wsId, ctx({ adminWorkspaces: [wsId] }));
     await registerAgentFor(wsId, "noseam-agent", d);
-    const res = (await agentsWrite(d, {
-      operation: "regenerate_avatar",
+    const res = (await agentsRegenerateAvatar(d, {
       name: "noseam-agent"
     })) as { error?: string };
     expect(res.error).toContain("not available");
@@ -958,8 +921,7 @@ describe("admin tools — agents_write regenerate_avatar", () => {
     const d = avatarDeps(wsId, ctx({ adminWorkspaces: [wsId] }));
     await registerAgentFor(wsId, "nourl-agent", d);
     expect(
-      await agentsWrite(d, {
-        operation: "regenerate_avatar",
+      await agentsRegenerateAvatar(d, {
         name: "nourl-agent"
       })
     ).toHaveProperty("error");
