@@ -173,7 +173,9 @@ async function cmdLogs(args) {
   const sinceLabel = flags.since ?? "1h";
   const to = Date.now();
   const from = to - parseSince(sinceLabel);
-  const limit = Number(flags.limit ?? 100);
+  const limit = Number.parseInt(String(flags.limit ?? 100), 10);
+  if (!Number.isFinite(limit) || limit <= 0)
+    die(`bad --limit "${flags.limit}" (expected a positive integer)`);
   const worker = flags.worker ?? flags.service;
 
   const filters = [];
