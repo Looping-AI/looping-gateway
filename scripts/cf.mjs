@@ -431,7 +431,9 @@ async function cmdAiDetail(gw, id, flags) {
   const meta = await request("GET", base);
   ensureOk(meta.res, meta.text);
   const reqR = await request("GET", `${base}/request`);
+  ensureOk(reqR.res, reqR.text);
   const resR = await request("GET", `${base}/response`);
+  ensureOk(resR.res, resR.text);
 
   if (flags.raw) {
     out(reqR.text);
