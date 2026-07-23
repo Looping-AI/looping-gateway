@@ -741,6 +741,24 @@ describe("LocalPushNotificationSender.whenSettled (accept-first liveness barrier
     expect((await getAgentTaskByToken("flow-tok"))?.status).toBe("completed");
   });
 
+  it("resolves after an input-required delivery (a HITL park ends the turn)", async () => {
+    const posts: SlackPost[] = [];
+    stubFetch(key, posts);
+    const sender = await makeSender("admin-park", [
+      { token: "park-tok", taskId: "park-task" }
+    ]);
+
+    const barrier = sender.whenSettled("park-task");
+    await sender.send(taskFor("park-task", "working", "one moment"));
+    expect(await isPending(barrier)).toBe(true);
+
+    // A parked (input-required) snapshot is the last activity in this isolate — the
+    // human answers on a later, separate invocation — so the barrier must release
+    // rather than idle to the 8-minute safety timeout.
+    await sender.send(taskFor("park-task", "input-required", "need input"));
+    await expect(barrier).resolves.toBeUndefined();
+  });
+
   it("resolves on a terminal canceled even though nothing is posted", async () => {
     const posts: SlackPost[] = [];
     stubFetch(key, posts);

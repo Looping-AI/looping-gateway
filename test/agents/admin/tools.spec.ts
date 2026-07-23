@@ -1,8 +1,11 @@
 import { describe, it, expect } from "vitest";
 import type { UserAuthContext } from "@/auth";
+import type { HitlRequest } from "@/a2a/hitl";
+import type { GatedAction } from "@/agents/admin/approvals";
 import {
   agentsRead,
   agentsWrite,
+  askUser,
   workspaceRead,
   workspaceWrite,
   remoteAgentDomains,
@@ -235,6 +238,89 @@ describe("admin tools — agents_write / agents_read", () => {
     expect(
       await agentsWrite(other, { operation: "unregister", name: "wsa-agent" })
     ).toHaveProperty("error");
+  });
+});
+
+describe("admin tools — human-in-the-loop", () => {
+  /** deps that capture parked prompts + stored pending actions. */
+  function hitlDeps(wsId: number, c: UserAuthContext | null) {
+    const parked: HitlRequest[] = [];
+    const stored: { requestId: string; action: GatedAction }[] = [];
+    const d: AdminToolDeps = {
+      ...deps(wsId, c),
+      park: (req) => parked.push(req),
+      storePendingAction: async (requestId, action) => {
+        stored.push({ requestId, action });
+      }
+    };
+    return { d, parked, stored };
+  }
+
+  it("ask_user parks a choice prompt with a freeform option and stores nothing", async () => {
+    const { d, parked, stored } = hitlDeps(1, ctx({ adminWorkspaces: [1] }));
+    const res = await askUser(d, {
+      question: "Which environment?",
+      options: [{ label: "dev" }, { label: "prod" }]
+    });
+
+    expect(res).toMatchObject({ status: "awaiting_user" });
+    expect(parked).toHaveLength(1);
+    expect(parked[0]).toMatchObject({
+      requestKind: "choice",
+      prompt: "Which environment?",
+      allowFreeform: true
+    });
+    expect(parked[0].options).toHaveLength(2);
+    expect(stored).toHaveLength(0);
+  });
+
+  it("ask_user reports unavailable when the turn can't be parked", async () => {
+    const res = await askUser(deps(1, ctx({ adminWorkspaces: [1] })), {
+      question: "hi?",
+      options: [{ label: "a" }]
+    });
+    expect(res).toHaveProperty("error");
+  });
+
+  it("gates unregister behind an approval instead of deleting", async () => {
+    const wsId = await freshWsId("tools-ws-gate");
+    const { d, parked, stored } = hitlDeps(
+      wsId,
+      ctx({ adminWorkspaces: [wsId] })
+    );
+    await agentsWrite(d, {
+      operation: "register",
+      name: "gate-agent",
+      a2aEndpoint: "https://example.com/gate-agent",
+      notifyOn: "mention"
+    });
+
+    const res = await agentsWrite(d, {
+      operation: "unregister",
+      name: "gate-agent"
+    });
+
+    expect(res).toMatchObject({ status: "awaiting_approval" });
+    // Not deleted yet — it awaits the human's approval.
+    expect(await getAgent("gate-agent")).not.toBeNull();
+    expect(parked).toHaveLength(1);
+    expect(parked[0].requestKind).toBe("approval");
+    // The pending action is stored under the same id the prompt carries.
+    expect(stored).toHaveLength(1);
+    expect(stored[0].action).toEqual({
+      kind: "unregister_agent",
+      name: "gate-agent",
+      wsId
+    });
+    expect(stored[0].requestId).toBe(parked[0].requestId);
+  });
+
+  it("still denies unregister for a reserved name before parking", async () => {
+    const { d, parked } = hitlDeps(ORG_WORKSPACE_ID, orgAdmin);
+    expect(
+      await agentsWrite(d, { operation: "unregister", name: "admin" })
+    ).toHaveProperty("error");
+    expect(parked).toHaveLength(0);
   });
 });
 

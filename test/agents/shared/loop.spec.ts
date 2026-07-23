@@ -679,3 +679,127 @@ describe("executeAgentTurn — cancellation", () => {
     expect(bus.published.at(-1)?.status?.state).toBe("canceled");
   });
 });
+
+// ---------------------------------------------------------------------------
+// Human-in-the-loop park (a tool calls turn.park → end in input-required)
+// ---------------------------------------------------------------------------
+
+describe("executeAgentTurn — HITL park", () => {
+  const request = {
+    type: "io.looping.hitl.request",
+    requestId: "req-1",
+    requestKind: "choice",
+    prompt: "Which environment?",
+    options: [{ id: "opt_0", label: "dev" }],
+    allowFreeform: true
+  };
+
+  /** A model that calls `ask` on its first step; a second step would answer. */
+  function askThenAnswerModel(onGeneration: () => void) {
+    let n = 0;
+    return new MockLanguageModelV3({
+      doGenerate: async () => {
+        onGeneration();
+        return (
+          n++ === 0 ? toolCallResult("ask", {}) : okResult("unreachable")
+        ) as never;
+      }
+    });
+  }
+
+  it("ends the turn in input-required with the request DataPart, no terminal reply", async () => {
+    const session = new FakeSession();
+    let generations = 0;
+    const bus = fakeEventBus();
+
+    await executeAgentTurn(
+      fakeRequestContext("set up an agent"),
+      bus.eventBus,
+      makeCfg(session, fakeModels(askThenAnswerModel(() => generations++)), {
+        prepare: async (_t, _m, turn) => ({
+          session,
+          systemSuffix: "",
+          tools: {
+            ask: tool({
+              description: "Ask the user.",
+              inputSchema: z.object({}),
+              execute: async () => {
+                turn.park(request as never);
+                return { status: "awaiting_user" };
+              }
+            })
+          }
+        })
+      })
+    );
+
+    // The turn always finishes, but the model's second (answering) step never runs.
+    expect(bus.finished).toHaveBeenCalledTimes(1);
+    expect(generations).toBe(1);
+
+    // Terminal event is input-required (non-terminal task state) carrying the DataPart.
+    const last = bus.published.at(-1);
+    expect(last).toMatchObject({
+      kind: "status-update",
+      taskId: "task-1",
+      final: true,
+      status: { state: "input-required", message: { messageId: "m1:hitl" } }
+    });
+    const parts = last?.status?.message?.parts as Array<{
+      text?: string;
+      kind?: string;
+      data?: { type?: string; requestId?: string };
+    }>;
+    expect(parts.some((p) => p.text === "Which environment?")).toBe(true);
+    expect(
+      parts.some(
+        (p) =>
+          p.data?.type === "io.looping.hitl.request" &&
+          p.data.requestId === "req-1"
+      )
+    ).toBe(true);
+
+    // No completed/canceled terminal was published.
+    const states = bus.published.map((e) => e.status?.state);
+    expect(states).not.toContain("completed");
+    expect(states).not.toContain("canceled");
+
+    // The prompt is persisted as the assistant turn so the resumed turn has context.
+    expect(session.messages.map((m) => m.role)).toEqual(["user", "assistant"]);
+    expect(session.messages[1].parts[0]).toMatchObject({
+      type: "text",
+      text: "Which environment?"
+    });
+  });
+
+  it("a recorded 🛑 wins over a park (no prompt is raised)", async () => {
+    const session = new FakeSession();
+    const bus = fakeEventBus();
+
+    await executeAgentTurn(
+      fakeRequestContext("set up an agent"),
+      bus.eventBus,
+      makeCfg(session, fakeModels(askThenAnswerModel(() => {})), {
+        isCanceled: async () => true,
+        prepare: async (_t, _m, turn) => ({
+          session,
+          systemSuffix: "",
+          tools: {
+            ask: tool({
+              description: "Ask the user.",
+              inputSchema: z.object({}),
+              execute: async () => {
+                turn.park(request as never);
+                return { status: "awaiting_user" };
+              }
+            })
+          }
+        })
+      })
+    );
+
+    expect(bus.published.at(-1)?.status?.state).toBe("canceled");
+    const states = bus.published.map((e) => e.status?.state);
+    expect(states).not.toContain("input-required");
+  });
+});

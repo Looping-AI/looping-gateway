@@ -8,6 +8,7 @@ import type {
 import { generateText, stepCountIs } from "ai";
 import type { createModelPair } from "@/agents/model";
 import { textOf } from "@/a2a/parts";
+import { buildHitlRequestParts, type HitlRequest } from "@/a2a/hitl";
 import type { AgentTurnMetadata } from "@/agents/dispatch";
 import type { SessionLike } from "./session";
 import {
@@ -44,16 +45,29 @@ export interface PreparedTurn {
   tools: ToolSet;
 }
 
+/** Turn-scoped controls a tool can reach (via the deps its executor builds). */
+export interface TurnControls {
+  /**
+   * Pause this turn to ask a human: the loop stops after the current tool step,
+   * ends the turn in `input-required` carrying `request` (the delivery boundary
+   * renders it in Slack and parks the task), and publishes no terminal reply. The
+   * human's answer resumes the agent on a later, separate invocation.
+   */
+  park(request: HitlRequest): void;
+}
+
 export interface AgentTurnConfig {
   models: ReturnType<typeof createModelPair>;
   /**
    * Assemble the session/tools/system for this turn. Runs *inside* the protected
    * body, so throwing here (e.g. missing required metadata) yields the friendly
-   * error reply rather than a crash.
+   * error reply rather than a crash. `turn` lets the assembled tools pause the
+   * turn for human input (agents that don't offer HITL simply ignore it).
    */
   prepare: (
     text: string,
-    metadata: Partial<AgentTurnMetadata>
+    metadata: Partial<AgentTurnMetadata>,
+    turn: TurnControls
   ) => Promise<PreparedTurn>;
   /** Friendly reply for an unexpected (non-transient) failure. */
   unexpectedReply: string;
@@ -114,6 +128,39 @@ function publishStatus(
 }
 
 /**
+ * End the turn in `input-required`, carrying the HITL request DataPart (plus its
+ * TextPart fallback). `final: true` closes this interaction's event stream — the
+ * task is non-terminal and resumes on a later invocation when the human answers.
+ * The delivery boundary detects the DataPart and renders it as an interactive
+ * Slack prompt (see `deliverHitlRequest`).
+ */
+function publishInputRequired(
+  eventBus: ExecutionEventBus,
+  requestContext: RequestContext,
+  request: HitlRequest,
+  messageId: string
+): void {
+  const update: TaskStatusUpdateEvent = {
+    kind: "status-update",
+    taskId: requestContext.taskId,
+    contextId: requestContext.contextId,
+    status: {
+      state: "input-required",
+      message: {
+        kind: "message",
+        messageId,
+        role: "agent",
+        parts: buildHitlRequestParts(request),
+        taskId: requestContext.taskId,
+        contextId: requestContext.contextId
+      }
+    },
+    final: true
+  };
+  eventBus.publish(update);
+}
+
+/**
  * The generic agent turn shared by every in-repo agent: append the user message,
  * run a Workers-AI `generateText` tool loop over the Session history (primary →
  * fallback model on any error), persist + publish the final reply, and
@@ -132,6 +179,10 @@ export async function executeAgentTurn(
   let completed = false;
   // Set by the stop condition below once a 🛑 is seen for this turn.
   let canceled = false;
+  // Set when a tool calls `turn.park`: the turn ends in `input-required` awaiting
+  // a human instead of publishing a terminal reply. Held on an object so the
+  // closure assignment in `turn.park` is visible to control-flow narrowing.
+  const hitl: { request: HitlRequest | null } = { request: null };
   // Tracks the text of the most recent non-terminal step published below, so the
   // terminal reply isn't posted twice when it is that same text.
   let lastStepText = "";
@@ -161,11 +212,16 @@ export async function executeAgentTurn(
   };
 
   try {
+    const turn: TurnControls = {
+      park: (request) => {
+        hitl.request = request;
+      }
+    };
     const {
       session,
       systemSuffix,
       tools: extraTools
-    } = await cfg.prepare(text, metadata);
+    } = await cfg.prepare(text, metadata, turn);
 
     // `text` already carries its `<turn>` provenance wrapper (applied by the
     // Gateway in dispatch); persist it verbatim.
@@ -211,11 +267,16 @@ export async function executeAgentTurn(
     // A step's tool calls have already run and their results still reach the model.
     const stopIfCanceled: StopCondition<ToolSet> = () => checkCanceled();
 
+    // A tool called `turn.park`: stop right after this step so the turn can end in
+    // `input-required` instead of feeding the sentinel result back to the model.
+    const stopIfHitlRequested: StopCondition<ToolSet> = () =>
+      hitl.request !== null;
+
     const generateArgs = {
       system,
       messages: toModelMessages(history),
       tools,
-      stopWhen: [stepCountIs(MAX_STEPS), stopIfCanceled],
+      stopWhen: [stepCountIs(MAX_STEPS), stopIfCanceled, stopIfHitlRequested],
       onStepFinish
     };
 
@@ -259,6 +320,21 @@ export async function executeAgentTurn(
       });
       publishTerminal("", "canceled");
       await session.appendMessage(assistantSessionMessage(CANCELED_NOTE));
+      return;
+    }
+
+    // A tool paused the turn for human input. Persist the prompt as the assistant's
+    // turn so the resumed turn has coherent context (the model "remembers" what it
+    // asked), then end in `input-required` — no terminal reply.
+    if (hitl.request) {
+      completed = true;
+      await session.appendMessage(assistantSessionMessage(hitl.request.prompt));
+      publishInputRequired(
+        eventBus,
+        requestContext,
+        hitl.request,
+        `${userMessage.messageId}:hitl`
+      );
       return;
     }
 

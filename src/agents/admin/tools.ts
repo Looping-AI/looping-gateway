@@ -1,7 +1,9 @@
 import { tool, type ToolSet } from "ai";
 import { z } from "zod";
 import { authorize, type UserAuthContext } from "@/auth";
+import { HITL_REQUEST_TYPE, type HitlRequest } from "@/a2a/hitl";
 import type { CardSigningPin, VerifiedAgentCard } from "@/a2a/card-verify";
+import type { GatedAction } from "./approvals";
 import {
   type AgentRow,
   type NotifyOn,
@@ -11,7 +13,6 @@ import {
   listChannelsForAgents,
   registerAgent,
   updateAgent,
-  unregisterAgent,
   attachAgentChannel,
   detachAgentChannel
 } from "@/db/models/agents";
@@ -79,6 +80,22 @@ export interface AdminToolDeps {
     img: GeneratedImage,
     name: string
   ) => Promise<{ key: string; contentType: string }>;
+  /**
+   * Pause the current turn to ask the human (rendered as an interactive Slack
+   * prompt; the turn ends and resumes when they answer). Injected from the loop's
+   * turn controls. Absent ⇒ `ask_user` and destructive-action approval are
+   * unavailable (they report so at runtime rather than acting without a human).
+   */
+  park?: (request: HitlRequest) => void;
+  /**
+   * Persist a destructive action behind its approval prompt, keyed by the HITL
+   * `requestId`, so the resumed turn can carry it out once approved. DO-storage-
+   * backed; injected by {@link AdminAgent}.
+   */
+  storePendingAction?: (
+    requestId: string,
+    action: GatedAction
+  ) => Promise<void>;
 }
 
 /** Verify a remote agent endpoint + signed card; resolves to pin and card-derived metadata. */
@@ -131,6 +148,68 @@ async function requireWritableAgent(
     return { error: `"${name}" is a built-in agent and cannot be modified.` };
   }
   return a;
+}
+
+// ---------------------------------------------------------------------------
+// Human-in-the-loop helpers — pause the turn for a human answer / approval.
+// ---------------------------------------------------------------------------
+
+export interface AskUserArgs {
+  question: string;
+  options: { label: string; description?: string }[];
+  allowFreeform?: boolean;
+}
+
+/**
+ * Ask the human a clarifying question with a few tappable choices (plus an
+ * optional free-text "Other"). Parks the turn; the answer arrives as the next
+ * user turn, so nothing is stored — the model just continues the conversation.
+ */
+export async function askUser(
+  deps: AdminToolDeps,
+  args: AskUserArgs
+): Promise<ToolResult> {
+  if (!deps.park) {
+    return { error: "Asking the user is unavailable in this context." };
+  }
+  deps.park({
+    type: HITL_REQUEST_TYPE,
+    requestId: crypto.randomUUID(),
+    requestKind: "choice",
+    prompt: args.question,
+    options: args.options.map((o, i) => ({
+      id: `opt_${i}`,
+      label: o.label,
+      description: o.description
+    })),
+    display: "buttons",
+    allowFreeform: args.allowFreeform ?? true
+  });
+  return { status: "awaiting_user", question: args.question };
+}
+
+/**
+ * Raise an Approve/Reject prompt for a destructive action and pause the turn.
+ * The action is persisted keyed by the HITL `requestId`; the resumed turn carries
+ * it out (via `runGatedAction`) only if the human approves. Replaces executing
+ * the action inline — a tool's handler can never block awaiting the human.
+ */
+async function requestApproval(
+  deps: AdminToolDeps,
+  input: { prompt: string; action: GatedAction }
+): Promise<ToolResult> {
+  if (!deps.park || !deps.storePendingAction) {
+    return { error: "Approval is unavailable in this context." };
+  }
+  const requestId = crypto.randomUUID();
+  await deps.storePendingAction(requestId, input.action);
+  deps.park({
+    type: HITL_REQUEST_TYPE,
+    requestId,
+    requestKind: "approval",
+    prompt: input.prompt
+  });
+  return { status: "awaiting_approval", prompt: input.prompt };
 }
 
 // ---------------------------------------------------------------------------
@@ -324,8 +403,13 @@ export async function agentsWrite(
     case "unregister": {
       const target = await requireWritableAgent(deps, args.name);
       if ("error" in target) return target;
-      await unregisterAgent(args.name);
-      return { ok: true, unregistered: args.name };
+      // Destructive + irreversible: gate behind an explicit human approval rather
+      // than deleting inline. The actual delete runs on the resumed turn once the
+      // user clicks Approve (see runGatedAction).
+      return requestApproval(deps, {
+        prompt: `Delete agent *${args.name}*? This permanently removes it and its channel mappings, and cannot be undone.`,
+        action: { kind: "unregister_agent", name: args.name, wsId: deps.wsId }
+      });
     }
   }
 }
@@ -696,6 +780,35 @@ export function buildAdminTools(deps: AdminToolDeps): ToolSet {
         })
       ]),
       execute: (args) => selfWrite(deps, args)
+    }),
+    ask_user: tool({
+      description:
+        "Ask the human a clarifying question when a detail is ambiguous, instead " +
+        "of guessing. Renders in Slack as tappable choices and pauses the " +
+        "conversation until they answer; their answer then continues this task. " +
+        "Give a few concrete options and keep `allowFreeform` on so they can also " +
+        "type their own answer.",
+      inputSchema: z.object({
+        question: z.string().describe("The question to ask the human"),
+        options: z
+          .array(
+            z.object({
+              label: z.string().describe("A short, tappable choice"),
+              description: z
+                .string()
+                .optional()
+                .describe("Optional one-line clarification of this choice")
+            })
+          )
+          .min(1)
+          .max(5)
+          .describe("The preset choices to offer (1–5)"),
+        allowFreeform: z
+          .boolean()
+          .optional()
+          .describe("Also offer a free-text 'Other' answer (default true)")
+      }),
+      execute: (args) => askUser(deps, args)
     })
   };
 

@@ -2,7 +2,11 @@ import { describe, it, expect } from "vitest";
 import type { Message } from "@a2a-js/sdk";
 import {
   parseHitlRequest,
+  parseHitlResponse,
+  parseHitlTimeout,
+  type HitlRequest,
   toSlackInputRequest,
+  buildHitlRequestParts,
   buildHitlResponseParts,
   buildHitlTimeoutParts,
   optionLabel,
@@ -196,5 +200,82 @@ describe("buildHitlTimeoutParts", () => {
       kind: "data",
       data: { type: HITL_TIMEOUT_TYPE, requestId: "req-9" }
     });
+  });
+});
+
+describe("buildHitlRequestParts", () => {
+  it("carries a TextPart fallback plus the request DataPart, and round-trips", () => {
+    const req = {
+      type: HITL_REQUEST_TYPE,
+      requestId: "req-42",
+      requestKind: "choice",
+      prompt: "Pick one",
+      options: [{ id: "opt_0", label: "A" }],
+      allowFreeform: true
+    } satisfies HitlRequest;
+    const parts = buildHitlRequestParts(req);
+    expect(parts[0]).toEqual({ kind: "text", text: "Pick one" });
+
+    // The DataPart is exactly what parseHitlRequest reads back.
+    const parsed = parseHitlRequest(msg(parts));
+    expect(parsed).toMatchObject({
+      requestId: "req-42",
+      requestKind: "choice",
+      prompt: "Pick one",
+      allowFreeform: true
+    });
+  });
+});
+
+describe("parseHitlResponse", () => {
+  it("extracts a valid response DataPart (option answer)", () => {
+    const parts = buildHitlResponseParts({
+      requestId: "req-1",
+      optionId: HITL_APPROVE_OPTION_ID,
+      answeredBy: "U9",
+      humanText: "Approve"
+    });
+    const res = parseHitlResponse(msg(parts));
+    expect(res).toMatchObject({
+      requestId: "req-1",
+      optionId: HITL_APPROVE_OPTION_ID,
+      answeredBy: "U9"
+    });
+  });
+
+  it("extracts a freeform answer and returns null when absent", () => {
+    const parts = buildHitlResponseParts({
+      requestId: "req-2",
+      text: "something else",
+      answeredBy: "U9",
+      humanText: "something else"
+    });
+    expect(parseHitlResponse(msg(parts))?.text).toBe("something else");
+    expect(parseHitlResponse(msg([{ kind: "text", text: "hi" }]))).toBeNull();
+  });
+
+  it("returns null for a malformed response with neither optionId nor text", () => {
+    expect(
+      parseHitlResponse(
+        msg([
+          {
+            kind: "data",
+            data: {
+              type: HITL_RESPONSE_TYPE,
+              requestId: "req-3",
+              answeredBy: "U9"
+            }
+          }
+        ])
+      )
+    ).toBeNull();
+  });
+});
+
+describe("parseHitlTimeout", () => {
+  it("extracts the requestId and returns null when absent", () => {
+    const parts = buildHitlTimeoutParts("req-7");
+    expect(parseHitlTimeout(msg(parts))).toEqual({ requestId: "req-7" });
+    expect(parseHitlTimeout(msg([{ kind: "text", text: "hi" }]))).toBeNull();
   });
 });

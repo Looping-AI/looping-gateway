@@ -160,3 +160,73 @@ export function buildHitlTimeoutParts(requestId: string): Part[] {
     { kind: "data", data: { type: HITL_TIMEOUT_TYPE, requestId } }
   ];
 }
+
+/**
+ * Build the parts of the `input-required` status message an agent emits to raise
+ * a HITL prompt: a human-readable TextPart fallback plus the structured request
+ * DataPart the gateway renders in Slack. Symmetric to {@link buildHitlResponseParts};
+ * the DataPart round-trips through {@link parseHitlRequest}.
+ */
+export function buildHitlRequestParts(req: HitlRequest): Part[] {
+  return [
+    { kind: "text", text: req.prompt },
+    { kind: "data", data: { ...req, type: HITL_REQUEST_TYPE } }
+  ];
+}
+
+const hitlResponseSchema = z
+  .object({
+    type: z.literal(HITL_RESPONSE_TYPE),
+    requestId: z.string().min(1),
+    optionId: z.string().min(1).optional(),
+    text: z.string().min(1).optional(),
+    answeredBy: z.string().min(1)
+  })
+  .refine((data) => data.optionId !== undefined || data.text !== undefined, {
+    message: "HITL response must include optionId or text"
+  });
+
+export type HitlResponse = z.infer<typeof hitlResponseSchema>;
+
+/** Find the DataPart of `type` in a message and validate it with `schema`. */
+function parseDataPart<T>(
+  message: Message | undefined,
+  type: string,
+  schema: z.ZodType<T>
+): T | null {
+  if (!message) return null;
+  for (const part of message.parts) {
+    if (part.kind !== "data") continue;
+    const data = part.data;
+    if (!isRecord(data) || data.type !== type) continue;
+    const parsed = schema.safeParse(data);
+    if (parsed.success) return parsed.data;
+  }
+  return null;
+}
+
+/**
+ * Find and validate the gateway → agent answer that resumes a parked task.
+ * Returns `null` when the message carries no HITL response DataPart.
+ */
+export function parseHitlResponse(
+  message: Message | undefined
+): HitlResponse | null {
+  return parseDataPart(message, HITL_RESPONSE_TYPE, hitlResponseSchema);
+}
+
+const hitlTimeoutSchema = z.object({
+  type: z.literal(HITL_TIMEOUT_TYPE),
+  requestId: z.string().min(1)
+});
+
+/**
+ * Find and validate the gateway → agent timeout that ends a parked task's wait.
+ * Returns `null` when the message carries no HITL timeout DataPart.
+ */
+export function parseHitlTimeout(
+  message: Message | undefined
+): { requestId: string } | null {
+  const parsed = parseDataPart(message, HITL_TIMEOUT_TYPE, hitlTimeoutSchema);
+  return parsed ? { requestId: parsed.requestId } : null;
+}
