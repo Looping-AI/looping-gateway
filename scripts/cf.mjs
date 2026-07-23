@@ -525,7 +525,9 @@ async function cmdRaw(args) {
       try {
         body = fs.readFileSync(filename, "utf8");
       } catch (err) {
-        die(`could not read data file ${filename}: ${err?.message ?? String(err)}`);
+        die(
+          `could not read data file ${filename}: ${err?.message ?? String(err)}`
+        );
       }
     } else {
       body = data;

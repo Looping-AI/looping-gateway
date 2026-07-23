@@ -32,7 +32,7 @@ redacts it from all output.
 | `npm run cf -- logs --worker looping-gateway --since 1h`  | Historical Worker logs (Observability), digest   |
 | `npm run cf -- logs --level error --grep MessageWorkflow` | Filter logs by level / message substring         |
 | `npm run cf -- wf`                                        | List Workflow definitions                        |
-| `npm run cf -- wf message-workflow [instanceId]`          | Workflow instances / one instance's steps         |
+| `npm run cf -- wf message-workflow [instanceId]`          | Workflow instances / one instance's steps        |
 | `npm run cf -- ai [logId]`                                | AI Gateway call digest / one call's prompt+reply |
 | `npm run cf -- [METHOD] <path> [-q k=v] [-d @file]`       | Raw passthrough (account-relative unless `/…`)   |
 
