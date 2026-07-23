@@ -519,8 +519,18 @@ async function cmdRaw(args) {
   }
   const data = flags.d ?? flags.data;
   let body;
-  if (data !== undefined)
-    body = data.startsWith("@") ? fs.readFileSync(data.slice(1), "utf8") : data;
+  if (data !== undefined) {
+    if (data.startsWith("@")) {
+      const filename = data.slice(1);
+      try {
+        body = fs.readFileSync(filename, "utf8");
+      } catch (err) {
+        die(`could not read data file ${filename}: ${err?.message ?? String(err)}`);
+      }
+    } else {
+      body = data;
+    }
+  }
 
   const apiPath = path.startsWith("/") ? path : acct(path);
   const { res, text } = await request(method, apiPath, { query, body });
