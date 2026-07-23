@@ -123,14 +123,14 @@ async function buildRemoteClient(target: A2ARemoteTarget): Promise<Client> {
 }
 
 /**
- * Send one A2A message to a **local** (in-process) agent. The SDK's `sendMessage`
- * is blocking by default, so this awaits the agent's whole turn (generation rides
- * the in-flight DO request, immune to eviction) and the value returned here is the
- * *final* Task, not just an acceptance. The agent's Task snapshots are handed to
- * the local push sender, which the SDK fires without awaiting — so the Slack
- * delivery is kicked off during this call and completes shortly after; the agent
- * DO registers it on `ctx.waitUntil`, so the runtime won't drop it. The caller
- * only forwards the task id for correlation and never handles model text directly.
+ * Send one A2A message to a **local** (in-process) agent. We pass
+ * `blocking: false`, so the SDK returns as soon as the agent accepts the turn (the
+ * initial `submitted` Task, carrying the real SDK-assigned task id) rather than
+ * awaiting generation — the same accept-only shape {@link sendA2ARemote} has, just
+ * in-process without the HTTP/JWT hop. Generation and the Slack delivery run
+ * asynchronously inside the agent DO, which keeps itself alive until the terminal
+ * delivery settles via a `ctx.waitUntil` liveness barrier. The caller only forwards
+ * the task id for correlation and never handles model text directly.
  */
 export async function sendA2ALocal(
   target: A2ALocalTarget,
@@ -140,7 +140,7 @@ export async function sendA2ALocal(
   const client = await buildLocalClient(target);
   const params: MessageSendParams = {
     message,
-    configuration: { pushNotificationConfig }
+    configuration: { pushNotificationConfig, blocking: false }
   };
   return acceptedTask(await client.sendMessage(params), message);
 }

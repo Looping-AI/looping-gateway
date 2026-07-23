@@ -561,10 +561,11 @@ export async function timeoutAgentTask(row: HitlRequestRow): Promise<void> {
  * then the cancel call. The response is authoritative — the gateway reconciles
  * from it and expects no push callback afterwards.
  *
- * Local built-ins run as a single blocking turn (no concurrent request can
- * interrupt them and they finish in seconds), so cancellation is a no-op for
- * them in v1 — reported as `not_cancelable` so the caller still reconciles its
- * ledger row without contacting anything.
+ * Local built-ins now run their turn in the background (accept-first), and the
+ * gateway stops them via the in-loop `isCancelRequested(token)` poll rather than
+ * A2A `tasks/cancel` — so `tasks/cancel` stays a no-op here, reported as
+ * `not_cancelable` so the caller still reconciles its ledger row without
+ * contacting anything.
  */
 export async function cancelAgentTask(
   agent: DispatchAgentRef,

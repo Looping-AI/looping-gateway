@@ -51,11 +51,18 @@ export abstract class A2AAgent extends Agent<Env> {
   }
 
   async fetch(request: Request): Promise<Response> {
-    const response = await serveA2A(request, this.getHandler());
-    // The SDK dispatches push delivery without awaiting it. Register the sender's
-    // in-flight deliveries on waitUntil so the runtime keeps this DO alive until
-    // they settle, instead of dropping them when the response returns.
-    if (this.sender) this.ctx.waitUntil(this.sender.drain());
+    const { response, taskId } = await serveA2A(request, this.getHandler());
+    // Local agents accept-first (`blocking: false`): the SDK returns the
+    // `submitted` accept immediately and runs the executor + push delivery as
+    // background promises. Keep this DO alive until the accepted turn's terminal
+    // reply is delivered — the accept carries its task id, so key the liveness
+    // barrier on it. A request with no accepted task (card discovery, tasks/cancel)
+    // has no pending turn, so fall back to draining any in-flight deliveries.
+    if (this.sender) {
+      this.ctx.waitUntil(
+        taskId ? this.sender.whenSettled(taskId) : this.sender.drain()
+      );
+    }
     return response;
   }
 }

@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { env } from "cloudflare:workers";
 import type { Task, TaskState } from "@a2a-js/sdk";
 import { InMemoryPushNotificationStore } from "@a2a-js/sdk/server";
 import { registerAgent } from "@/db/models/agents";
@@ -119,6 +120,13 @@ let key: TestKey;
 
 beforeEach(async () => {
   key = await makeKey(KID);
+  // Completing a task row calls signalReactionCollect → REACTION_WORKFLOW.get,
+  // which in miniflare probes a never-created workflow instance and emits engine
+  // teardown noise ("Engine was never started"). These tests don't assert reaction
+  // collection (that's reaction.spec), so stub the binding to a no-op.
+  vi.spyOn(env.REACTION_WORKFLOW, "get").mockResolvedValue({
+    sendEvent: async () => {}
+  } as unknown as WorkflowInstance);
   await registerAgent({
     name: "remoteagent",
     kind: "custom",
@@ -142,7 +150,10 @@ beforeEach(async () => {
   });
 });
 
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => {
+  vi.unstubAllGlobals();
+  vi.restoreAllMocks();
+});
 
 describe("handleRemoteAgentNotification", () => {
   it("verifies the callback, posts the reply, and completes the task", async () => {
@@ -661,5 +672,167 @@ describe("handleRemoteAgentNotification", () => {
     });
     const res = await handleRemoteAgentNotification(req);
     expect(res.status).toBe(401);
+  });
+});
+
+describe("LocalPushNotificationSender.whenSettled (accept-first liveness barrier)", () => {
+  /** True while `p` hasn't resolved within a short real-time window. */
+  async function isPending(p: Promise<unknown>): Promise<boolean> {
+    const PENDING = Symbol("pending");
+    const outcome = await Promise.race([
+      p.then(() => "resolved" as const),
+      new Promise<typeof PENDING>((res) => setTimeout(() => res(PENDING), 25))
+    ]);
+    return outcome === PENDING;
+  }
+
+  /** Register an admin agent + ledger rows and wire a sender that knows each task. */
+  async function makeSender(
+    agentName: string,
+    tasks: { token: string; taskId: string }[]
+  ): Promise<LocalPushNotificationSender> {
+    await registerAgent({
+      name: agentName,
+      kind: "admin",
+      displayName: "Admin Bar",
+      a2aEndpoint: "https://agent.local/a2a",
+      notifyOn: "mention",
+      workspaceId: 0
+    });
+    const store = new InMemoryPushNotificationStore();
+    for (const t of tasks) {
+      await createAgentTask({
+        token: t.token,
+        taskId: t.taskId,
+        agentName,
+        channelId: "C-bar",
+        messageTs: "1700.1",
+        replyThreadTs: null,
+        eventId: `Ev-${t.token}`
+      });
+      await store.save(t.taskId, localPushNotificationConfig(t.token));
+    }
+    return new LocalPushNotificationSender(store, "admin");
+  }
+
+  /** A snapshot for `taskId` in `state`, carrying `text` under a state-scoped id. */
+  function taskFor(taskId: string, state: TaskState, text = "reply"): Task {
+    return {
+      ...makeStatusTask(text, { state, messageId: `${taskId}:${state}` }),
+      id: taskId
+    };
+  }
+
+  it("stays pending across submitted/working, resolves after the terminal delivery", async () => {
+    const posts: SlackPost[] = [];
+    stubFetch(key, posts);
+    const sender = await makeSender("admin-flow", [
+      { token: "flow-tok", taskId: "flow-task" }
+    ]);
+
+    const barrier = sender.whenSettled("flow-task");
+    await sender.send(taskFor("flow-task", "submitted", "accepting"));
+    await sender.send(taskFor("flow-task", "working", "working on it"));
+    expect(await isPending(barrier)).toBe(true);
+
+    await sender.send(taskFor("flow-task", "completed", "final answer"));
+    await expect(barrier).resolves.toBeUndefined();
+    expect(posts.map((p) => p.text)).toEqual(["working on it", "final answer"]);
+    expect((await getAgentTaskByToken("flow-tok"))?.status).toBe("completed");
+  });
+
+  it("resolves on a terminal canceled even though nothing is posted", async () => {
+    const posts: SlackPost[] = [];
+    stubFetch(key, posts);
+    const sender = await makeSender("admin-cxl", [
+      { token: "cxl-tok", taskId: "cxl-task" }
+    ]);
+
+    const barrier = sender.whenSettled("cxl-task");
+    await sender.send({
+      ...taskFor("cxl-task", "canceled"),
+      status: { state: "canceled" }
+    });
+    await expect(barrier).resolves.toBeUndefined();
+    expect(posts).toHaveLength(0);
+    expect((await getAgentTaskByToken("cxl-tok"))?.status).toBe("completed");
+  });
+
+  it("resolves even when the terminal delivery fails after retries", async () => {
+    const posts: SlackPost[] = [];
+    stubFetch(key, posts);
+    // Sender expects "admin" but the registry row is onboarding-kind → deliver
+    // throws (a non-validation error), exhausts retries, and records the failure.
+    // The barrier must still resolve so ctx.waitUntil can never hang.
+    await registerAgent({
+      name: "mismatch",
+      kind: "onboarding",
+      displayName: "Mismatch",
+      a2aEndpoint: "https://agent.local/a2a",
+      notifyOn: "mention",
+      workspaceId: 0
+    });
+    await createAgentTask({
+      token: "mis-tok",
+      taskId: "mis-task",
+      agentName: "mismatch",
+      channelId: "C-bar",
+      messageTs: "1700.1",
+      replyThreadTs: null,
+      eventId: "Ev-mis"
+    });
+    const store = new InMemoryPushNotificationStore();
+    await store.save("mis-task", localPushNotificationConfig("mis-tok"));
+    const sender = new LocalPushNotificationSender(store, "admin");
+
+    const barrier = sender.whenSettled("mis-task");
+    await sender.send(taskFor("mis-task", "completed", "unreachable"));
+    await expect(barrier).resolves.toBeUndefined();
+    expect((await getAgentTaskByToken("mis-tok"))?.lastError).toBeTruthy();
+  }, 10_000);
+
+  it("tracks two task ids independently", async () => {
+    const posts: SlackPost[] = [];
+    stubFetch(key, posts);
+    const sender = await makeSender("admin-multi", [
+      { token: "a-tok", taskId: "a-task" },
+      { token: "b-tok", taskId: "b-task" }
+    ]);
+
+    const a = sender.whenSettled("a-task");
+    const b = sender.whenSettled("b-task");
+    await sender.send(taskFor("a-task", "completed", "done A"));
+    await expect(a).resolves.toBeUndefined();
+    expect(await isPending(b)).toBe(true);
+  });
+
+  it("resolves immediately when called after the terminal already settled", async () => {
+    const posts: SlackPost[] = [];
+    stubFetch(key, posts);
+    const sender = await makeSender("admin-late", [
+      { token: "late-tok", taskId: "late-task" }
+    ]);
+
+    await sender.send(taskFor("late-task", "completed", "answer"));
+    // Let the terminal delivery's .finally() record the settle.
+    await new Promise((r) => setTimeout(r, 15));
+    await expect(sender.whenSettled("late-task")).resolves.toBeUndefined();
+  });
+
+  it("resolves via the safety timeout if no terminal is ever published", async () => {
+    vi.useFakeTimers();
+    try {
+      const sender = new LocalPushNotificationSender(
+        new InMemoryPushNotificationStore(),
+        "admin"
+      );
+      const barrier = sender.whenSettled("orphan-task");
+      // Fire the safety timer regardless of its configured duration; awaiting the
+      // barrier proves it resolved (the test would otherwise hang, not race a flag).
+      await vi.runAllTimersAsync();
+      await expect(barrier).resolves.toBeUndefined();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
