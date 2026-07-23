@@ -15,7 +15,7 @@ import {
   type HitlRequest,
   type HitlOption
 } from "@/a2a/hitl";
-import { postBlocks, updateBlocks } from "@/wrappers/slack";
+import { postBlocks, postReply, updateBlocks } from "@/wrappers/slack";
 
 /** Sanitize an agent-authored option (label/description are untrusted output). */
 function sanitizeOption(option: HitlOption): HitlOption {
@@ -137,6 +137,35 @@ export async function markHitlPromptResolved(
     });
   } catch (err) {
     console.error("[hitl] failed to update resolved prompt", {
+      requestId: row.requestId,
+      err: err instanceof Error ? err.message : String(err)
+    });
+  }
+}
+
+/**
+ * Post a thread notice that a parked task could not be handed back to its agent:
+ * the continuation was not accepted (the agent is unreachable or broke the A2A
+ * contract), so the task will not resume. Mirrors how a *fresh* dispatch surfaces
+ * a non-accept to the user (the MessageWorkflow error-reply path) — a parked task
+ * deserves the same visibility so the user knows to fix the agent. Any recorded
+ * answer still stands; only the handoff failed. Posted under the gateway's own
+ * identity, not the agent's — the agent is the thing that's broken. Best-effort: a
+ * failed post is logged, never thrown.
+ */
+export async function notifyHitlContinuationFailed(
+  row: HitlRequestRow
+): Promise<void> {
+  try {
+    await postReply(
+      row.channelId,
+      row.threadTs,
+      `⚠️ Couldn't reach *${row.agentName}* to continue this task — the agent looks unreachable. Please check the agent.`,
+      null,
+      null
+    );
+  } catch (err) {
+    console.error("[hitl] failed to post continuation-failure notice", {
       requestId: row.requestId,
       err: err instanceof Error ? err.message : String(err)
     });

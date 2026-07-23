@@ -31,11 +31,17 @@ const ISSUER = "https://gw.example.com";
 interface Captured {
   slackUpdates: URLSearchParams[];
   slackEphemerals: URLSearchParams[];
+  /** Plain `chat.postMessage` thread replies (e.g. the resume-failed notice). */
+  slackReplies: URLSearchParams[];
   resumeMessages: Message[];
 }
 
-/** Route Slack API calls and the remote A2A send to a single capturing stub. */
-function stub(captured: Captured) {
+/**
+ * Route Slack API calls and the remote A2A send to a single capturing stub. Pass
+ * `rejectResume` to make the remote break the async contract (a sync message
+ * reply instead of a Task ack), so the continuation is not accepted.
+ */
+function stub(captured: Captured, opts: { rejectResume?: boolean } = {}) {
   const card = buildAgentCard({
     name: "Remote",
     description: "remote agent",
@@ -59,6 +65,12 @@ function stub(captured: Captured) {
         );
         return Response.json({ ok: true, message_ts: "1700.99" });
       }
+      if (url.includes("chat.postMessage")) {
+        captured.slackReplies.push(
+          new URLSearchParams(await request.clone().text())
+        );
+        return Response.json({ ok: true, ts: "1700.98" });
+      }
       // A2A: card discovery (GET) + message/send (POST).
       if (request.method.toUpperCase() === "POST") {
         const rpc = (await request.clone().json()) as {
@@ -66,6 +78,20 @@ function stub(captured: Captured) {
           params?: { message?: Message };
         };
         captured.resumeMessages.push(rpc.params?.message as Message);
+        if (opts.rejectResume) {
+          // Sync reply instead of a Task ack → the gateway treats it as a non-accept.
+          return Response.json({
+            jsonrpc: "2.0",
+            id: rpc.id ?? 1,
+            result: {
+              kind: "message",
+              messageId: "r1",
+              role: "agent",
+              parts: [{ kind: "text", text: "no ack" }],
+              contextId: "reply"
+            }
+          });
+        }
         return Response.json({
           jsonrpc: "2.0",
           id: rpc.id ?? 1,
@@ -184,6 +210,7 @@ describe("handleSlackInteractivity", () => {
     const captured: Captured = {
       slackUpdates: [],
       slackEphemerals: [],
+      slackReplies: [],
       resumeMessages: []
     };
     stub(captured);
@@ -232,6 +259,7 @@ describe("handleSlackInteractivity", () => {
     const captured: Captured = {
       slackUpdates: [],
       slackEphemerals: [],
+      slackReplies: [],
       resumeMessages: []
     };
     stub(captured);
@@ -255,5 +283,38 @@ describe("handleSlackInteractivity", () => {
     expect(captured.resumeMessages).toHaveLength(1); // only the first resumed
     expect(captured.slackEphemerals).toHaveLength(1); // second got a notice
     expect(captured.slackEphemerals[0].get("user")).toBe("U1");
+  });
+
+  it("notifies the thread when the remote does not accept the resumed answer", async () => {
+    await seedParkedRequest("req-3");
+    const captured: Captured = {
+      slackUpdates: [],
+      slackEphemerals: [],
+      slackReplies: [],
+      resumeMessages: []
+    };
+    stub(captured, { rejectResume: true });
+
+    const ctx = createExecutionContext();
+    await handleSlackInteractivity(
+      await interactivityRequest(buttonAction("req-3", "approve")),
+      ctx
+    );
+    await waitOnExecutionContext(ctx);
+
+    // The answer is recorded and the prompt still shows the answered state — the
+    // human's action stands; only the handoff to the agent failed.
+    const row = await getHitlRequest("req-3");
+    expect(row?.status).toBe("answered");
+    expect(captured.slackUpdates).toHaveLength(1);
+
+    // The continuation was attempted but not accepted, so the task stays parked.
+    expect(captured.resumeMessages).toHaveLength(1);
+    expect((await getAgentTaskByToken("tok-1"))?.status).toBe("awaiting-input");
+
+    // The thread is told the agent couldn't be reached, so the user can fix it.
+    expect(captured.slackReplies).toHaveLength(1);
+    expect(captured.slackReplies[0].get("thread_ts")).toBe("1700.1");
+    expect(captured.slackReplies[0].get("text")).toContain("remoteagent");
   });
 });

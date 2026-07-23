@@ -45,7 +45,30 @@ interface RemotePost {
   message: Message;
 }
 
-function stubRemote(posts: RemotePost[]) {
+/** A `chat.postMessage` the gateway sent to the thread (e.g. a failure notice). */
+interface SlackNotice {
+  channel: string;
+  text: string;
+  thread_ts?: string;
+}
+
+/** Record a `chat.postMessage` call into `notices` and ack it like Slack would. */
+async function captureSlackNotice(
+  request: Request,
+  notices?: SlackNotice[]
+): Promise<Response> {
+  if (notices) {
+    const body = new URLSearchParams(await request.clone().text());
+    notices.push({
+      channel: body.get("channel") ?? "",
+      text: body.get("text") ?? "",
+      thread_ts: body.get("thread_ts") ?? undefined
+    });
+  }
+  return Response.json({ ok: true, ts: "1700.notice" });
+}
+
+function stubRemote(posts: RemotePost[], notices?: SlackNotice[]) {
   const card = buildAgentCard({
     name: "Remote",
     description: "remote dispatch test agent",
@@ -57,6 +80,9 @@ function stubRemote(posts: RemotePost[]) {
       const request =
         input instanceof Request ? input : new Request(input, init);
       const method = request.method.toUpperCase();
+      if (request.url.includes("chat.postMessage")) {
+        return captureSlackNotice(request, notices);
+      }
       if (method === "POST") {
         const rpc = (await request.clone().json()) as {
           id?: unknown;
@@ -83,7 +109,10 @@ function stubRemote(posts: RemotePost[]) {
   );
 }
 
-function stubRemoteContractViolation(posts: RemotePost[]) {
+function stubRemoteContractViolation(
+  posts: RemotePost[],
+  notices?: SlackNotice[]
+) {
   const card = buildAgentCard({
     name: "Remote",
     description: "remote dispatch test agent",
@@ -95,6 +124,9 @@ function stubRemoteContractViolation(posts: RemotePost[]) {
       const request =
         input instanceof Request ? input : new Request(input, init);
       const method = request.method.toUpperCase();
+      if (request.url.includes("chat.postMessage")) {
+        return captureSlackNotice(request, notices);
+      }
       if (method === "POST") {
         const rpc = (await request.clone().json()) as {
           id?: unknown;
@@ -496,9 +528,10 @@ describe("timeoutAgentTask (remote continuation)", () => {
     expect((await getAgentTaskByToken(TOKEN))?.status).toBe("pending");
   });
 
-  it("leaves the task parked when the remote does not accept the continuation", async () => {
+  it("leaves the task parked and notifies the thread when the remote does not accept the continuation", async () => {
     const posts: RemotePost[] = [];
-    stubRemoteContractViolation(posts);
+    const notices: SlackNotice[] = [];
+    stubRemoteContractViolation(posts, notices);
     const row = await setupParkedRow();
 
     await timeoutAgentTask(row);
@@ -507,5 +540,11 @@ describe("timeoutAgentTask (remote continuation)", () => {
     // No Task ack → resumeFromInput is skipped, so the row stays suspended and a
     // later sweep can retry rather than stranding it as un-parked-but-unresumed.
     expect((await getAgentTaskByToken(TOKEN))?.status).toBe("awaiting-input");
+    // The user is told the agent couldn't be reached, so a silently-down agent
+    // doesn't leave them staring at a prompt that never resolves.
+    expect(notices).toHaveLength(1);
+    expect(notices[0].thread_ts).toBe("1700.1");
+    expect(notices[0].text).toContain("alpha");
+    expect(notices[0].text.toLowerCase()).toContain("unreachable");
   });
 });

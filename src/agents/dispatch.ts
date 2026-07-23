@@ -9,6 +9,7 @@ import type { HitlRequestRow } from "@/db/models/hitl-requests";
 import { buildHitlResponseParts, buildHitlTimeoutParts } from "@/a2a/hitl";
 import { buildAgentCard } from "@/a2a/card";
 import { localPushNotificationConfig } from "@/a2a/notifications/local";
+import { notifyHitlContinuationFailed } from "@/a2a/notifications/hitl";
 import {
   sendA2ALocal,
   sendA2ARemote,
@@ -364,27 +365,36 @@ const SYSTEM_CALLER: UserAuthContext = {
 };
 
 /**
+ * Whether a parked task was successfully handed back to its agent. `"failed"`
+ * covers every reason the continuation could not be delivered (agent gone, no
+ * endpoint, or a non-accept) — the caller surfaces it to the user identically.
+ */
+type ContinuationOutcome = "resumed" | "failed";
+
+/**
  * Continue a task parked on a human-in-the-loop prompt. Mirrors
  * {@link dispatchToAgent}'s two branches but *continues* an existing task rather
  * than starting one: the message carries the paused `taskId` + `contextId` +
  * `referenceTaskIds` (A2A multi-turn), and the push config reuses the original
  * `token` so continued callbacks land on the same `agent_tasks` row. On a
  * successful accept the row is un-parked (`resumeFromInput`) so the resumed
- * turn's callbacks are honored again. Shared by the human-answer path
- * ({@link resumeAgentTask}) and the TTL-timeout path ({@link timeoutAgentTask});
- * the `messageId` is deterministic so a retried continuation dedupes at the agent.
+ * turn's callbacks are honored again and `"resumed"` is returned; any failure
+ * returns `"failed"` so the caller can tell the user the task did not continue.
+ * Shared by the human-answer path ({@link resumeAgentTask}) and the TTL-timeout
+ * path ({@link timeoutAgentTask}); the `messageId` is deterministic so a retried
+ * continuation dedupes at the agent.
  */
 async function sendTaskContinuation(
   row: HitlRequestRow,
   input: { parts: Message["parts"]; messageId: string; caller: UserAuthContext }
-): Promise<void> {
+): Promise<ContinuationOutcome> {
   const agent = await getAgent(row.agentName);
   if (!agent) {
     console.error("[hitl] continuation: agent no longer registered", {
       agent: row.agentName,
       requestId: row.requestId
     });
-    return;
+    return "failed";
   }
   if (!row.taskId) {
     // A parked task always has a taskId (it was accepted before it could park),
@@ -392,7 +402,7 @@ async function sendTaskContinuation(
     console.error("[hitl] continuation: request has no taskId", {
       requestId: row.requestId
     });
-    return;
+    return "failed";
   }
 
   const ns = localNamespaceFor(agent.kind);
@@ -406,7 +416,7 @@ async function sendTaskContinuation(
       console.error("[hitl] continuation: gateway public URL not discovered", {
         requestId: row.requestId
       });
-      return;
+      return "failed";
     }
     const ref: DispatchAgentRef = {
       name: agent.name,
@@ -436,13 +446,13 @@ async function sendTaskContinuation(
     );
     if (accept.kind === "accepted") {
       await resumeFromInput(row.token);
-    } else {
-      console.error("[hitl] continuation: remote did not accept", {
-        agent: agent.name,
-        requestId: row.requestId
-      });
+      return "resumed";
     }
-    return;
+    console.error("[hitl] continuation: remote did not accept", {
+      agent: agent.name,
+      requestId: row.requestId
+    });
+    return "failed";
   }
 
   // Local built-in → in-process via DO stub.fetch. The DO instance is
@@ -456,7 +466,7 @@ async function sendTaskContinuation(
         channelId: row.channelId,
         requestId: row.requestId
       });
-      return;
+      return "failed";
     }
     metadata = {
       user: input.caller,
@@ -493,24 +503,28 @@ async function sendTaskContinuation(
   );
   if (accept.kind === "accepted") {
     await resumeFromInput(row.token);
-  } else {
-    console.error("[hitl] continuation: local agent did not accept", {
-      agent: agent.name,
-      requestId: row.requestId
-    });
+    return "resumed";
   }
+  console.error("[hitl] continuation: local agent did not accept", {
+    agent: agent.name,
+    requestId: row.requestId
+  });
+  return "failed";
 }
 
 /**
  * Resume a parked task with a human's answer. The answerer becomes the caller
  * (anyone in the thread may answer), so a resumed local turn authorizes as them.
+ * The answer is already recorded and its Slack prompt already shows the answered
+ * state; if the handoff fails the answer still stands, so we only post a thread
+ * notice that the agent couldn't be reached — the user knows to go fix it.
  */
 export async function resumeAgentTask(
   row: HitlRequestRow,
   answer: HitlAnswer
 ): Promise<void> {
   const caller = await buildUserAuthContext(answer.answeredBy);
-  await sendTaskContinuation(row, {
+  const outcome = await sendTaskContinuation(row, {
     parts: buildHitlResponseParts({
       requestId: row.requestId,
       optionId: answer.optionId,
@@ -521,19 +535,23 @@ export async function resumeAgentTask(
     messageId: `${row.token}:r:${row.requestId}`,
     caller
   });
+  if (outcome === "failed") await notifyHitlContinuationFailed(row);
 }
 
 /**
  * End a parked task whose HITL prompt hit its TTL: send a timeout signal so the
  * agent can finalize gracefully. Authorizes as the zero-permission
- * {@link SYSTEM_CALLER} since no human answered.
+ * {@link SYSTEM_CALLER} since no human answered. If the timeout signal can't be
+ * delivered (the agent is unreachable), post a thread notice so the user learns
+ * the agent is down and can fix it — the expiry note alone wouldn't reveal that.
  */
 export async function timeoutAgentTask(row: HitlRequestRow): Promise<void> {
-  await sendTaskContinuation(row, {
+  const outcome = await sendTaskContinuation(row, {
     parts: buildHitlTimeoutParts(row.requestId),
     messageId: `${row.token}:t:${row.requestId}`,
     caller: SYSTEM_CALLER
   });
+  if (outcome === "failed") await notifyHitlContinuationFailed(row);
 }
 
 /**
