@@ -18,6 +18,26 @@ For all limits and quotas, retrieve from the product's `/platform/limits/` page.
 | `npm run types`       | Generate TypeScript types (runtime + Env) |
 | `npm run check`       | Format, lint, typecheck + verify types    |
 
+## Debugging production (`npm run cf`)
+
+`scripts/cf.mjs` is a thin Cloudflare API proxy for inspecting the deployed
+Worker. It reads credentials from `.cf.env` (gitignored; copy `.cf.env.example`
+and fill in an account-scoped API token + account id) so the token never lands
+in shell history or an agent's context — the script holds it in memory and
+redacts it from all output.
+
+| Command                                                   | Purpose                                          |
+| --------------------------------------------------------- | ------------------------------------------------ |
+| `npm run cf -- verify`                                    | Check the API token                              |
+| `npm run cf -- logs --worker looping-gateway --since 1h`  | Historical Worker logs (Observability), digest   |
+| `npm run cf -- logs --level error --grep MessageWorkflow` | Filter logs by level / message substring         |
+| `npm run cf -- wf`                                        | List Workflow definitions                        |
+| `npm run cf -- wf message-workflow [instanceId]`          | Workflow instances / one instance' steps         |
+| `npm run cf -- ai [logId]`                                | AI Gateway call digest / one call's prompt+reply |
+| `npm run cf -- [METHOD] <path> [-q k=v] [-d @file]`       | Raw passthrough (account-relative unless `/…`)   |
+
+Run `npm run cf -- help` for the full flag list.
+
 ## TypeScript Types
 
 Follow Cloudflare's generated-types flow (https://developers.cloudflare.com/workers/languages/typescript/#generate-types):

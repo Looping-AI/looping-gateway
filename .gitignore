@@ -145,6 +145,9 @@ dist
 .wrangler
 .dev.vars
 
+# Cloudflare API credentials for scripts/cf.mjs (kept out of wrangler's dotenv
+# so the token is never loaded into the Worker env — cf.mjs reads it directly).
+.cf.env
 
 .dev.vars*
 !.dev.vars.example
