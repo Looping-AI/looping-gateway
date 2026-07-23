@@ -22,7 +22,7 @@ export const OperatorConfigKeys = {
    * JSON array of approved domain patterns for remote (custom) A2A agents.
    * Each entry covers that domain and all its subdomains. Stored on workspace 0
    * and applies org-wide. An absent or empty array means no remote agents are
-   * approved (deny-all). Managed via the `remote_agent_domains` admin tool.
+   * approved (deny-all). Managed via the `agents_domains_add` / `agents_domains_remove` admin tools.
    */
   REMOTE_AGENT_ALLOWED_DOMAINS: "remote_agent_allowed_domains",
   /**
@@ -30,12 +30,12 @@ export const OperatorConfigKeys = {
    * and served from the per-workspace admin DO (`/icons/{wsId}/admin/{key}`).
    * Stored per workspace so each admin instance has its own avatar; read by the
    * router to override the shared `admin` registry row's iconUrl. Managed via the
-   * `self_write` admin tool (`set_avatar`).
+   * `self_set_avatar` admin tool.
    */
   ADMIN_ICON_URL: "admin_icon_url",
   /**
    * Display name of this workspace's admin agent, set by the admin itself via the
-   * `self_write` tool. Stored per workspace (the `admin` registry row is shared
+   * `self_set_display_name` tool. Stored per workspace (the `admin` registry row is shared
    * across workspaces) and read by the router to override the row's displayName.
    */
   ADMIN_DISPLAY_NAME: "admin_display_name"

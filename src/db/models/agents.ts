@@ -106,7 +106,7 @@ export interface AgentRenderIdentity {
  * For every agent this is just its registry row — except the admin. `agents.name`
  * is the primary key, so the admin is ONE row backing one Durable Object instance
  * per workspace; its avatar and display name are therefore per-workspace values in
- * `workspace_configs` (written by the `self_write` tool), not row fields. Reading
+ * `workspace_configs` (written by the `self_set_avatar` / `self_set_display_name` tools), not row fields. Reading
  * the row directly renders every workspace's admin as the seeded "Admin Agent"
  * with no avatar, so every path that posts as an agent must go through here.
  */

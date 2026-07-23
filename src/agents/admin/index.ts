@@ -49,8 +49,8 @@ const ICON_PATH = /^\/icons\/\d+\/([a-z0-9_-]+)\/([^/]+?)(?:\.\w+)?$/;
  * Workers-AI tool loop over registry/workspace CRUD tools gated by the caller's
  * auth context (carried on `message.metadata`).
  *
- * It also hosts avatars: the `self_write` (own avatar) and `agents_write`
- * `regenerate_avatar` (custom-agent avatars) tools generate an image via Workers AI
+ * It also hosts avatars: the `self_set_avatar` (own avatar) and
+ * `agents_regenerate_avatar` (custom-agent avatars) tools generate an image via Workers AI
  * and persist it here via {@link putIcon}, keyed per owner; `fetch` serves it back so
  * Slack (and any A2A consumer) can fetch the agent's `iconUrl` over HTTP.
  */

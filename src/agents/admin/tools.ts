@@ -40,15 +40,18 @@ import {
 } from "./avatar";
 
 /**
- * Admin tools — registry + workspace CRUD on D1. Consolidated to read/write per
- * domain (no tool proliferation): `agents_read`, `agents_write`, `workspace_read`,
- * `workspace_write`, `remote_agent_domains`, and `self_write` (the admin's own
- * avatar + display name). Writes use a discriminated `operation`.
+ * Admin tools — registry + workspace CRUD on D1. One flat, single-purpose tool
+ * per action, grouped by domain prefix: `agents_*` (read/create/update/delete,
+ * allow/revoke a channel, regenerate an avatar, plus org-only `agents_domains_*`),
+ * `workspace_*` (read + org-only create/set_admin_channel), and `self_*` (the
+ * admin's own avatar + display name). No discriminated `operation` — each tool
+ * takes a flat schema the model can emit reliably.
  *
  * Two gating layers (see PLAN Phase 4):
- *  1. Instance-scoped availability — `buildAdminTools` only constructs
- *     `workspace_write` on the org instance (`wsId === ORG_WORKSPACE_ID`); a
- *     workspace instance never receives it. `agents_*` act on the instance's wsId.
+ *  1. Instance-scoped availability — `buildAdminTools` only constructs the
+ *     org-only tools (`workspace_create`, `workspace_set_admin_channel`,
+ *     `agents_domains_*`) on the org instance (`wsId === ORG_WORKSPACE_ID`); a
+ *     workspace instance never receives them. `agents_*` act on the instance's wsId.
  *  2. Per-call `authorize()` defense-in-depth — the caller must be an admin of
  *     the instance's workspace (established by admin-channel membership).
  *
@@ -67,8 +70,8 @@ export interface AdminToolDeps {
   /**
    * Generate an avatar image from a prompt (Workers AI). Injected side-effect
    * seam — present only in production. When this or {@link storeIcon} is absent,
-   * avatar generation (self_write `set_avatar` and agents_write
-   * `regenerate_avatar`) returns a "not available" error at runtime.
+   * avatar generation (`self_set_avatar` and `agents_regenerate_avatar`) returns
+   * a "not available" error at runtime.
    */
   generateImage?: (prompt: string) => Promise<GeneratedImage>;
   /**
@@ -148,6 +151,68 @@ async function requireWritableAgent(
     return { error: `"${name}" is a built-in agent and cannot be modified.` };
   }
   return a;
+}
+
+// ---------------------------------------------------------------------------
+// Authorization gates — each returns a `deny` result, or null when the caller is
+// cleared. One per domain so the split tools keep the exact guard (and message)
+// their consolidated handler had.
+// ---------------------------------------------------------------------------
+
+/** Admin of this instance's workspace — the gate for the agent write tools. */
+function ensureAgentAdmin(deps: AdminToolDeps): ToolResult | null {
+  if (!deps.ctx) return deny("sign in as an admin to manage agents");
+  if (
+    !authorize(deps.ctx, { type: "IsWorkspaceAdmin", workspaceId: deps.wsId })
+  )
+    return deny(`managing agents requires admin of workspace ${deps.wsId}`);
+  return null;
+}
+
+/** Admin of this instance's workspace — the gate for the self-identity tools. */
+function ensureSelfAdmin(deps: AdminToolDeps): ToolResult | null {
+  if (!deps.ctx) return deny("sign in as an admin to change your own identity");
+  if (
+    !authorize(deps.ctx, { type: "IsWorkspaceAdmin", workspaceId: deps.wsId })
+  )
+    return deny(
+      `changing the admin agent's identity requires admin of workspace ${deps.wsId}`
+    );
+  return null;
+}
+
+/** Org admin — the gate for the org-only workspace tools. */
+function ensureWorkspaceOrgAdmin(deps: AdminToolDeps): ToolResult | null {
+  // Belt-and-suspenders: these tools are only built on admin:0, enforce anyway.
+  if (deps.wsId !== ORG_WORKSPACE_ID)
+    return deny("workspace management is only available to the org admin");
+  if (!deps.ctx) return deny("sign in as the org admin to manage workspaces");
+  if (
+    !authorize(deps.ctx, {
+      type: "IsWorkspaceAdmin",
+      workspaceId: ORG_WORKSPACE_ID
+    })
+  )
+    return deny("workspace management requires org admin");
+  return null;
+}
+
+/** Org admin — the gate for the org-only remote-agent-domain tools. */
+function ensureDomainsOrgAdmin(deps: AdminToolDeps): ToolResult | null {
+  if (deps.wsId !== ORG_WORKSPACE_ID)
+    return deny(
+      "remote agent domain management is only available to the org admin"
+    );
+  if (!deps.ctx)
+    return deny("sign in as the org admin to manage remote agent domains");
+  if (
+    !authorize(deps.ctx, {
+      type: "IsWorkspaceAdmin",
+      workspaceId: ORG_WORKSPACE_ID
+    })
+  )
+    return deny("remote agent domain management requires org admin");
+  return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -243,175 +308,206 @@ export async function agentsRead(
   return { agents: rows.map((a) => shape(a, byAgent.get(a.name) ?? [])) };
 }
 
-export type AgentsWriteArgs =
-  | {
-      operation: "register";
-      name: string;
-      displayName?: string;
-      a2aEndpoint: string;
-      notifyOn: NotifyOn;
-    }
-  | {
-      operation: "update";
-      name: string;
-      displayName?: string;
-      enabled?: boolean;
-      a2aEndpoint?: string;
-      notifyOn?: NotifyOn;
-    }
-  | { operation: "add_channel"; name: string; channelId: string }
-  | { operation: "remove_channel"; name: string; channelId: string }
-  | { operation: "regenerate_avatar"; name: string; instructions?: string }
-  | { operation: "unregister"; name: string };
+export type AgentsCreateArgs = {
+  name: string;
+  displayName?: string;
+  a2aEndpoint: string;
+  notifyOn: NotifyOn;
+};
 
-export async function agentsWrite(
+export async function agentsCreate(
   deps: AdminToolDeps,
-  args: AgentsWriteArgs
+  args: AgentsCreateArgs
 ): Promise<ToolResult> {
-  if (!deps.ctx) return deny("sign in as an admin to manage agents");
-  if (
-    !authorize(deps.ctx, { type: "IsWorkspaceAdmin", workspaceId: deps.wsId })
-  )
-    return deny(`managing agents requires admin of workspace ${deps.wsId}`);
+  const denied = ensureAgentAdmin(deps);
+  if (denied) return denied;
 
-  switch (args.operation) {
-    case "register": {
-      if (RESERVED_NAMES.has(args.name))
-        return { error: `"${args.name}" is a reserved built-in agent name.` };
-      if (await getAgent(args.name))
-        return { error: `An agent named "${args.name}" already exists.` };
-      let verified: VerifiedAgentCard;
-      try {
-        verified = await deps.verifyEndpoint(args.a2aEndpoint);
-      } catch (err) {
-        return {
-          error: `Endpoint verification failed: ${(err as Error).message}`
-        };
-      }
-      const row = await registerAgent({
-        name: args.name,
-        kind: "custom",
-        displayName: args.displayName ?? verified.displayName,
-        // No icon at registration — a custom agent's avatar is gateway-hosted and
-        // set later by the admin via `regenerate_avatar` (never sourced from the card).
-        a2aEndpoint: args.a2aEndpoint,
-        notifyOn: args.notifyOn,
-        workspaceId: deps.wsId,
-        cardSigningJku: verified.pin.cardSigningJku,
-        cardSigningKid: verified.pin.cardSigningKid
-      });
-      return { ok: true, agent: await present(row) };
-    }
-    case "update": {
-      const target = await requireWritableAgent(deps, args.name);
-      if ("error" in target) return target;
-      // A re-pointed endpoint is re-verified and must keep the SAME pinned
-      // signing identity (Trust-On-First-Use) — a different signer is rejected.
-      // `displayName` is refreshed from the new card unless the caller explicitly
-      // overrides it here. `iconUrl` is NOT touched — the avatar is gateway-hosted
-      // and admin-generated, so it survives endpoint changes.
-      let verified: VerifiedAgentCard | undefined;
-      if (
-        args.a2aEndpoint !== undefined &&
-        args.a2aEndpoint !== target.a2aEndpoint
-      ) {
-        try {
-          verified = await deps.verifyEndpoint(args.a2aEndpoint);
-        } catch (err) {
-          return {
-            error: `Endpoint verification failed: ${(err as Error).message}`
-          };
-        }
-        if (
-          target.cardSigningKid &&
-          (verified.pin.cardSigningKid !== target.cardSigningKid ||
-            verified.pin.cardSigningJku !== target.cardSigningJku)
-        ) {
-          return {
-            error:
-              `New endpoint for "${args.name}" is signed by a different key than the ` +
-              `one pinned at registration. Unregister and re-register if the agent's ` +
-              `signing identity changed intentionally.`
-          };
-        }
-      }
-      await updateAgent(args.name, {
-        displayName:
-          args.displayName !== undefined
-            ? args.displayName
-            : verified?.displayName,
-        enabled: args.enabled,
-        a2aEndpoint: args.a2aEndpoint,
-        notifyOn: args.notifyOn,
-        ...(verified
-          ? {
-              cardSigningJku: verified.pin.cardSigningJku,
-              cardSigningKid: verified.pin.cardSigningKid
-            }
-          : {})
-      });
-      const updated = await getAgent(args.name);
+  if (RESERVED_NAMES.has(args.name))
+    return { error: `"${args.name}" is a reserved built-in agent name.` };
+  if (await getAgent(args.name))
+    return { error: `An agent named "${args.name}" already exists.` };
+  let verified: VerifiedAgentCard;
+  try {
+    verified = await deps.verifyEndpoint(args.a2aEndpoint);
+  } catch (err) {
+    return {
+      error: `Endpoint verification failed: ${(err as Error).message}`
+    };
+  }
+  const row = await registerAgent({
+    name: args.name,
+    kind: "custom",
+    displayName: args.displayName ?? verified.displayName,
+    // No icon at registration — a custom agent's avatar is gateway-hosted and set
+    // later by the admin via `agents_regenerate_avatar` (never from the card).
+    a2aEndpoint: args.a2aEndpoint,
+    notifyOn: args.notifyOn,
+    workspaceId: deps.wsId,
+    cardSigningJku: verified.pin.cardSigningJku,
+    cardSigningKid: verified.pin.cardSigningKid
+  });
+  return { ok: true, agent: await present(row) };
+}
+
+export type AgentsUpdateArgs = {
+  name: string;
+  displayName?: string;
+  enabled?: boolean;
+  a2aEndpoint?: string;
+  notifyOn?: NotifyOn;
+};
+
+export async function agentsUpdate(
+  deps: AdminToolDeps,
+  args: AgentsUpdateArgs
+): Promise<ToolResult> {
+  const denied = ensureAgentAdmin(deps);
+  if (denied) return denied;
+
+  const target = await requireWritableAgent(deps, args.name);
+  if ("error" in target) return target;
+  // A re-pointed endpoint is re-verified and must keep the SAME pinned
+  // signing identity (Trust-On-First-Use) — a different signer is rejected.
+  // `displayName` is refreshed from the new card unless the caller explicitly
+  // overrides it here. `iconUrl` is NOT touched — the avatar is gateway-hosted
+  // and admin-generated, so it survives endpoint changes.
+  let verified: VerifiedAgentCard | undefined;
+  if (
+    args.a2aEndpoint !== undefined &&
+    args.a2aEndpoint !== target.a2aEndpoint
+  ) {
+    try {
+      verified = await deps.verifyEndpoint(args.a2aEndpoint);
+    } catch (err) {
       return {
-        ok: true,
-        agent: updated ? await present(updated) : null
+        error: `Endpoint verification failed: ${(err as Error).message}`
       };
     }
-    case "add_channel": {
-      const target = await requireWritableAgent(deps, args.name);
-      if ("error" in target) return target;
-      if (isDmChannel(args.channelId)) {
-        return {
-          error:
-            "DM channels are reserved for the onboarding agent and cannot be assigned to custom agents."
-        };
-      }
-      const adminWs = await getWorkspaceByAdminChannel(args.channelId);
-      if (adminWs) {
-        return { error: "Admin channels cannot be assigned to custom agents." };
-      }
-      await attachAgentChannel({
-        agentName: args.name,
-        channelId: args.channelId,
-        workspaceId: deps.wsId
-      });
-      return { ok: true, agent: await present(target) };
-    }
-    case "remove_channel": {
-      const target = await requireWritableAgent(deps, args.name);
-      if ("error" in target) return target;
-      await detachAgentChannel(args.name, args.channelId);
-      return { ok: true, agent: await present(target) };
-    }
-    case "regenerate_avatar": {
-      const target = await requireWritableAgent(deps, args.name);
-      if ("error" in target) return target;
-      const prompt = buildAgentAvatarPrompt({
-        agentName: target.name,
-        displayName: target.displayName,
-        instructions: args.instructions
-      });
-      const result = await generateAndStoreIcon(deps, target.name, prompt);
-      if ("error" in result) return result;
-      await updateAgent(args.name, { iconUrl: result.iconUrl });
-      const updated = await getAgent(args.name);
+    if (
+      target.cardSigningKid &&
+      (verified.pin.cardSigningKid !== target.cardSigningKid ||
+        verified.pin.cardSigningJku !== target.cardSigningJku)
+    ) {
       return {
-        ok: true,
-        agent: updated ? await present(updated) : null,
-        note: `Avatar generated for "${args.name}" — it appears on the agent's next reply.`
+        error:
+          `New endpoint for "${args.name}" is signed by a different key than the ` +
+          `one pinned at registration. Unregister and re-register if the agent's ` +
+          `signing identity changed intentionally.`
       };
-    }
-    case "unregister": {
-      const target = await requireWritableAgent(deps, args.name);
-      if ("error" in target) return target;
-      // Destructive + irreversible: gate behind an explicit human approval rather
-      // than deleting inline. The actual delete runs on the resumed turn once the
-      // user clicks Approve (see runGatedAction).
-      return requestApproval(deps, {
-        prompt: `Delete agent *${args.name}*? This permanently removes it and its channel mappings, and cannot be undone.`,
-        action: { kind: "unregister_agent", name: args.name, wsId: deps.wsId }
-      });
     }
   }
+  await updateAgent(args.name, {
+    displayName:
+      args.displayName !== undefined ? args.displayName : verified?.displayName,
+    enabled: args.enabled,
+    a2aEndpoint: args.a2aEndpoint,
+    notifyOn: args.notifyOn,
+    ...(verified
+      ? {
+          cardSigningJku: verified.pin.cardSigningJku,
+          cardSigningKid: verified.pin.cardSigningKid
+        }
+      : {})
+  });
+  const updated = await getAgent(args.name);
+  return {
+    ok: true,
+    agent: updated ? await present(updated) : null
+  };
+}
+
+export type AgentsAllowChannelArgs = { name: string; channelId: string };
+
+export async function agentsAllowChannel(
+  deps: AdminToolDeps,
+  args: AgentsAllowChannelArgs
+): Promise<ToolResult> {
+  const denied = ensureAgentAdmin(deps);
+  if (denied) return denied;
+
+  const target = await requireWritableAgent(deps, args.name);
+  if ("error" in target) return target;
+  if (isDmChannel(args.channelId)) {
+    return {
+      error:
+        "DM channels are reserved for the onboarding agent and cannot be assigned to custom agents."
+    };
+  }
+  const adminWs = await getWorkspaceByAdminChannel(args.channelId);
+  if (adminWs) {
+    return { error: "Admin channels cannot be assigned to custom agents." };
+  }
+  await attachAgentChannel({
+    agentName: args.name,
+    channelId: args.channelId,
+    workspaceId: deps.wsId
+  });
+  return { ok: true, agent: await present(target) };
+}
+
+export type AgentsRevokeChannelArgs = { name: string; channelId: string };
+
+export async function agentsRevokeChannel(
+  deps: AdminToolDeps,
+  args: AgentsRevokeChannelArgs
+): Promise<ToolResult> {
+  const denied = ensureAgentAdmin(deps);
+  if (denied) return denied;
+
+  const target = await requireWritableAgent(deps, args.name);
+  if ("error" in target) return target;
+  await detachAgentChannel(args.name, args.channelId);
+  return { ok: true, agent: await present(target) };
+}
+
+export type AgentsRegenerateAvatarArgs = {
+  name: string;
+  instructions?: string;
+};
+
+export async function agentsRegenerateAvatar(
+  deps: AdminToolDeps,
+  args: AgentsRegenerateAvatarArgs
+): Promise<ToolResult> {
+  const denied = ensureAgentAdmin(deps);
+  if (denied) return denied;
+
+  const target = await requireWritableAgent(deps, args.name);
+  if ("error" in target) return target;
+  const prompt = buildAgentAvatarPrompt({
+    agentName: target.name,
+    displayName: target.displayName,
+    instructions: args.instructions
+  });
+  const result = await generateAndStoreIcon(deps, target.name, prompt);
+  if ("error" in result) return result;
+  await updateAgent(args.name, { iconUrl: result.iconUrl });
+  const updated = await getAgent(args.name);
+  return {
+    ok: true,
+    agent: updated ? await present(updated) : null,
+    note: `Avatar generated for "${args.name}" — it appears on the agent's next reply.`
+  };
+}
+
+export type AgentsDeleteArgs = { name: string };
+
+export async function agentsDelete(
+  deps: AdminToolDeps,
+  args: AgentsDeleteArgs
+): Promise<ToolResult> {
+  const denied = ensureAgentAdmin(deps);
+  if (denied) return denied;
+
+  const target = await requireWritableAgent(deps, args.name);
+  if ("error" in target) return target;
+  // Destructive + irreversible: gate behind an explicit human approval rather
+  // than deleting inline. The actual delete runs on the resumed turn once the
+  // user clicks Approve (see runGatedAction).
+  return requestApproval(deps, {
+    prompt: `Delete agent *${args.name}*? This permanently removes it and its channel mappings, and cannot be undone.`,
+    action: { kind: "unregister_agent", name: args.name, wsId: deps.wsId }
+  });
 }
 
 export async function workspaceRead(
@@ -436,96 +532,61 @@ export async function workspaceRead(
   return { workspaces: ws ? [ws] : [] };
 }
 
-export type WorkspaceWriteArgs =
-  | { operation: "create"; name: string }
-  | { operation: "set_admin_channel"; id: number; channelId: string };
+export type WorkspaceCreateArgs = { name: string };
 
-export async function workspaceWrite(
+export async function workspaceCreate(
   deps: AdminToolDeps,
-  args: WorkspaceWriteArgs
+  args: WorkspaceCreateArgs
 ): Promise<ToolResult> {
-  // Belt-and-suspenders: this tool is only built on admin:0, but enforce anyway.
-  if (deps.wsId !== ORG_WORKSPACE_ID)
-    return deny("workspace management is only available to the org admin");
-  if (!deps.ctx) return deny("sign in as the org admin to manage workspaces");
-  if (
-    !authorize(deps.ctx, {
-      type: "IsWorkspaceAdmin",
-      workspaceId: ORG_WORKSPACE_ID
-    })
-  )
-    return deny("workspace management requires org admin");
+  const denied = ensureWorkspaceOrgAdmin(deps);
+  if (denied) return denied;
 
-  switch (args.operation) {
-    case "create": {
-      const ws = await createWorkspace({ name: args.name });
-      return { ok: true, workspace: ws };
-    }
-    case "set_admin_channel": {
-      if (!(await getWorkspace(args.id)))
-        return { error: `Workspace ${args.id} not found.` };
-      await setWorkspaceAdminChannel(args.id, args.channelId);
-      return { ok: true, workspace: await getWorkspace(args.id) };
-    }
-  }
+  const ws = await createWorkspace({ name: args.name });
+  return { ok: true, workspace: ws };
+}
+
+export type WorkspaceSetAdminChannelArgs = { id: number; channelId: string };
+
+export async function workspaceSetAdminChannel(
+  deps: AdminToolDeps,
+  args: WorkspaceSetAdminChannelArgs
+): Promise<ToolResult> {
+  const denied = ensureWorkspaceOrgAdmin(deps);
+  if (denied) return denied;
+
+  if (!(await getWorkspace(args.id)))
+    return { error: `Workspace ${args.id} not found.` };
+  await setWorkspaceAdminChannel(args.id, args.channelId);
+  return { ok: true, workspace: await getWorkspace(args.id) };
 }
 
 // ---------------------------------------------------------------------------
-// AI-SDK tool wiring — thin wrappers over the handlers above.
-// ---------------------------------------------------------------------------
-// remote_agent_domains — org-only
+// agents_domains — org-only allow-list of domains for remote (custom) agents.
 // ---------------------------------------------------------------------------
 
-type RemoteAgentDomainsArgs =
-  | { operation: "list" }
-  | { operation: "add"; domain: string }
-  | { operation: "remove"; domain: string };
-
-export async function remoteAgentDomains(
-  deps: AdminToolDeps,
-  args: RemoteAgentDomainsArgs
-): Promise<ToolResult> {
-  if (deps.wsId !== ORG_WORKSPACE_ID)
-    return deny(
-      "remote agent domain management is only available to the org admin"
-    );
-  if (!deps.ctx)
-    return deny("sign in as the org admin to manage remote agent domains");
-  if (
-    !authorize(deps.ctx, {
-      type: "IsWorkspaceAdmin",
-      workspaceId: ORG_WORKSPACE_ID
-    })
-  )
-    return deny("remote agent domain management requires org admin");
-
-  const current = await getAllowedRemoteAgentDomains();
-
-  if (args.operation === "list") {
-    return {
-      approvedDomains: current,
-      note:
-        "Each entry covers that domain and all its subdomains. " +
-        "An empty list means no custom (remote) agents are approved."
-    };
-  }
-
-  const rawDomain = args.domain.trim().toLowerCase();
+/**
+ * Normalize a caller-supplied domain: strip any scheme/path/port, require a
+ * multi-label host, and reject shared-infra roots. Shared by the add/remove
+ * tools (list needs none of it).
+ */
+function normalizeAgentDomain(
+  raw: string
+): { domain: string } | { error: string } {
+  const rawDomain = raw.trim().toLowerCase();
 
   // Strip any scheme/path/port the caller may have included.
   let domain: string;
   try {
-    const parsed = rawDomain.includes("://")
+    domain = rawDomain.includes("://")
       ? new URL(rawDomain).hostname
       : new URL(`https://${rawDomain}`).hostname;
-    domain = parsed;
   } catch {
-    return { error: `'${args.domain}' is not a valid domain.` };
+    return { error: `'${raw}' is not a valid domain.` };
   }
 
   if (!domain || !domain.includes(".")) {
     return {
-      error: `'${args.domain}' must be a multi-label domain (e.g. 'agents.example.com').`
+      error: `'${raw}' must be a multi-label domain (e.g. 'agents.example.com').`
     };
   }
 
@@ -539,26 +600,65 @@ export async function remoteAgentDomains(
     };
   }
 
-  if (args.operation === "add") {
-    if (current.includes(domain)) {
-      return {
-        ok: true,
-        approvedDomains: current,
-        note: `'${domain}' was already approved.`
-      };
-    }
-    const updated = [...current, domain];
-    await setAllowedRemoteAgentDomains(updated);
+  return { domain };
+}
+
+export async function agentsDomainsList(
+  deps: AdminToolDeps
+): Promise<ToolResult> {
+  const denied = ensureDomainsOrgAdmin(deps);
+  if (denied) return denied;
+
+  return {
+    approvedDomains: await getAllowedRemoteAgentDomains(),
+    note:
+      "Each entry covers that domain and all its subdomains. " +
+      "An empty list means no custom (remote) agents are approved."
+  };
+}
+
+export async function agentsDomainsAdd(
+  deps: AdminToolDeps,
+  args: { domain: string }
+): Promise<ToolResult> {
+  const denied = ensureDomainsOrgAdmin(deps);
+  if (denied) return denied;
+
+  const normalized = normalizeAgentDomain(args.domain);
+  if ("error" in normalized) return normalized;
+  const { domain } = normalized;
+
+  const current = await getAllowedRemoteAgentDomains();
+  if (current.includes(domain)) {
     return {
       ok: true,
-      approvedDomains: updated,
-      note:
-        `'${domain}' and all its subdomains are now approved for remote agents. ` +
-        `Only add domains your organization fully controls.`
+      approvedDomains: current,
+      note: `'${domain}' was already approved.`
     };
   }
+  const updated = [...current, domain];
+  await setAllowedRemoteAgentDomains(updated);
+  return {
+    ok: true,
+    approvedDomains: updated,
+    note:
+      `'${domain}' and all its subdomains are now approved for remote agents. ` +
+      `Only add domains your organization fully controls.`
+  };
+}
 
-  // operation === "remove"
+export async function agentsDomainsRemove(
+  deps: AdminToolDeps,
+  args: { domain: string }
+): Promise<ToolResult> {
+  const denied = ensureDomainsOrgAdmin(deps);
+  if (denied) return denied;
+
+  const normalized = normalizeAgentDomain(args.domain);
+  if ("error" in normalized) return normalized;
+  const { domain } = normalized;
+
+  const current = await getAllowedRemoteAgentDomains();
   if (!current.includes(domain)) {
     return {
       ok: true,
@@ -613,58 +713,59 @@ async function generateAndStoreIcon(
 }
 
 // ---------------------------------------------------------------------------
-// self_write — the admin agent mutates its OWN identity (avatar, display name).
+// self_* — the admin agent mutates its OWN identity (avatar, display name).
 // ---------------------------------------------------------------------------
 
-export type SelfWriteArgs =
-  | { operation: "set_avatar"; instructions?: string }
-  | { operation: "set_display_name"; displayName: string };
+export type SelfSetAvatarArgs = { instructions?: string };
 
-export async function selfWrite(
+export async function selfSetAvatar(
   deps: AdminToolDeps,
-  args: SelfWriteArgs
+  args: SelfSetAvatarArgs
 ): Promise<ToolResult> {
-  if (!deps.ctx) return deny("sign in as an admin to change your own identity");
-  if (
-    !authorize(deps.ctx, { type: "IsWorkspaceAdmin", workspaceId: deps.wsId })
-  )
-    return deny(
-      `changing the admin agent's identity requires admin of workspace ${deps.wsId}`
-    );
+  const denied = ensureSelfAdmin(deps);
+  if (denied) return denied;
 
-  switch (args.operation) {
-    case "set_avatar": {
-      const ws = await getWorkspace(deps.wsId);
-      const workspaceName = ws?.name ?? `workspace ${deps.wsId}`;
-      const prompt = buildAvatarPrompt({
-        workspaceName,
-        instructions: args.instructions
-      });
-      const result = await generateAndStoreIcon(deps, "admin", prompt);
-      if ("error" in result) return result;
-      await setAdminIconUrl(deps.wsId, result.iconUrl);
-      return {
-        ok: true,
-        iconUrl: result.iconUrl,
-        note: "Avatar regenerated — it appears on the admin agent's next reply."
-      };
-    }
-    case "set_display_name": {
-      const displayName = args.displayName.trim();
-      if (!displayName) return { error: "Display name cannot be empty." };
-      await setAdminDisplayName(deps.wsId, displayName);
-      return {
-        ok: true,
-        displayName,
-        note: "Display name updated — it appears on the admin agent's next reply."
-      };
-    }
-  }
+  const ws = await getWorkspace(deps.wsId);
+  const workspaceName = ws?.name ?? `workspace ${deps.wsId}`;
+  const prompt = buildAvatarPrompt({
+    workspaceName,
+    instructions: args.instructions
+  });
+  const result = await generateAndStoreIcon(deps, "admin", prompt);
+  if ("error" in result) return result;
+  await setAdminIconUrl(deps.wsId, result.iconUrl);
+  return {
+    ok: true,
+    iconUrl: result.iconUrl,
+    note: "Avatar regenerated — it appears on the admin agent's next reply."
+  };
+}
+
+export type SelfSetDisplayNameArgs = { displayName: string };
+
+export async function selfSetDisplayName(
+  deps: AdminToolDeps,
+  args: SelfSetDisplayNameArgs
+): Promise<ToolResult> {
+  const denied = ensureSelfAdmin(deps);
+  if (denied) return denied;
+
+  const displayName = args.displayName.trim();
+  if (!displayName) return { error: "Display name cannot be empty." };
+  await setAdminDisplayName(deps.wsId, displayName);
+  return {
+    ok: true,
+    displayName,
+    note: "Display name updated — it appears on the admin agent's next reply."
+  };
 }
 
 // ---------------------------------------------------------------------------
 
-/** Build the admin tool set for one instance. `workspace_write` is org-only. */
+/**
+ * Build the admin tool set for one instance. The `workspace_*` and
+ * `agents_domains_*` tools are org-only (built only on `admin:0`).
+ */
 export function buildAdminTools(deps: AdminToolDeps): ToolSet {
   const tools: ToolSet = {
     agents_read: tool({
@@ -675,79 +776,96 @@ export function buildAdminTools(deps: AdminToolDeps): ToolSet {
       }),
       execute: (args) => agentsRead(deps, args)
     }),
-    agents_write: tool({
+    agents_create: tool({
       description:
-        "Create, update, or remove a custom agent in this workspace. " +
-        "Use operation=update to change fields; add_channel/remove_channel to " +
-        "manage one channel at a time; regenerate_avatar to AI-generate a new " +
-        "avatar for the agent. Built-in admin/onboarding agents cannot be modified.",
-      inputSchema: z.discriminatedUnion("operation", [
-        z.object({
-          operation: z.literal("register"),
-          name: z
-            .string()
-            .regex(
-              /^[a-z0-9_-]+$/,
-              "Agent name must be a lowercase slug (a-z, 0-9, _ or -)"
-            )
-            .describe("Unique agent name"),
-          displayName: z.string().optional(),
-          a2aEndpoint: z
-            .string()
-            .describe(
-              "Remote A2A endpoint URL for the custom agent (required)"
-            ),
-          notifyOn: z
-            .enum(["mention", "channel_messages"])
-            .describe(
-              "When the agent is woken (required): `mention` = only on a name mention; `channel_messages` = every channel message"
-            )
-        }),
-        z.object({
-          operation: z.literal("update"),
-          name: z.string(),
-          displayName: z.string().optional(),
-          enabled: z
-            .boolean()
-            .optional()
-            .describe(
-              "Set false to disable — disabled agents receive no messages and won't be routed to"
-            ),
-          a2aEndpoint: z.string().optional(),
-          notifyOn: z
-            .enum(["mention", "channel_messages"])
-            .optional()
-            .describe(
-              "Change when the agent is woken: mention vs channel_messages"
-            )
-        }),
-        z.object({
-          operation: z.literal("add_channel"),
-          name: z.string(),
-          channelId: z
-            .string()
-            .describe("A channel id to make this agent routable in")
-        }),
-        z.object({
-          operation: z.literal("remove_channel"),
-          name: z.string(),
-          channelId: z
-            .string()
-            .describe("A channel id to stop routing this agent in")
-        }),
-        z.object({
-          operation: z.literal("regenerate_avatar"),
-          name: z.string(),
-          instructions: z
-            .string()
-            .optional()
-            .describe(
-              "Optional art direction for the avatar: style, colors, motifs, mood"
-            )
-        }),
-        z.object({ operation: z.literal("unregister"), name: z.string() })
-      ]),
-      execute: (args) => agentsWrite(deps, args)
+        "Register a new custom agent in this workspace. Verifies the A2A " +
+        "endpoint and pins its signing identity. A custom agent has no avatar " +
+        "until you generate one with agents_regenerate_avatar.",
+      inputSchema: z.object({
+        name: z
+          .string()
+          .regex(
+            /^[a-z0-9_-]+$/,
+            "Agent name must be a lowercase slug (a-z, 0-9, _ or -)"
+          )
+          .describe("Unique agent name"),
+        displayName: z.string().optional(),
+        a2aEndpoint: z
+          .string()
+          .describe("Remote A2A endpoint URL for the custom agent (required)"),
+        notifyOn: z
+          .enum(["mention", "channel_messages"])
+          .describe(
+            "When the agent is woken (required): `mention` = only on a name mention; `channel_messages` = every channel message"
+          )
+      }),
+      execute: (args) => agentsCreate(deps, args)
+    }),
+    agents_update: tool({
+      description:
+        "Change a custom agent's fields (display name, enabled, endpoint, " +
+        "notifyOn). Built-in admin/onboarding agents cannot be modified.",
+      inputSchema: z.object({
+        name: z.string(),
+        displayName: z.string().optional(),
+        enabled: z
+          .boolean()
+          .optional()
+          .describe(
+            "Set false to disable — disabled agents receive no messages and won't be routed to"
+          ),
+        a2aEndpoint: z.string().optional(),
+        notifyOn: z
+          .enum(["mention", "channel_messages"])
+          .optional()
+          .describe(
+            "Change when the agent is woken: mention vs channel_messages"
+          )
+      }),
+      execute: (args) => agentsUpdate(deps, args)
+    }),
+    agents_allow_channel: tool({
+      description:
+        "Make a custom agent routable in a channel (one channel per call).",
+      inputSchema: z.object({
+        name: z.string(),
+        channelId: z
+          .string()
+          .describe("A channel id to make this agent routable in")
+      }),
+      execute: (args) => agentsAllowChannel(deps, args)
+    }),
+    agents_revoke_channel: tool({
+      description:
+        "Stop routing a custom agent in a channel (one channel per call).",
+      inputSchema: z.object({
+        name: z.string(),
+        channelId: z
+          .string()
+          .describe("A channel id to stop routing this agent in")
+      }),
+      execute: (args) => agentsRevokeChannel(deps, args)
+    }),
+    agents_regenerate_avatar: tool({
+      description:
+        "AI-generate a new avatar for a custom agent (optionally with art direction).",
+      inputSchema: z.object({
+        name: z.string(),
+        instructions: z
+          .string()
+          .optional()
+          .describe(
+            "Optional art direction for the avatar: style, colors, motifs, mood"
+          )
+      }),
+      execute: (args) => agentsRegenerateAvatar(deps, args)
+    }),
+    agents_delete: tool({
+      description:
+        "Delete a custom agent. Destructive — pauses for an explicit human " +
+        "approval in Slack before removing the agent and its channel mappings.",
+      inputSchema: z.object({ name: z.string() }),
+      execute: (args) => agentsDelete(deps, args)
     }),
     workspace_read: tool({
       description:
@@ -756,30 +874,31 @@ export function buildAdminTools(deps: AdminToolDeps): ToolSet {
       execute: (args) => workspaceRead(deps, args)
     }),
     // Self-service identity — the admin changes its OWN Slack presence. Built for
-    // every admin instance. `set_avatar` needs the image seams (guarded at
-    // runtime); `set_display_name` does not, so this tool is always registered.
-    self_write: tool({
+    // every admin instance. `self_set_avatar` needs the image seams (guarded at
+    // runtime); `self_set_display_name` does not, so both are always registered.
+    self_set_avatar: tool({
       description:
-        "Change your own identity (the admin agent's Slack presence). " +
-        "set_avatar AI-generates a new avatar from this workspace's name plus any " +
-        "art direction; set_display_name renames you. Changes take effect on your " +
-        "next reply.",
-      inputSchema: z.discriminatedUnion("operation", [
-        z.object({
-          operation: z.literal("set_avatar"),
-          instructions: z
-            .string()
-            .optional()
-            .describe(
-              "Optional art direction for the avatar: style, colors, motifs, mood"
-            )
-        }),
-        z.object({
-          operation: z.literal("set_display_name"),
-          displayName: z.string().describe("The admin agent's new display name")
-        })
-      ]),
-      execute: (args) => selfWrite(deps, args)
+        "Change your own avatar (the admin agent's Slack presence). " +
+        "AI-generates a new avatar from this workspace's name plus any art " +
+        "direction. Takes effect on your next reply.",
+      inputSchema: z.object({
+        instructions: z
+          .string()
+          .optional()
+          .describe(
+            "Optional art direction for the avatar: style, colors, motifs, mood"
+          )
+      }),
+      execute: (args) => selfSetAvatar(deps, args)
+    }),
+    self_set_display_name: tool({
+      description:
+        "Change your own display name (the admin agent's Slack presence). " +
+        "Takes effect on your next reply.",
+      inputSchema: z.object({
+        displayName: z.string().describe("The admin agent's new display name")
+      }),
+      execute: (args) => selfSetDisplayName(deps, args)
     }),
     ask_user: tool({
       description:
@@ -813,43 +932,52 @@ export function buildAdminTools(deps: AdminToolDeps): ToolSet {
   };
 
   if (deps.wsId === ORG_WORKSPACE_ID) {
-    tools.workspace_write = tool({
-      description:
-        "Org-admin only: create a workspace, or set a workspace's admin channel.",
-      inputSchema: z.discriminatedUnion("operation", [
-        z.object({ operation: z.literal("create"), name: z.string() }),
-        z.object({
-          operation: z.literal("set_admin_channel"),
-          id: z.coerce.number().int(),
-          channelId: z.string()
-        })
-      ]),
-      execute: (args) => workspaceWrite(deps, args)
+    tools.workspace_create = tool({
+      description: "Org-admin only: create a workspace.",
+      inputSchema: z.object({ name: z.string() }),
+      execute: (args) => workspaceCreate(deps, args)
     });
 
-    tools.remote_agent_domains = tool({
-      description:
-        "Org-admin only: manage approved domains for remote (custom) A2A agents. " +
-        "Each approved domain covers that domain and all its subdomains — " +
-        "e.g. approving 'myorg.workers.dev' allows any agent hosted under it. " +
-        "Only add domains your organization fully controls: A2A trusts the endpoint " +
-        "domain for cryptographic key verification, so any subdomain of an approved " +
-        "entry can host a verified agent. Shared platform roots (workers.dev, etc.) " +
-        "are permanently blocked regardless. An empty list disables all remote agents.",
-      inputSchema: z.discriminatedUnion("operation", [
-        z.object({ operation: z.literal("list") }),
-        z.object({
-          operation: z.literal("add"),
-          domain: z
-            .string()
-            .describe("Domain to approve (covers all its subdomains)")
-        }),
-        z.object({
-          operation: z.literal("remove"),
-          domain: z.string().describe("Domain to remove from the approved list")
-        })
-      ]),
-      execute: (args) => remoteAgentDomains(deps, args)
+    tools.workspace_set_admin_channel = tool({
+      description: "Org-admin only: set a workspace's admin channel.",
+      inputSchema: z.object({
+        id: z.coerce.number().int(),
+        channelId: z.string()
+      }),
+      execute: (args) => workspaceSetAdminChannel(deps, args)
+    });
+
+    // Shared safety note appended to each agents_domains_* description.
+    const domainsHelp =
+      "Each approved domain covers that domain and all its subdomains (e.g. " +
+      "approving 'myorg.workers.dev' allows any agent hosted under it). Only add " +
+      "domains your organization fully controls: A2A trusts the endpoint domain " +
+      "for cryptographic key verification, so any subdomain of an approved entry " +
+      "can host a verified agent. Shared platform roots (workers.dev, etc.) are " +
+      "permanently blocked regardless. An empty list disables all remote agents.";
+
+    tools.agents_domains_list = tool({
+      description: `Org-admin only: list approved domains for remote (custom) A2A agents. ${domainsHelp}`,
+      inputSchema: z.object({}),
+      execute: () => agentsDomainsList(deps)
+    });
+
+    tools.agents_domains_add = tool({
+      description: `Org-admin only: approve a domain for remote (custom) A2A agents. ${domainsHelp}`,
+      inputSchema: z.object({
+        domain: z
+          .string()
+          .describe("Domain to approve (covers all its subdomains)")
+      }),
+      execute: (args) => agentsDomainsAdd(deps, args)
+    });
+
+    tools.agents_domains_remove = tool({
+      description: `Org-admin only: remove a domain from the remote-agent approved list. ${domainsHelp}`,
+      inputSchema: z.object({
+        domain: z.string().describe("Domain to remove from the approved list")
+      }),
+      execute: (args) => agentsDomainsRemove(deps, args)
     });
   }
 

@@ -17,6 +17,7 @@
   "scripts": {
     "dev": "wrangler dev",
     "keygen": "node scripts/generate-gateway-key.mjs",
+    "cf": "node scripts/cf.mjs",
     "types": "wrangler types",
     "types:check": "wrangler types --check",
     "db:generate": "drizzle-kit generate",
