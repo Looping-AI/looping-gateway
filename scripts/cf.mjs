@@ -144,7 +144,7 @@ function printBody(text, { raw = false } = {}) {
   return json;
 }
 
-// A telemetry query returned <300 chars usually means an API error; surface it.
+// Exit on non-2xx responses and surface the API error body.
 function ensureOk(res, text) {
   if (!res.ok) {
     printBody(text);
