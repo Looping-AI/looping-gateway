@@ -50,6 +50,14 @@ interface MessageEdit {
   text: string;
   /** Prior text — the transcript on delete, the before-image on edit. */
   prevText?: string;
+  /**
+   * Bot id of the edited/deleted message's author, when it was posted by an app.
+   * A `message_changed` carries this on the nested `message` (not the top-level
+   * event), so the outer bot filter misses it. Present ⇒ the gateway's own edit
+   * (e.g. swapping a HITL prompt to its answered state); such edits are dropped,
+   * never fed back as a turn.
+   */
+  botId?: string;
 }
 
 /**
@@ -72,7 +80,8 @@ function messageEditFromEvent(raw: unknown, subtype: string): MessageEdit {
       threadTs: str(prev?.thread_ts),
       userId: userIdOf(prev?.user),
       text: "",
-      prevText
+      prevText,
+      botId: str(prev?.bot_id)
     };
   }
   const edited = isRecord(inner?.edited) ? inner.edited : undefined;
@@ -83,7 +92,8 @@ function messageEditFromEvent(raw: unknown, subtype: string): MessageEdit {
     userId:
       userIdOf(inner?.user) ?? userIdOf(edited?.user) ?? userIdOf(prev?.user),
     text: str(inner?.text) ?? "",
-    prevText
+    prevText,
+    botId: str(inner?.bot_id)
   };
 }
 
@@ -177,6 +187,11 @@ export function classifyEvent(payload: SlackWebhookPayload): Classification {
         // DM edit/delete → feed turn for the onboarding agent (DMs are an
         // implicit mention, so the agent is always woken). raw is the inner event.
         const edit = messageEditFromEvent(payload.raw, payload.subtype);
+        if (edit.botId) {
+          // The bot editing its own DM message (e.g. an `ask_user` prompt
+          // flipping to its answered state) must never become a feed turn.
+          return { kind: "ignore", reason: "bot message edit" };
+        }
         if (isNoOpEdit(edit)) {
           return { kind: "ignore", reason: "message edit with no text change" };
         }
@@ -315,6 +330,11 @@ export function classifyEvent(payload: SlackWebhookPayload): Classification {
         }
         if (subtype && MESSAGE_EDIT_SUBTYPES.has(subtype)) {
           const edit = messageEditFromEvent(event, subtype);
+          if (edit.botId) {
+            // The bot editing its own message (e.g. a HITL prompt flipping to its
+            // answered state) — the outer bot filter can't see the nested author.
+            return { kind: "ignore", reason: "bot message edit" };
+          }
           if (isNoOpEdit(edit)) {
             return {
               kind: "ignore",

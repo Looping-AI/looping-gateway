@@ -517,6 +517,62 @@ describe("lifecycle events", () => {
     expect(create).not.toHaveBeenCalled();
   });
 
+  it("ignores a channel message_changed authored by the bot (its own HITL-prompt edit)", async () => {
+    const create = spyWorkflow("MESSAGE_WORKFLOW");
+    const body = JSON.stringify({
+      type: "event_callback",
+      event_id: "EvBotEdit",
+      event: {
+        type: "message",
+        subtype: "message_changed",
+        channel: "C1",
+        channel_type: "channel",
+        // The bot flipping its approval prompt to the answered state. `bot_id`
+        // lives on the nested message, so the top-level bot filter never sees it.
+        message: {
+          ts: "1700000000.1",
+          bot_id: "B_SELF",
+          text: "Answered: Approve"
+        },
+        previous_message: {
+          ts: "1700000000.1",
+          bot_id: "B_SELF",
+          text: "Delete agent *temp-test-1*?"
+        }
+      }
+    });
+    const res = await post(body);
+    expect(res.status).toBe(200);
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it("ignores a DM message_changed authored by the bot (its own ask_user edit)", async () => {
+    const create = spyWorkflow("MESSAGE_WORKFLOW");
+    const body = JSON.stringify({
+      type: "event_callback",
+      event_id: "EvBotDmEdit",
+      event: {
+        type: "message",
+        channel_type: "im",
+        subtype: "message_changed",
+        channel: "D1",
+        message: {
+          ts: "1700000000.1",
+          bot_id: "B_SELF",
+          text: "Answered: Paris"
+        },
+        previous_message: {
+          ts: "1700000000.1",
+          bot_id: "B_SELF",
+          text: "Which city?"
+        }
+      }
+    });
+    const res = await post(body);
+    expect(res.status).toBe(200);
+    expect(create).not.toHaveBeenCalled();
+  });
+
   it("extracts userId from message.edited.user when message.user is absent (channel message_changed)", async () => {
     const create = spyWorkflow("MESSAGE_WORKFLOW");
     const body = JSON.stringify({
