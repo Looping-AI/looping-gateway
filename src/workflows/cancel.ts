@@ -9,6 +9,8 @@ import {
   type AgentTaskRow
 } from "@/db/models/agent-tasks";
 import { type DispatchAgentRef } from "@/agents/dispatch";
+import { cancelHitlRequestsByToken } from "@/db/models/hitl-requests";
+import { markHitlPromptResolved } from "@/a2a/notifications/hitl";
 import { postReply } from "@/wrappers/slack";
 import {
   cancelAndReconcile,
@@ -64,6 +66,15 @@ export async function cancelTaskRow(
   // Completes the row only for terminal outcomes; a task that can't be canceled
   // keeps its row pending so the reply it still produces reaches Slack.
   const kind = await cancelAndReconcile(ref, taskId, row.token);
+
+  // Close any human-in-the-loop prompt the task had open (the 🛑 supersedes it),
+  // and strip its now-dead buttons in Slack. Independent of the cancel outcome:
+  // the user chose to stop, so the pending question no longer stands.
+  const canceledPrompts = await cancelHitlRequestsByToken(row.token);
+  for (const prompt of canceledPrompts) {
+    await markHitlPromptResolved(prompt, "🛑 Canceled.");
+  }
+
   return { agentName: row.agentName, kind };
 }
 

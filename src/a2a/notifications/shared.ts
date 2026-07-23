@@ -7,6 +7,8 @@ import {
 } from "@/db/models/agent-tasks";
 import { extractText, isTerminalTaskState } from "@/a2a/parts";
 import { sanitizeAgentReply } from "@/a2a/client";
+import { parseHitlRequest } from "@/a2a/hitl";
+import { deliverHitlRequest } from "@/a2a/notifications/hitl";
 import { postReply } from "@/wrappers/slack";
 import { collectIfEventDrained } from "@/workflows/message-helpers";
 
@@ -40,6 +42,19 @@ export async function deliverTaskToSlack(
   // until we know we are posting: most status updates are deduplicated or empty,
   // and for the admin agent this resolution costs extra config reads.
   const renderIdentity = () => agentRenderIdentity(agent, row.channelId);
+
+  // Human-in-the-loop: an `input-required` update carrying a HITL request
+  // DataPart is rendered as an interactive Slack prompt and the task is parked
+  // awaiting a human answer (see deliverHitlRequest). An `input-required` update
+  // *without* a HITL request falls through to the plain-text path below (posted
+  // as a normal reply, row stays pending) — same as any other non-terminal state.
+  if (state === "input-required") {
+    const hitl = parseHitlRequest(task.status.message);
+    if (hitl) {
+      await deliverHitlRequest(token, row, agent, task, hitl);
+      return;
+    }
+  }
 
   if (!isTerminalTaskState(state)) {
     const updateId = task.status.message?.messageId;

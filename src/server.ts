@@ -1,4 +1,5 @@
 import { handleSlackEvent } from "@/slack-webhook-handler";
+import { handleSlackInteractivity } from "@/slack-interactivity-handler";
 import { getPublicJwks } from "@/auth/agent-outbound";
 import {
   handleRemoteAgentNotification,
@@ -40,6 +41,15 @@ export default {
     // handleSlackEvent, only after the Slack signature has been verified.
     if (request.method === "POST" && url.pathname === "/slack/events") {
       return handleSlackEvent(request, ctx);
+    }
+
+    // Slack Interactivity ingress — button clicks, select menus, and modal
+    // submissions from the human-in-the-loop prompts. Configured as the app's
+    // Interactivity Request URL (separate from the Events Request URL above, but
+    // sharing the same signing-secret verification). Verifies + acks within 3s;
+    // the approval/answer is routed back onto the paused A2A task off-path.
+    if (request.method === "POST" && url.pathname === "/slack/interactivity") {
+      return handleSlackInteractivity(request, ctx);
     }
 
     // Remote-agent push-notification callback — a custom agent POSTs its terminal
