@@ -8,6 +8,7 @@ import {
   getAgentTaskByToken,
   recordAgentTaskError
 } from "@/db/models/agent-tasks";
+import { isTerminalTaskState } from "@/a2a/parts";
 import { deliverTaskToSlack, TaskDeliveryValidationError } from "./shared";
 
 /** Reserved internal-only target; it is never fetched over HTTP. */
@@ -16,10 +17,21 @@ export const LOCAL_NOTIFICATION_URL = "https://local.a2a.invalid/notifications";
 /** Total delivery attempts (1 initial + retries) before giving up. */
 const DELIVERY_MAX_ATTEMPTS = 3;
 /**
- * Backoff before retry attempts 2 and 3 (ms). Deliberately short — the whole
- * delivery rides the in-flight Durable Object request that produced the Task.
+ * Backoff before retry attempts 2 and 3 (ms). Deliberately short — the delivery
+ * runs on the agent DO's `whenSettled` liveness barrier (registered on
+ * `ctx.waitUntil`), which keeps the object alive until the terminal task's
+ * delivery settles, so a brief retry can't outlive the DO.
  */
 const DELIVERY_BACKOFF_MS = [250, 1000];
+/**
+ * Safety cap on how long {@link LocalPushNotificationSender.whenSettled} will hold
+ * the DO alive for one turn. A turn always publishes a terminal state (so the
+ * barrier normally resolves on delivery); this only bounds `ctx.waitUntil` if a
+ * terminal is somehow never emitted, well past any real turn budget.
+ */
+const SETTLE_TIMEOUT_MS = 480_000;
+/** Cap on remembered already-settled task ids (guards a settle that beats whenSettled). */
+const SETTLED_MEMORY_MAX = 64;
 /** Gateway-controlled backstop notice recorded when delivery gives up. */
 const DELIVERY_FAILED_MESSAGE =
   "the local agent's reply could not be delivered";
@@ -69,9 +81,27 @@ export async function deliverLocalAgentTask(
  * ledger. The SDK invokes `send` serially from its event processor, but the
  * explicit chain also preserves status-update order if an implementation ever
  * calls it concurrently.
+ *
+ * Since local agents now accept-first (`blocking: false`), the SDK returns the
+ * `submitted` accept while generation and delivery run as background promises. The
+ * agent DO keeps itself alive by registering {@link whenSettled} — keyed by the
+ * accept's task id so concurrent turns on one DO stay independent — on
+ * `ctx.waitUntil`; it resolves only once that turn's *terminal* task has been
+ * delivered. (`drain` remains the fallback for a fetch that produced no task.)
  */
 export class LocalPushNotificationSender implements PushNotificationSender {
   private deliveryChain: Promise<void> = Promise.resolve();
+  /** Pending liveness barriers, keyed by task id, awaiting a terminal delivery. */
+  private readonly settleWaiters = new Map<
+    string,
+    {
+      promise: Promise<void>;
+      resolve: () => void;
+      timer: ReturnType<typeof setTimeout>;
+    }
+  >();
+  /** Task ids whose terminal delivery settled before `whenSettled` was called. */
+  private readonly recentlySettled = new Set<string>();
 
   constructor(
     private readonly pushNotificationStore: PushNotificationStore,
@@ -82,14 +112,65 @@ export class LocalPushNotificationSender implements PushNotificationSender {
     const delivery = this.deliveryChain.then(() => this.deliver(task));
     // Keep later notifications deliverable after a failed Slack/API call.
     this.deliveryChain = delivery.catch(() => undefined);
+    // The terminal snapshot is the last delivery for this task; release the
+    // liveness barrier only once it has settled (delivered, or failed and
+    // recorded — `deliver` never rejects), so `ctx.waitUntil` spans the whole turn.
+    if (isTerminalTaskState(task.status.state)) {
+      void this.deliveryChain.finally(() => this.resolveSettled(task.id));
+    }
     return delivery;
   }
 
   /**
-   * Resolve once every queued delivery (including retries) has settled. The DO
-   * registers this on `ctx.waitUntil` so the runtime keeps the object alive until
-   * the SDK's fire-and-forget deliveries complete. Never rejects — `deliver`
-   * catches and records every error path.
+   * Resolve once the *terminal* task for `taskId` has been delivered (or its
+   * delivery failed and was recorded). The agent DO registers this on
+   * `ctx.waitUntil` so the runtime keeps the object alive across the background
+   * turn — generation plus the final Slack post. A safety timeout bounds the wait
+   * so `ctx.waitUntil` can never hang if a terminal is somehow never published.
+   */
+  whenSettled(taskId: string): Promise<void> {
+    // Delivery may (rarely) beat this call; if so it already settled.
+    if (this.recentlySettled.delete(taskId)) return Promise.resolve();
+    const existing = this.settleWaiters.get(taskId);
+    if (existing) return existing.promise;
+
+    let resolve!: () => void;
+    const promise = new Promise<void>((r) => {
+      resolve = r;
+    });
+    const timer = setTimeout(() => {
+      console.warn("[local-notifications] whenSettled timed out", {
+        agentKind: this.agentKind,
+        taskId
+      });
+      this.resolveSettled(taskId);
+    }, SETTLE_TIMEOUT_MS);
+    this.settleWaiters.set(taskId, { promise, resolve, timer });
+    return promise;
+  }
+
+  private resolveSettled(taskId: string): void {
+    const waiter = this.settleWaiters.get(taskId);
+    if (waiter) {
+      clearTimeout(waiter.timer);
+      this.settleWaiters.delete(taskId);
+      waiter.resolve();
+      return;
+    }
+    // Settled before whenSettled was called — remember it (bounded) so a later
+    // whenSettled returns immediately instead of waiting on a terminal that's gone.
+    this.recentlySettled.add(taskId);
+    if (this.recentlySettled.size > SETTLED_MEMORY_MAX) {
+      const oldest = this.recentlySettled.values().next().value;
+      if (oldest !== undefined) this.recentlySettled.delete(oldest);
+    }
+  }
+
+  /**
+   * Resolve once every queued delivery (including retries) has settled. Fallback
+   * liveness signal for a fetch that produced no task (card discovery,
+   * `tasks/cancel`); the accept-first path uses {@link whenSettled} instead. Never
+   * rejects — `deliver` catches and records every error path.
    */
   drain(): Promise<void> {
     return this.deliveryChain;
