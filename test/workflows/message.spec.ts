@@ -14,6 +14,8 @@ import {
   setPublicUrl
 } from "@/db/models/workspace-configs";
 import { buildAgentCard } from "@/a2a/card";
+import { AgentCard, SendMessageResponse, TaskState } from "@a2a-js/sdk";
+import { agentMessage, makeTask } from "../helpers/a2a";
 import { stubSlack } from "../wrappers/slack-stub";
 import {
   trigger,
@@ -287,8 +289,9 @@ describe("MessageWorkflow — remote custom agents", () => {
           });
         }
 
-        // Remote agent card discovery (GET).
-        if (request.method === "GET") return Response.json(card);
+        // Remote agent card discovery (GET) — served as protobuf-JSON.
+        if (request.method === "GET")
+          return Response.json(AgentCard.toJSON(card));
 
         // Remote agent dispatch (POST).
         const rpc = (await request.clone().json()) as { id?: unknown };
@@ -297,12 +300,16 @@ describe("MessageWorkflow — remote custom agents", () => {
           return Response.json({
             jsonrpc: "2.0",
             id: rpc.id ?? 1,
-            result: {
-              kind: "task",
-              id: "task-remote-1",
-              contextId: "ctx",
-              status: { state: "submitted" }
-            }
+            result: SendMessageResponse.toJSON({
+              payload: {
+                $case: "task",
+                value: makeTask({
+                  id: "task-remote-1",
+                  contextId: "ctx",
+                  state: TaskState.TASK_STATE_SUBMITTED
+                })
+              }
+            })
           });
         }
 
@@ -311,13 +318,15 @@ describe("MessageWorkflow — remote custom agents", () => {
         return Response.json({
           jsonrpc: "2.0",
           id: rpc.id ?? 1,
-          result: {
-            kind: "message",
-            messageId: "m1",
-            role: "agent",
-            parts: [{ kind: "text", text: "unexpected sync reply" }],
-            contextId: "ctx"
-          }
+          result: SendMessageResponse.toJSON({
+            payload: {
+              $case: "message",
+              value: agentMessage("unexpected sync reply", {
+                messageId: "m1",
+                contextId: "ctx"
+              })
+            }
+          })
         });
       })
     );

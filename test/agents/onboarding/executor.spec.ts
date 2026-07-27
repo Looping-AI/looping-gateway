@@ -3,6 +3,7 @@ import { MockLanguageModelV3 } from "ai/test";
 import { OnboardingAgentExecutor } from "@/agents/onboarding/executor";
 import type { SessionHost } from "@/agents/shared/session";
 import type { UserAuthContext } from "@/auth";
+import type { AgentExecutionEvent } from "@a2a-js/sdk/server";
 import {
   FakeSession,
   fakeRecallEnv,
@@ -11,6 +12,7 @@ import {
   makeRequest,
   terminalTaskText
 } from "../../helpers/agents";
+import { userMessage } from "../../helpers/a2a";
 
 const sqlHost: SessionHost = { sql: () => [] };
 
@@ -122,15 +124,12 @@ describe("OnboardingAgentExecutor", () => {
     // friendly error rather than running a degraded, null-tolerant turn.
     const requestContext = {
       contextId: "D_ONB:no-user",
-      userMessage: {
-        kind: "message",
+      userMessage: userMessage("hello", {
         messageId: "m_nouser",
-        role: "user",
-        parts: [{ kind: "text", text: "hello" }],
         metadata: { agentKind: "onboarding" } // no user field
-      }
+      })
     };
-    const published: Array<{ parts: Array<{ text?: string }> }> = [];
+    const published: AgentExecutionEvent[] = [];
     let finished = false;
     const eventBus = {
       publish: (e: unknown) => published.push(e as never),

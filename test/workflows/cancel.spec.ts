@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import type { Task } from "@a2a-js/sdk";
+import { AgentCard, Task, TaskState } from "@a2a-js/sdk";
 import { registerAgent } from "@/db/models/agents";
 import {
   setPublicUrl,
@@ -8,6 +8,7 @@ import {
 import { createAgentTask, getAgentTaskByToken } from "@/db/models/agent-tasks";
 import { cancelTaskRow } from "@/workflows/cancel";
 import { buildAgentCard } from "@/a2a/card";
+import { makeTask } from "../helpers/a2a";
 
 const ENDPOINT = "https://agent.example.com/a2a";
 const ISSUER = "https://gw.example.com";
@@ -39,7 +40,7 @@ function stubCancelRemote(postPayload: (id: unknown) => unknown) {
           headers: { "content-type": "application/json" }
         });
       }
-      return new Response(JSON.stringify(card), {
+      return new Response(JSON.stringify(AgentCard.toJSON(card)), {
         status: 200,
         headers: { "content-type": "application/json" }
       });
@@ -47,12 +48,14 @@ function stubCancelRemote(postPayload: (id: unknown) => unknown) {
   );
 }
 
-const canceledTask: Task = {
-  kind: "task",
-  id: "task-9",
-  contextId: "C1:T1",
-  status: { state: "canceled" }
-};
+/** `CancelTask` returns the Task itself, as protobuf-JSON on the wire. */
+const canceledTask: unknown = Task.toJSON(
+  makeTask({
+    id: "task-9",
+    contextId: "C1:T1",
+    state: TaskState.TASK_STATE_CANCELED
+  })
+);
 
 beforeEach(async () => {
   await registerAgent({

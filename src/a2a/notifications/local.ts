@@ -1,7 +1,12 @@
-import type { PushNotificationConfig, Task } from "@a2a-js/sdk";
+import {
+  TaskState,
+  type StreamResponse,
+  type TaskPushNotificationConfig
+} from "@a2a-js/sdk";
 import type {
   PushNotificationSender,
-  PushNotificationStore
+  PushNotificationStore,
+  ServerCallContext
 } from "@a2a-js/sdk/server";
 import { getAgent, type LocalAgentKind } from "@/db/models/agents";
 import {
@@ -9,6 +14,7 @@ import {
   recordAgentTaskError
 } from "@/db/models/agent-tasks";
 import { isTerminalTaskState } from "@/a2a/parts";
+import { snapshotOf, type TaskSnapshot } from "@/a2a/snapshot";
 import { deliverTaskToSlack, TaskDeliveryValidationError } from "./shared";
 
 /** Reserved internal-only target; it is never fetched over HTTP. */
@@ -39,21 +45,33 @@ const DELIVERY_FAILED_MESSAGE =
 const sleep = (ms: number) =>
   new Promise<void>((resolve) => setTimeout(resolve, ms));
 
-/** Build the correlation config that the local A2A sender recognizes. */
+/**
+ * Build the correlation config that the local A2A sender recognizes. v1.0
+ * flattened the old nested `PushNotificationConfig` into
+ * `TaskPushNotificationConfig`; `id` and `taskId` are assigned by the server
+ * when it registers the config, so they go out empty.
+ */
 export function localPushNotificationConfig(
   token: string
-): PushNotificationConfig {
-  return { url: LOCAL_NOTIFICATION_URL, token };
+): TaskPushNotificationConfig {
+  return {
+    tenant: "",
+    id: "",
+    taskId: "",
+    url: LOCAL_NOTIFICATION_URL,
+    token,
+    authentication: undefined
+  };
 }
 
 /**
- * Deliver a Task emitted by an in-repo built-in agent without crossing the
- * public HTTP/JWT trust boundary. The registry kind check prevents one local
+ * Deliver a task snapshot emitted by an in-repo built-in agent without crossing
+ * the public HTTP/JWT trust boundary. The registry kind check prevents one local
  * Durable Object from impersonating another agent's pending task.
  */
 export async function deliverLocalAgentTask(
   token: string,
-  task: Task,
+  snapshot: TaskSnapshot,
   expectedKind: LocalAgentKind
 ): Promise<void> {
   const row = await getAgentTaskByToken(token);
@@ -61,7 +79,7 @@ export async function deliverLocalAgentTask(
     // Expected when the token was already completed-and-swept; log so a genuinely
     // dropped reply isn't fully silent.
     console.debug("[local-notifications] no task row for token", {
-      taskId: task.id
+      taskId: snapshot.taskId
     });
     return;
   }
@@ -73,11 +91,11 @@ export async function deliverLocalAgentTask(
       "local task does not belong to the expected built-in agent"
     );
   }
-  await deliverTaskToSlack(token, row, agent, task);
+  await deliverTaskToSlack(token, row, agent, snapshot);
 }
 
 /**
- * Bridges A2A Task snapshots directly into the gateway's durable delivery
+ * Bridges A2A push notifications directly into the gateway's durable delivery
  * ledger. The SDK invokes `send` serially from its event processor, but the
  * explicit chain also preserves status-update order if an implementation ever
  * calls it concurrently.
@@ -108,8 +126,20 @@ export class LocalPushNotificationSender implements PushNotificationSender {
     private readonly agentKind: LocalAgentKind
   ) {}
 
-  send(task: Task): Promise<void> {
-    const delivery = this.deliveryChain.then(() => this.deliver(task));
+  send(
+    streamResponse: StreamResponse,
+    context: ServerCallContext
+  ): Promise<void> {
+    // v1.0 dispatches the same `StreamResponse` envelope the streaming
+    // transports carry, so flatten it to the gateway's task view first. An
+    // envelope that advances no task lifecycle (an artifact delta, or a
+    // stand-alone message) has nothing to deliver.
+    const snapshot = snapshotOf(streamResponse);
+    if (!snapshot) return Promise.resolve();
+
+    const delivery = this.deliveryChain.then(() =>
+      this.deliver(snapshot, context)
+    );
     // Keep later notifications deliverable after a failed Slack/API call.
     this.deliveryChain = delivery.catch(() => undefined);
     // The terminal snapshot is the last delivery for this task; release the
@@ -119,10 +149,12 @@ export class LocalPushNotificationSender implements PushNotificationSender {
     // the turn (the human answers on a later, separate invocation), so treat it as
     // a settle point too — otherwise the DO idles until the safety timeout.
     if (
-      isTerminalTaskState(task.status.state) ||
-      task.status.state === "input-required"
+      isTerminalTaskState(snapshot.state) ||
+      snapshot.state === TaskState.TASK_STATE_INPUT_REQUIRED
     ) {
-      void this.deliveryChain.finally(() => this.resolveSettled(task.id));
+      void this.deliveryChain.finally(() =>
+        this.resolveSettled(snapshot.taskId)
+      );
     }
     return delivery;
   }
@@ -182,15 +214,24 @@ export class LocalPushNotificationSender implements PushNotificationSender {
     return this.deliveryChain;
   }
 
-  private async deliver(task: Task): Promise<void> {
+  private async deliver(
+    snapshot: TaskSnapshot,
+    context: ServerCallContext
+  ): Promise<void> {
     // The initial submitted Task establishes acceptance only. It must not be
     // treated as a user-visible progress update, even if it carries a message.
-    if (task.status.state === "submitted") return;
+    if (snapshot.state === TaskState.TASK_STATE_SUBMITTED) return;
 
-    const configs = await this.pushNotificationStore.load(task.id);
+    // The call context is threaded through verbatim: v1.0 stores scope configs
+    // by tenant + owner, so a lookup only finds what the registering request
+    // saved if it presents the same context.
+    const configs = await this.pushNotificationStore.load(
+      snapshot.taskId,
+      context
+    );
     for (const config of configs) {
       if (config.url !== LOCAL_NOTIFICATION_URL || !config.token) continue;
-      await this.deliverWithRetry(task, config.token);
+      await this.deliverWithRetry(snapshot, config.token);
     }
   }
 
@@ -204,16 +245,19 @@ export class LocalPushNotificationSender implements PushNotificationSender {
    * A malformed snapshot is deterministic and not retried. On exhaustion the
    * failure is recorded for the reaction backstop.
    */
-  private async deliverWithRetry(task: Task, token: string): Promise<void> {
+  private async deliverWithRetry(
+    snapshot: TaskSnapshot,
+    token: string
+  ): Promise<void> {
     for (let attempt = 1; attempt <= DELIVERY_MAX_ATTEMPTS; attempt++) {
       try {
-        await deliverLocalAgentTask(token, task, this.agentKind);
+        await deliverLocalAgentTask(token, snapshot, this.agentKind);
         return;
       } catch (err) {
         if (err instanceof TaskDeliveryValidationError) {
           console.error("[local-notifications] malformed task snapshot", {
             agentKind: this.agentKind,
-            taskId: task.id,
+            taskId: snapshot.taskId,
             err: err.message
           });
           await recordAgentTaskError(token, DELIVERY_FAILED_MESSAGE);
@@ -222,7 +266,7 @@ export class LocalPushNotificationSender implements PushNotificationSender {
         const lastAttempt = attempt === DELIVERY_MAX_ATTEMPTS;
         console.error("[local-notifications] task delivery failed", {
           agentKind: this.agentKind,
-          taskId: task.id,
+          taskId: snapshot.taskId,
           attempt,
           lastAttempt,
           err: err instanceof Error ? err.message : String(err)

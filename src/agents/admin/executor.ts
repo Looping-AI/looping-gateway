@@ -1,6 +1,6 @@
 import type { AgentExecutor, ExecutionEventBus } from "@a2a-js/sdk/server";
 import { RequestContext } from "@a2a-js/sdk/server";
-import type { Message } from "@a2a-js/sdk";
+import { textPart } from "@/a2a/parts";
 import { createModelPair, type ModelOverrides } from "@/agents/model";
 import {
   buildAgentSession,
@@ -192,17 +192,23 @@ export class AdminAgentExecutor implements AgentExecutor {
       }
     }
 
-    const message: Message = {
-      ...rc.userMessage,
-      parts: [{ kind: "text", text: `[system] ${outcome}` }]
-    };
+    // v1.0's RequestContext wraps the whole inbound SendMessageRequest rather
+    // than a loose message, so the rewritten turn is threaded back through
+    // `request.message` — keeping the original configuration and request
+    // metadata intact for anything downstream that reads them.
     return new RequestContext(
-      message,
+      {
+        ...rc.request,
+        message: {
+          ...rc.userMessage,
+          parts: [textPart(`[system] ${outcome}`)]
+        }
+      },
       rc.taskId,
       rc.contextId,
+      rc.context,
       rc.task,
-      rc.referenceTasks,
-      rc.context
+      rc.referenceTasks
     );
   }
 

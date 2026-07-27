@@ -1,10 +1,11 @@
+import { AgentEvent } from "@a2a-js/sdk/server";
 import type {
   AgentExecutor,
   ExecutionEventBus,
   RequestContext
 } from "@a2a-js/sdk/server";
-import type { Message } from "@a2a-js/sdk";
-import { textOf } from "@/a2a/parts";
+import { Role } from "@a2a-js/sdk";
+import { buildMessage, textOf, textPart } from "@/a2a/parts";
 
 /**
  * Test stub agent behavior: echo the user's text straight back as a single
@@ -17,14 +18,16 @@ export class EchoExecutor implements AgentExecutor {
     eventBus: ExecutionEventBus
   ): Promise<void> => {
     const input = textOf(requestContext.userMessage);
-    const reply: Message = {
-      kind: "message",
-      messageId: crypto.randomUUID(),
-      role: "agent",
-      parts: [{ kind: "text", text: `You said: ${input}` }],
-      contextId: requestContext.contextId
-    };
-    eventBus.publish(reply);
+    eventBus.publish(
+      AgentEvent.message(
+        buildMessage({
+          messageId: crypto.randomUUID(),
+          role: Role.ROLE_AGENT,
+          parts: [textPart(`You said: ${input}`)],
+          contextId: requestContext.contextId
+        })
+      )
+    );
     eventBus.finished();
   };
 

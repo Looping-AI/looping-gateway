@@ -1,7 +1,10 @@
 import { vi } from "vitest";
 import { env } from "cloudflare:workers";
 import type { SessionMessage } from "agents/experimental/memory/session";
+import type { AgentExecutionEvent } from "@a2a-js/sdk/server";
+import { partsText } from "@/a2a/parts";
 import type { SessionLike } from "@/agents/shared/session";
+import { userMessage } from "./a2a";
 
 /**
  * In-memory `SessionLike` for driving agent executors without a Durable Object.
@@ -95,15 +98,12 @@ export function toolCallResult(toolName: string, input: unknown) {
 }
 
 /** Extract text from the terminal A2A task-status event captured by a test bus. */
-export function terminalTaskText(events: unknown[]): string | undefined {
-  const event = events.at(-1) as
-    | {
-        status?: {
-          message?: { parts?: Array<{ text?: string }> };
-        };
-      }
-    | undefined;
-  return event?.status?.message?.parts?.[0]?.text;
+export function terminalTaskText(
+  events: AgentExecutionEvent[]
+): string | undefined {
+  const event = events.at(-1);
+  if (event?.kind !== "statusUpdate") return undefined;
+  return partsText(event.data.status?.message?.parts);
 }
 
 /** A one-turn agent request plus a capturing event bus, shared by executor specs. */
@@ -112,7 +112,7 @@ export function makeRequest(opts: {
   text: string;
   metadata: Record<string, unknown>;
 }) {
-  const published: Array<{ parts: Array<{ text?: string }> }> = [];
+  const published: AgentExecutionEvent[] = [];
   let finished = false;
   const eventBus = {
     publish: (e: unknown) => published.push(e as never),
@@ -123,13 +123,10 @@ export function makeRequest(opts: {
   const requestContext = {
     contextId: opts.contextId,
     taskId: "task-test",
-    userMessage: {
-      kind: "message",
-      messageId: "m1",
-      role: "user",
-      parts: [{ kind: "text", text: opts.text }],
+    userMessage: userMessage(opts.text, {
+      contextId: opts.contextId,
       metadata: opts.metadata
-    }
+    })
   };
   return {
     published,

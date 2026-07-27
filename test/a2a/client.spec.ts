@@ -1,22 +1,38 @@
 import { describe, it, expect, afterEach, vi } from "vitest";
-import type { Message, Task } from "@a2a-js/sdk";
+import {
+  AgentCard,
+  Message,
+  SendMessageResponse,
+  Task,
+  TaskState,
+  type TaskPushNotificationConfig
+} from "@a2a-js/sdk";
 import {
   sendA2ARemote,
   cancelA2ARemote,
   sanitizeAgentReply
 } from "@/a2a/client";
 import { buildAgentCard } from "@/a2a/card";
+import {
+  agentMessage,
+  makeTask,
+  userMessage as buildUserMessage
+} from "../helpers/a2a";
 
 const ENDPOINT = "https://remote.example.com/a2a";
 
+/** The push config the gateway hands a remote agent (v1.0 flattened shape). */
+const PUSH: TaskPushNotificationConfig = {
+  tenant: "",
+  id: "",
+  taskId: "",
+  url: "https://gw.example.com/a2a/notifications",
+  token: "ntok-9",
+  authentication: undefined
+};
+
 function userMessage(text: string): Message {
-  return {
-    kind: "message",
-    messageId: "m1",
-    role: "user",
-    parts: [{ kind: "text", text }],
-    contextId: "C1:T1"
-  };
+  return buildUserMessage(text, { contextId: "C1:T1" });
 }
 
 interface Captured {
@@ -69,18 +85,25 @@ function stubRemote(taskId: string, calls: Captured[]) {
         } catch {
           /* ignore */
         }
-        const task: Task = {
-          kind: "task",
+        const task = makeTask({
           id: taskId,
           contextId: "C1:T1",
-          status: { state: "submitted" }
-        };
+          state: TaskState.TASK_STATE_SUBMITTED
+        });
+        // v1.0 returns the protobuf-JSON of SendMessageResponse — the payload
+        // oneof appears as a `task` key, not an inline `kind` discriminator.
         return new Response(
-          JSON.stringify({ jsonrpc: "2.0", id, result: task }),
+          JSON.stringify({
+            jsonrpc: "2.0",
+            id,
+            result: SendMessageResponse.toJSON({
+              payload: { $case: "task", value: task }
+            })
+          }),
           { status: 200, headers: { "content-type": "application/json" } }
         );
       }
-      return new Response(JSON.stringify(card), {
+      return new Response(JSON.stringify(AgentCard.toJSON(card)), {
         status: 200,
         headers: { "content-type": "application/json" }
       });
@@ -101,7 +124,7 @@ describe("sendA2ARemote — async remote accept", () => {
     const result = await sendA2ARemote(
       { endpoint: ENDPOINT, authToken: "tok-123" },
       userMessage("hi"),
-      { url: "https://gw.example.com/a2a/notifications", token: "ntok-9" }
+      PUSH
     );
 
     expect(result).toEqual({ kind: "accepted", taskId: "task-1" });
@@ -109,9 +132,10 @@ describe("sendA2ARemote — async remote accept", () => {
     const post = calls.find((c) => c.method.toUpperCase() === "POST");
     expect(post).toBeDefined();
     expect(post?.authorization).toBe("Bearer tok-123");
-    // The push-notification config must ride on the message/send params.
+    // The push-notification config must ride on the SendMessage params. v1.0
+    // renamed the field and flattened the config into it.
     const parsed = JSON.parse(post?.body ?? "{}");
-    const push = parsed.params?.configuration?.pushNotificationConfig;
+    const push = parsed.params?.configuration?.taskPushNotificationConfig;
     expect(push?.url).toBe("https://gw.example.com/a2a/notifications");
     expect(push?.token).toBe("ntok-9");
   });
@@ -129,19 +153,19 @@ describe("sendA2ARemote — async remote accept", () => {
         const isReq = input instanceof Request;
         const method = init?.method ?? (isReq ? input.method : "GET");
         if (method.toUpperCase() === "POST") {
-          const reply: Message = {
-            kind: "message",
-            messageId: "r1",
-            role: "agent",
-            parts: [{ kind: "text", text: "sync reply" }],
-            contextId: "C1:T1"
-          };
+          const reply = agentMessage("sync reply", { contextId: "C1:T1" });
           return new Response(
-            JSON.stringify({ jsonrpc: "2.0", id: 1, result: reply }),
+            JSON.stringify({
+              jsonrpc: "2.0",
+              id: 1,
+              result: SendMessageResponse.toJSON({
+                payload: { $case: "message", value: reply }
+              })
+            }),
             { status: 200, headers: { "content-type": "application/json" } }
           );
         }
-        return new Response(JSON.stringify(card), {
+        return new Response(JSON.stringify(AgentCard.toJSON(card)), {
           status: 200,
           headers: { "content-type": "application/json" }
         });
@@ -152,7 +176,7 @@ describe("sendA2ARemote — async remote accept", () => {
     const result = await sendA2ARemote(
       { endpoint: ENDPOINT, authToken: "t" },
       userMessage("hi"),
-      { url: "https://gw.example.com/a2a/notifications", token: "n" }
+      { ...PUSH, token: "n" }
     );
     expect(result).toEqual({ kind: "contract_violation" });
   });
@@ -210,13 +234,13 @@ const rpcError = (id: unknown, code: number, message = "err") => ({
 
 describe("cancelA2ARemote — A2A tasks/cancel", () => {
   it("returns canceled with the updated task on success", async () => {
-    const canceled: Task = {
-      kind: "task",
+    const canceled = makeTask({
       id: "task-9",
       contextId: "C1:T1",
-      status: { state: "canceled" }
-    };
-    stubRemoteRpc((id) => rpcResult(id, canceled));
+      state: TaskState.TASK_STATE_CANCELED
+    });
+    // `CancelTask` returns the Task itself (not a payload envelope), as protoJSON.
+    stubRemoteRpc((id) => rpcResult(id, Task.toJSON(canceled)));
 
     const out = await cancelA2ARemote(
       { endpoint: ENDPOINT, authToken: "t" },
@@ -224,7 +248,7 @@ describe("cancelA2ARemote — A2A tasks/cancel", () => {
     );
     expect(out.kind).toBe("canceled");
     if (out.kind === "canceled") {
-      expect(out.task.status.state).toBe("canceled");
+      expect(out.task.status?.state).toBe(TaskState.TASK_STATE_CANCELED);
     }
   });
 

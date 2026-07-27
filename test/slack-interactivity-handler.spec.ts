@@ -3,7 +3,12 @@ import {
   createExecutionContext,
   waitOnExecutionContext
 } from "cloudflare:test";
-import type { Message } from "@a2a-js/sdk";
+import {
+  AgentCard,
+  Message,
+  SendMessageResponse,
+  TaskState
+} from "@a2a-js/sdk";
 import { registerAgent } from "@/db/models/agents";
 import {
   setPublicUrl,
@@ -22,6 +27,8 @@ import {
 import { _resetIssuerCacheForTest } from "@/agents/dispatch";
 import { buildAgentCard } from "@/a2a/card";
 import { HITL_RESPONSE_TYPE } from "@/a2a/hitl";
+import { dataOf, partsText } from "@/a2a/parts";
+import { agentMessage, makeTask } from "./helpers/a2a";
 import { handleSlackInteractivity } from "@/slack-interactivity-handler";
 import { slackHeaders } from "./helpers/slack";
 
@@ -71,39 +78,46 @@ function stub(captured: Captured, opts: { rejectResume?: boolean } = {}) {
         );
         return Response.json({ ok: true, ts: "1700.98" });
       }
-      // A2A: card discovery (GET) + message/send (POST).
+      // A2A: card discovery (GET) + SendMessage (POST).
       if (request.method.toUpperCase() === "POST") {
         const rpc = (await request.clone().json()) as {
           id?: unknown;
           params?: { message?: Message };
         };
-        captured.resumeMessages.push(rpc.params?.message as Message);
+        // The message arrives as protobuf-JSON; decode it so assertions run
+        // against the same typed shape the gateway sent.
+        captured.resumeMessages.push(
+          Message.fromJSON(rpc.params?.message ?? {})
+        );
         if (opts.rejectResume) {
           // Sync reply instead of a Task ack → the gateway treats it as a non-accept.
           return Response.json({
             jsonrpc: "2.0",
             id: rpc.id ?? 1,
-            result: {
-              kind: "message",
-              messageId: "r1",
-              role: "agent",
-              parts: [{ kind: "text", text: "no ack" }],
-              contextId: "reply"
-            }
+            result: SendMessageResponse.toJSON({
+              payload: {
+                $case: "message",
+                value: agentMessage("no ack", { contextId: "reply" })
+              }
+            })
           });
         }
         return Response.json({
           jsonrpc: "2.0",
           id: rpc.id ?? 1,
-          result: {
-            kind: "task",
-            id: "task-remote-1",
-            contextId: "reply",
-            status: { state: "submitted" }
-          }
+          result: SendMessageResponse.toJSON({
+            payload: {
+              $case: "task",
+              value: makeTask({
+                id: "task-remote-1",
+                contextId: "reply",
+                state: TaskState.TASK_STATE_SUBMITTED
+              })
+            }
+          })
         });
       }
-      return Response.json(card);
+      return Response.json(AgentCard.toJSON(card));
     })
   );
 }
@@ -238,17 +252,14 @@ describe("handleSlackInteractivity", () => {
     const resume = captured.resumeMessages[0];
     expect(resume.taskId).toBe("task-1");
     expect(resume.referenceTaskIds).toEqual(["task-1"]);
-    const dataPart = resume.parts.find((p) => p.kind === "data");
-    expect(dataPart).toMatchObject({
-      data: {
-        type: HITL_RESPONSE_TYPE,
-        requestId: "req-1",
-        optionId: "approve"
-      }
+    const answer = resume.parts.map(dataOf).find((d) => d !== undefined);
+    expect(answer).toMatchObject({
+      type: HITL_RESPONSE_TYPE,
+      requestId: "req-1",
+      optionId: "approve"
     });
-    // The human-readable option label rides in the TextPart.
-    const textPart = resume.parts.find((p) => p.kind === "text");
-    expect(textPart).toMatchObject({ text: "Approve" });
+    // The human-readable option label rides in the text part.
+    expect(partsText(resume.parts)).toBe("Approve");
 
     // The paired task row is un-parked.
     expect((await getAgentTaskByToken("tok-1"))?.status).toBe("pending");

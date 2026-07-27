@@ -1,5 +1,3 @@
-import type { Task } from "@a2a-js/sdk";
-import { isRecord } from "@/util/json";
 import { getAgent } from "@/db/models/agents";
 import {
   getAgentTaskByToken,
@@ -13,6 +11,7 @@ import {
   verifyAgentCallbackToken,
   AgentCallbackAuthError
 } from "@/auth/agent-inbound";
+import { parseStreamResponse, snapshotOf } from "@/a2a/snapshot";
 import { deliverTaskToSlack, TaskDeliveryValidationError } from "./shared";
 
 /** Header carrying the per-task validation token set in pushNotificationConfig. */
@@ -39,8 +38,8 @@ async function captureCallbackError(
 
 /**
  * Handle a remote agent's authenticated push-notification callback. The token
- * and pinned card key are verified here, before shared delivery reads the Task
- * body or posts any agent-controlled output to Slack.
+ * and pinned card key are verified here, before shared delivery reads the
+ * notification body or posts any agent-controlled output to Slack.
  */
 export async function handleRemoteAgentNotification(
   request: Request
@@ -123,30 +122,32 @@ export async function handleRemoteAgentNotification(
     throw err;
   }
 
-  let task: Task | null = null;
+  // A2A v1.0 push notifications carry the protobuf-JSON of a `StreamResponse`
+  // (the same envelope the streaming transports use), not the bare `Task` v0.3
+  // POSTed. Parse it through the generated decoder so enum names and part
+  // shapes are normalized, then flatten to the gateway's task view — an
+  // envelope that advances no task lifecycle (an artifact delta, or a
+  // stand-alone message) carries nothing this callback can deliver.
+  let body: unknown;
   try {
-    const body = await request.json();
-    if (
-      isRecord(body) &&
-      body.kind === "task" &&
-      isRecord(body.status) &&
-      typeof body.status.state === "string"
-    ) {
-      task = body as unknown as Task;
-    }
+    body = await request.json();
   } catch {
-    task = null;
+    body = null;
   }
-  if (!task) {
+  const streamResponse = parseStreamResponse(body);
+  const snapshot = streamResponse ? snapshotOf(streamResponse) : null;
+  if (!snapshot) {
     await captureCallbackError(
       notificationToken,
-      "the callback body was not a valid A2A Task"
+      "the callback body was not a valid A2A task notification"
     );
-    return new Response("expected a Task body", { status: 400 });
+    return new Response("expected a Task or status-update notification", {
+      status: 400
+    });
   }
 
   try {
-    await deliverTaskToSlack(notificationToken, row, agent, task);
+    await deliverTaskToSlack(notificationToken, row, agent, snapshot);
   } catch (err) {
     if (err instanceof TaskDeliveryValidationError) {
       await captureCallbackError(notificationToken, err.message);

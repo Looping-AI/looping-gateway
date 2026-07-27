@@ -1,6 +1,7 @@
 import { describe, it, expect, afterEach, vi } from "vitest";
 import { FlattenedSign } from "jose";
 import type { AgentCard } from "@a2a-js/sdk";
+import { buildAgentCard } from "@/a2a/card";
 import {
   AgentCardVerificationError,
   canonicalCardPayload,
@@ -11,18 +12,11 @@ import { makeKey, stubJwks, type TestKey } from "../helpers/auth";
 const JKU = "https://agent.example.com/.well-known/jwks.json";
 
 function baseCard(): AgentCard {
-  return {
+  return buildAgentCard({
     name: "Example",
     description: "test agent",
-    protocolVersion: "0.3.0",
-    version: "0.1.0",
-    url: "https://agent.example.com/a2a",
-    preferredTransport: "JSONRPC",
-    capabilities: { streaming: false, pushNotifications: false },
-    defaultInputModes: ["text/plain"],
-    defaultOutputModes: ["text/plain"],
-    skills: []
-  };
+    url: "https://agent.example.com/a2a"
+  });
 }
 
 async function signCard(
@@ -32,7 +26,13 @@ async function signCard(
 ): Promise<AgentCard> {
   const payload = new TextEncoder().encode(canonicalCardPayload(card));
   const jws = await new FlattenedSign(payload)
-    .setProtectedHeader({ alg: "EdDSA", kid: key.publicJwk.kid as string, jku })
+    // v1.0 requires `typ` alongside `alg`/`kid` in the protected header.
+    .setProtectedHeader({
+      alg: "EdDSA",
+      kid: key.publicJwk.kid as string,
+      typ: "JOSE",
+      jku
+    })
     .sign(key.privateKey);
   return {
     ...card,
@@ -45,11 +45,11 @@ afterEach(() => {
 });
 
 describe("canonicalCardPayload", () => {
-  it("strips signatures and sorts keys deterministically", () => {
+  it("strips signatures and canonicalizes keys deterministically (JCS)", () => {
     const a = canonicalCardPayload({
       name: "x",
       version: "1",
-      signatures: [{ protected: "p", signature: "s" }]
+      signatures: [{ protected: "p", signature: "s", header: undefined }]
     } as unknown as AgentCard);
     const b = canonicalCardPayload({
       version: "1",
@@ -119,7 +119,7 @@ describe("verifyAgentCardSignature", () => {
       signatures: [
         {
           protected: Buffer.from(
-            JSON.stringify({ alg: "HS256", kid: "k1", jku: JKU })
+            JSON.stringify({ alg: "HS256", kid: "k1", typ: "JOSE", jku: JKU })
           ).toString("base64url"),
           signature: "AAAA",
           // payload intentionally omitted (detached)

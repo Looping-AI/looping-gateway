@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import type { Task, TaskState } from "@a2a-js/sdk";
+import { TaskState } from "@a2a-js/sdk";
 import { registerAgent, getAgent } from "@/db/models/agents";
 import {
   completeAgentTask,
@@ -9,6 +9,9 @@ import {
 import { getHitlRequest } from "@/db/models/hitl-requests";
 import { deliverTaskToSlack } from "@/a2a/notifications/shared";
 import { HITL_REQUEST_TYPE } from "@/a2a/hitl";
+import { dataPart, textPart } from "@/a2a/parts";
+import type { TaskSnapshot } from "@/a2a/snapshot";
+import { makeSnapshot } from "../helpers/a2a";
 
 interface SlackPost {
   method: string;
@@ -51,32 +54,21 @@ function stubFetch(posts: SlackPost[]) {
 function hitlTask(
   requestId: string,
   opts: { state?: TaskState; withDataPart?: boolean } = {}
-): Task {
-  const parts = [{ kind: "text" as const, text: "Proceed with deletion?" }];
-  const dataPart = {
-    kind: "data" as const,
-    data: {
-      type: HITL_REQUEST_TYPE,
-      requestId,
-      requestKind: "approval",
-      prompt: "Proceed with deletion?"
-    }
-  };
-  return {
-    kind: "task",
+): TaskSnapshot {
+  const fallback = textPart("Proceed with deletion?");
+  const request = dataPart({
+    type: HITL_REQUEST_TYPE,
+    requestId,
+    requestKind: "approval",
+    prompt: "Proceed with deletion?"
+  });
+  return makeSnapshot({
     id: "task-1",
     contextId: "C1:1700.1",
-    status: {
-      state: opts.state ?? "input-required",
-      message: {
-        kind: "message",
-        messageId: `${requestId}:u1`,
-        role: "agent",
-        contextId: "C1:1700.1",
-        parts: opts.withDataPart === false ? parts : [...parts, dataPart]
-      }
-    }
-  };
+    state: opts.state ?? TaskState.TASK_STATE_INPUT_REQUIRED,
+    messageId: `${requestId}:u1`,
+    parts: opts.withDataPart === false ? [fallback] : [fallback, request]
+  });
 }
 
 beforeEach(async () => {
@@ -102,10 +94,10 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-async function deliver(task: Task) {
+async function deliver(snapshot: TaskSnapshot) {
   const row = await getAgentTaskByToken("tok-del");
   const agent = await getAgent("remoteagent");
-  await deliverTaskToSlack("tok-del", row!, agent!, task);
+  await deliverTaskToSlack("tok-del", row!, agent!, snapshot);
 }
 
 describe("deliverTaskToSlack — HITL input-required branch", () => {
