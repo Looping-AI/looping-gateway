@@ -1,13 +1,16 @@
+import { AgentEvent } from "@a2a-js/sdk/server";
 import type { ExecutionEventBus, RequestContext } from "@a2a-js/sdk/server";
-import type { Message, TaskStatusUpdateEvent } from "@a2a-js/sdk";
+import { Role, TaskState } from "@a2a-js/sdk";
+import type { Message } from "@a2a-js/sdk";
 import type {
-  GenerateTextOnStepFinishCallback,
+  GenerateTextOnStepEndCallback,
+  LanguageModel,
   StopCondition,
   ToolSet
 } from "ai";
-import { generateText, stepCountIs } from "ai";
+import { generateText, isStepCount } from "ai";
 import type { createModelPair } from "@/agents/model";
-import { textOf } from "@/a2a/parts";
+import { buildMessage, textOf, textPart } from "@/a2a/parts";
 import { buildHitlRequestParts, type HitlRequest } from "@/a2a/hitl";
 import type { AgentTurnMetadata } from "@/agents/dispatch";
 import type { SessionLike } from "./session";
@@ -82,57 +85,75 @@ export interface AgentTurnConfig {
 function agentMessage(
   requestContext: RequestContext,
   messageId: string,
-  text: string
+  parts: Message["parts"]
 ): Message {
-  return {
-    kind: "message",
+  return buildMessage({
     messageId,
-    role: "agent",
-    parts: [{ kind: "text", text }],
+    role: Role.ROLE_AGENT,
+    parts,
     taskId: requestContext.taskId,
     contextId: requestContext.contextId
-  };
+  });
 }
 
+/**
+ * Publish the initial `submitted` Task. Every A2A v1.0 execution MUST open with
+ * a `task` or `message` event — the server rejects a stream that starts with a
+ * status update — and events are wrapped in the discriminated `AgentEvent`
+ * envelope rather than published as bare objects.
+ */
 function publishSubmitted(
   eventBus: ExecutionEventBus,
   requestContext: RequestContext
 ): void {
-  eventBus.publish({
-    kind: "task",
-    id: requestContext.taskId,
-    contextId: requestContext.contextId,
-    status: { state: "submitted" }
-  });
-}
-
-function publishStatus(
-  eventBus: ExecutionEventBus,
-  requestContext: RequestContext,
-  text: string,
-  messageId: string,
-  final: boolean,
-  state: "working" | "completed" | "canceled" = final ? "completed" : "working"
-): void {
-  const update: TaskStatusUpdateEvent = {
-    kind: "status-update",
-    taskId: requestContext.taskId,
-    contextId: requestContext.contextId,
-    status: {
-      state,
-      message: agentMessage(requestContext, messageId, text)
-    },
-    final
-  };
-  eventBus.publish(update);
+  eventBus.publish(
+    AgentEvent.task({
+      id: requestContext.taskId,
+      contextId: requestContext.contextId,
+      status: {
+        state: TaskState.TASK_STATE_SUBMITTED,
+        message: undefined,
+        timestamp: undefined
+      },
+      artifacts: [],
+      history: [],
+      metadata: undefined
+    })
+  );
 }
 
 /**
- * End the turn in `input-required`, carrying the HITL request DataPart (plus its
- * TextPart fallback). `final: true` closes this interaction's event stream — the
- * task is non-terminal and resumes on a later invocation when the human answers.
- * The delivery boundary detects the DataPart and renders it as an interactive
- * Slack prompt (see `deliverHitlRequest`).
+ * Publish a status update. v1.0 dropped `TaskStatusUpdateEvent.final`: the state
+ * itself now says whether the stream is over, so a terminal (or interrupted)
+ * state closes the turn and `working` keeps it open.
+ */
+function publishStatus(
+  eventBus: ExecutionEventBus,
+  requestContext: RequestContext,
+  parts: Message["parts"],
+  messageId: string,
+  state: TaskState
+): void {
+  eventBus.publish(
+    AgentEvent.statusUpdate({
+      taskId: requestContext.taskId,
+      contextId: requestContext.contextId,
+      status: {
+        state,
+        message: agentMessage(requestContext, messageId, parts),
+        timestamp: undefined
+      },
+      metadata: undefined
+    })
+  );
+}
+
+/**
+ * End the turn in `input-required`, carrying the HITL request data part (plus
+ * its text-part fallback). The state is *interrupted*, not terminal: it closes
+ * this interaction's event stream while leaving the task resumable on a later
+ * invocation when the human answers. The delivery boundary detects the data
+ * part and renders it as an interactive Slack prompt (see `deliverHitlRequest`).
  */
 function publishInputRequired(
   eventBus: ExecutionEventBus,
@@ -140,24 +161,13 @@ function publishInputRequired(
   request: HitlRequest,
   messageId: string
 ): void {
-  const update: TaskStatusUpdateEvent = {
-    kind: "status-update",
-    taskId: requestContext.taskId,
-    contextId: requestContext.contextId,
-    status: {
-      state: "input-required",
-      message: {
-        kind: "message",
-        messageId,
-        role: "agent",
-        parts: buildHitlRequestParts(request),
-        taskId: requestContext.taskId,
-        contextId: requestContext.contextId
-      }
-    },
-    final: true
-  };
-  eventBus.publish(update);
+  publishStatus(
+    eventBus,
+    requestContext,
+    buildHitlRequestParts(request),
+    messageId,
+    TaskState.TASK_STATE_INPUT_REQUIRED
+  );
 }
 
 /**
@@ -191,7 +201,7 @@ export async function executeAgentTurn(
 
   const publishTerminal = (
     reply: string,
-    state: "completed" | "canceled" = "completed"
+    state: TaskState = TaskState.TASK_STATE_COMPLETED
   ): void => {
     if (completed) return;
     completed = true;
@@ -204,9 +214,8 @@ export async function executeAgentTurn(
     publishStatus(
       eventBus,
       requestContext,
-      terminalText,
+      [textPart(terminalText)],
       `${userMessage.messageId}:final`,
-      true,
       state
     );
   };
@@ -227,10 +236,10 @@ export async function executeAgentTurn(
     // Gateway in dispatch); persist it verbatim.
     await session.appendMessage(userSessionMessage(text));
     const history = await session.getHistory();
-    const system = (await session.refreshSystemPrompt()) + systemSuffix;
+    const instructions = (await session.refreshSystemPrompt()) + systemSuffix;
     const tools = { ...(await session.tools()), ...extraTools };
 
-    const onStepFinish: GenerateTextOnStepFinishCallback<ToolSet> = (step) => {
+    const onStepEnd: GenerateTextOnStepEndCallback<ToolSet> = (step) => {
       // Text from a tool-calling step is the agent's only genuine non-terminal
       // content. Tool-only steps stay silent in Slack.
       if (step.toolCalls.length === 0 || !step.text.trim()) return;
@@ -239,9 +248,9 @@ export async function executeAgentTurn(
       publishStatus(
         eventBus,
         requestContext,
-        stepText,
+        [textPart(stepText)],
         `${userMessage.messageId}:step:${step.stepNumber}`,
-        false
+        TaskState.TASK_STATE_WORKING
       );
     };
 
@@ -272,20 +281,22 @@ export async function executeAgentTurn(
     const stopIfHitlRequested: StopCondition<ToolSet> = () =>
       hitl.request !== null;
 
-    const generateArgs = {
-      system,
-      messages: toModelMessages(history),
-      tools,
-      stopWhen: [stepCountIs(MAX_STEPS), stopIfCanceled, stopIfHitlRequested],
-      onStepFinish
-    };
-
-    let result: Awaited<ReturnType<typeof generateText>>;
-    try {
-      result = await generateText({
-        model: cfg.models.primary(),
-        ...generateArgs
+    // One call shape, two models. The system prompt goes in `instructions`:
+    // `messages` rejects `role: "system"` entries by default, which is fine
+    // because `toModelMessages` only ever emits user/assistant turns.
+    const generate = (model: LanguageModel) =>
+      generateText({
+        model,
+        instructions,
+        messages: toModelMessages(history),
+        tools,
+        stopWhen: [isStepCount(MAX_STEPS), stopIfCanceled, stopIfHitlRequested],
+        onStepEnd
       });
+
+    let result: Awaited<ReturnType<typeof generate>>;
+    try {
+      result = await generate(cfg.models.primary());
     } catch (primaryErr) {
       console.warn(
         "[agent-loop] AI error on primary model, retrying with fallback",
@@ -296,10 +307,7 @@ export async function executeAgentTurn(
         }
       );
       modelId = cfg.models.fallbackId();
-      result = await generateText({
-        model: cfg.models.fallback(),
-        ...generateArgs
-      });
+      result = await generate(cfg.models.fallback());
     }
 
     // Re-check after generation, not only between steps. A turn the model answers
@@ -318,7 +326,7 @@ export async function executeAgentTurn(
         contextId: requestContext.contextId,
         model: modelId
       });
-      publishTerminal("", "canceled");
+      publishTerminal("", TaskState.TASK_STATE_CANCELED);
       await session.appendMessage(assistantSessionMessage(CANCELED_NOTE));
       return;
     }

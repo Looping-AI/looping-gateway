@@ -14,7 +14,10 @@ import {
   setPublicUrl
 } from "@/db/models/workspace-configs";
 import { buildAgentCard } from "@/a2a/card";
+import { AgentCard, SendMessageResponse, TaskState } from "@a2a-js/sdk";
+import { agentMessage, makeTask } from "../helpers/a2a";
 import { stubSlack } from "../wrappers/slack-stub";
+import { stubAgentAi } from "../helpers/agents";
 import {
   trigger,
   makeAppMentionRequest,
@@ -33,12 +36,19 @@ import {
 
 describe("MessageWorkflow — local built-in agents", () => {
   const ADMIN_AGENT_NAME = "admin";
+  const AGENT_REPLY = "stubbed agent reply";
 
   beforeEach(async () => {
+    // These agents run the real AI loop; stub the model so the turn completes
+    // offline instead of rejecting on the DO's detached delivery promise.
+    stubAgentAi(AGENT_REPLY);
     await setWorkspaceAdminChannel(0, "C_ORGADMIN");
   });
 
-  afterEach(() => vi.unstubAllGlobals());
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
 
   function captureSlack(): PostCall[] {
     const calls: PostCall[] = [];
@@ -98,16 +108,17 @@ describe("MessageWorkflow — local built-in agents", () => {
       const [instance] = await introspector.get();
       await instance.waitForStatus("complete");
 
-      // The admin agent now runs the real AI loop (Workers AI). That binding is
-      // unavailable offline, so the executor's graceful fallback posts instead —
-      // either way this asserts the plumbing: Workflow → A2A → AdminAgent DO
-      // (Session over SQLite) → channel-level reply. The AI text itself is covered
-      // by the executor unit test and the manual e2e.
+      // The admin agent runs the real AI loop (Workers AI) over a stubbed model,
+      // so this asserts the whole plumbing end to end: Workflow → A2A →
+      // AdminAgent DO (Session over SQLite) → channel-level reply carrying the
+      // model's text.
       await waitForCalls(calls, 1);
       expect(calls).toHaveLength(1);
-      expect(calls[0]).toMatchObject({ channel: "C_ORGADMIN" });
+      expect(calls[0]).toMatchObject({
+        channel: "C_ORGADMIN",
+        text: AGENT_REPLY
+      });
       expect(calls[0].thread_ts).toBeUndefined();
-      expect(calls[0].text.length).toBeGreaterThan(0);
     } finally {
       await introspector.dispose();
     }
@@ -124,17 +135,14 @@ describe("MessageWorkflow — local built-in agents", () => {
       const [instance] = await introspector.get();
       await instance.waitForStatus("complete");
 
-      // The onboarding concierge now runs the real AI loop (Workers AI), keyed to
-      // a per-user DO instance. That binding is unavailable offline, so the
-      // executor's graceful fallback posts instead — either way this asserts the
-      // plumbing: Workflow → A2A → OnboardingAgent DO (Session over SQLite) →
-      // channel-level reply (no thread). The AI text is covered by the executor
-      // unit test and the manual e2e.
+      // The onboarding concierge runs the real AI loop (Workers AI) over a
+      // stubbed model, keyed to a per-user DO instance: Workflow → A2A →
+      // OnboardingAgent DO (Session over SQLite) → channel-level reply (no
+      // thread) carrying the model's text.
       await waitForCalls(calls, 1);
       expect(calls).toHaveLength(1);
-      expect(calls[0]).toMatchObject({ channel: "D1" });
+      expect(calls[0]).toMatchObject({ channel: "D1", text: AGENT_REPLY });
       expect(calls[0].thread_ts).toBeUndefined();
-      expect(calls[0].text.length).toBeGreaterThan(0);
     } finally {
       await introspector.dispose();
     }
@@ -287,8 +295,9 @@ describe("MessageWorkflow — remote custom agents", () => {
           });
         }
 
-        // Remote agent card discovery (GET).
-        if (request.method === "GET") return Response.json(card);
+        // Remote agent card discovery (GET) — served as protobuf-JSON.
+        if (request.method === "GET")
+          return Response.json(AgentCard.toJSON(card));
 
         // Remote agent dispatch (POST).
         const rpc = (await request.clone().json()) as { id?: unknown };
@@ -297,12 +306,16 @@ describe("MessageWorkflow — remote custom agents", () => {
           return Response.json({
             jsonrpc: "2.0",
             id: rpc.id ?? 1,
-            result: {
-              kind: "task",
-              id: "task-remote-1",
-              contextId: "ctx",
-              status: { state: "submitted" }
-            }
+            result: SendMessageResponse.toJSON({
+              payload: {
+                $case: "task",
+                value: makeTask({
+                  id: "task-remote-1",
+                  contextId: "ctx",
+                  state: TaskState.TASK_STATE_SUBMITTED
+                })
+              }
+            })
           });
         }
 
@@ -311,13 +324,15 @@ describe("MessageWorkflow — remote custom agents", () => {
         return Response.json({
           jsonrpc: "2.0",
           id: rpc.id ?? 1,
-          result: {
-            kind: "message",
-            messageId: "m1",
-            role: "agent",
-            parts: [{ kind: "text", text: "unexpected sync reply" }],
-            contextId: "ctx"
-          }
+          result: SendMessageResponse.toJSON({
+            payload: {
+              $case: "message",
+              value: agentMessage("unexpected sync reply", {
+                messageId: "m1",
+                contextId: "ctx"
+              })
+            }
+          })
         });
       })
     );

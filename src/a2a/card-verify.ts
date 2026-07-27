@@ -1,11 +1,11 @@
-import { AGENT_CARD_PATH, type AgentCard } from "@a2a-js/sdk";
 import {
-  base64url,
-  decodeProtectedHeader,
-  flattenedVerify,
-  importJWK,
-  type JWK
-} from "jose";
+  AGENT_CARD_PATH,
+  AgentCard,
+  canonicalizeAgentCard,
+  verifyAgentCardSignature as createCardVerifier,
+  type AgentCardSignature
+} from "@a2a-js/sdk";
+import { base64url, type JWK } from "jose";
 import { originOf, validateRemoteEndpoint } from "./endpoint";
 
 /**
@@ -18,10 +18,14 @@ import { originOf, validateRemoteEndpoint } from "./endpoint";
  * (Trust-On-First-Use), so a later substitution by a different signer is
  * rejected — the same pattern as the Slack `team_id` anchor.
  *
- * Signing contract (documented for third parties in `example/`): the JWS is a
- * detached-payload, EdDSA-signed flattened JWS over the **canonical JSON** of the
- * AgentCard *with its `signatures` field removed*. Canonical = `JSON.stringify`
- * with recursively sorted object keys and no insignificant whitespace.
+ * Signing contract: A2A v1.0 standardized this, so the canonicalization and JWS
+ * verification are the SDK's (`canonicalizeAgentCard` / `verifyAgentCardSignature`)
+ * rather than a gateway-local scheme — a detached-payload flattened JWS over the
+ * **JCS (RFC 8785)** canonicalization of the card's protobuf-JSON encoding with
+ * `signatures` removed, and a protected header carrying `alg`, `kid` and `typ`.
+ * What stays gateway-specific is the trust policy layered on top: only `EdDSA`
+ * signatures count, the `jku` is fetched through the SSRF allowlist, and the key
+ * must be an Ed25519 OKP JWK.
  */
 
 /** Thrown when a card cannot be fetched, is unsigned, or fails verification. */
@@ -45,36 +49,38 @@ export interface VerifiedAgentCard {
   displayName: string;
 }
 
-/** A2A AgentCard JWS signature entry (detached payload). */
-interface AgentCardSignature {
-  protected: string;
-  signature: string;
-  header?: Record<string, unknown>;
-}
-
 const FETCH_TIMEOUT_MS = 10_000;
 const MAX_CARD_LENGTH = 256 * 1024;
 const ALG = "EdDSA";
 
-/** Recursively sort object keys so serialization is deterministic. */
-function sortKeys(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(sortKeys);
-  if (value && typeof value === "object") {
-    const src = value as Record<string, unknown>;
-    const out: Record<string, unknown> = {};
-    for (const k of Object.keys(src).sort()) out[k] = sortKeys(src[k]);
-    return out;
-  }
-  return value;
+/**
+ * The exact byte string an AgentCard signature is computed over: the card's
+ * protobuf-JSON encoding with `signatures` removed, canonicalized per JCS
+ * (RFC 8785). Mirrors what {@link createCardVerifier} recomputes internally, so
+ * a third-party agent can sign against this and verify here.
+ */
+export function canonicalCardPayload(card: AgentCard): string {
+  const normalized = AgentCard.toJSON(AgentCard.fromJSON(card)) as Record<
+    string,
+    unknown
+  >;
+  delete normalized.signatures;
+  return canonicalizeAgentCard(normalized as Omit<AgentCard, "signatures">);
 }
 
-/** Canonical JSON of the card with `signatures` removed (the signed payload). */
-export function canonicalCardPayload(card: AgentCard): string {
-  const { signatures: _signatures, ...rest } = card as AgentCard & {
-    signatures?: unknown;
-  };
-  void _signatures;
-  return JSON.stringify(sortKeys(rest));
+/** The decoded JWS protected header of a card signature, or null if unreadable. */
+function protectedHeaderOf(
+  signature: AgentCardSignature
+): Record<string, unknown> | null {
+  try {
+    const decoded = base64url.decode(signature.protected);
+    const parsed: unknown = JSON.parse(new TextDecoder().decode(decoded));
+    return parsed && typeof parsed === "object"
+      ? (parsed as Record<string, unknown>)
+      : null;
+  } catch {
+    return null;
+  }
 }
 
 /** GET JSON with an abort timeout and a hard size cap (SSRF/DoS hardening). */
@@ -117,8 +123,22 @@ export async function fetchAgentCard(
     ? AGENT_CARD_PATH
     : `/${AGENT_CARD_PATH}`;
   const cardUrl = new URL(path, originOf(endpoint)).toString();
-  const card = (await fetchJsonCapped(cardUrl)) as AgentCard;
-  if (!card || typeof card !== "object" || typeof card.name !== "string") {
+  const raw = await fetchJsonCapped(cardUrl);
+  if (!raw || typeof raw !== "object") {
+    throw new AgentCardVerificationError(`invalid AgentCard at ${cardUrl}`);
+  }
+  // Decode through the generated codec rather than casting: the wire form is
+  // protobuf-JSON, so this is what normalizes enum names, oneof shapes, and
+  // omitted proto defaults into the typed v1.0 card the rest of the code uses.
+  let card: AgentCard;
+  try {
+    card = AgentCard.fromJSON(raw);
+  } catch (err) {
+    throw new AgentCardVerificationError(
+      `invalid AgentCard at ${cardUrl}: ${(err as Error).message}`
+    );
+  }
+  if (typeof card.name !== "string" || card.name.length === 0) {
     throw new AgentCardVerificationError(`invalid AgentCard at ${cardUrl}`);
   }
   return card;
@@ -160,48 +180,44 @@ export async function verifyAgentCardSignature(
   opts: { allowedDomains?: string[] } = {}
 ): Promise<CardSigningPin> {
   const allowedDomains = opts.allowedDomains ?? [];
-  const signatures = (card as AgentCard & { signatures?: AgentCardSignature[] })
-    .signatures;
-  if (!signatures || signatures.length === 0) {
+  const signatures = card.signatures ?? [];
+  if (signatures.length === 0) {
     throw new AgentCardVerificationError("AgentCard is not signed");
   }
 
-  const payload = base64url.encode(canonicalCardPayload(card));
-  const errors: string[] = [];
-
-  for (const sig of signatures) {
-    try {
-      const header = decodeProtectedHeader({
-        protected: sig.protected,
-        signature: sig.signature,
-        payload
-      });
-      if (header.alg !== ALG) {
-        throw new Error(`unexpected alg '${header.alg ?? "none"}'`);
-      }
-      if (!header.kid || !header.jku) {
-        throw new Error("protected header missing kid/jku");
-      }
-      const key = await resolveSigningKey(
-        header.jku,
-        header.kid,
-        allowedDomains
-      );
-      const publicKey = await importJWK(key, ALG);
-      await flattenedVerify(
-        { protected: sig.protected, signature: sig.signature, payload },
-        publicKey,
-        { algorithms: [ALG] }
-      );
-      return { cardSigningJku: header.jku, cardSigningKid: header.kid };
-    } catch (err) {
-      errors.push((err as Error).message);
-    }
+  // The SDK verifier accepts whatever `alg` the protected header names, so the
+  // algorithm restriction is enforced by only ever handing it EdDSA entries.
+  const eddsa = signatures.filter((sig) => protectedHeaderOf(sig)?.alg === ALG);
+  if (eddsa.length === 0) {
+    throw new AgentCardVerificationError(
+      `AgentCard has no ${ALG} signature to verify`
+    );
   }
 
-  throw new AgentCardVerificationError(
-    `AgentCard signature verification failed: ${errors.join("; ")}`
-  );
+  // The verifier returns on the first signature that validates, so the last
+  // identity its key lookup resolved is the one that verified — capture it
+  // there, since the verifier itself reports only success or failure.
+  let pin: CardSigningPin | undefined;
+  const verify = createCardVerifier(async (kid, jku) => {
+    if (!jku) throw new Error("protected header missing jku");
+    const key = await resolveSigningKey(jku, kid, allowedDomains);
+    pin = { cardSigningJku: jku, cardSigningKid: kid };
+    return key;
+  });
+
+  try {
+    await verify({ ...card, signatures: eddsa });
+  } catch (err) {
+    throw new AgentCardVerificationError(
+      `AgentCard signature verification failed: ${(err as Error).message}`
+    );
+  }
+  if (!pin) {
+    throw new AgentCardVerificationError(
+      "AgentCard signature verified without resolving a signing key"
+    );
+  }
+  return pin;
 }
 
 /**

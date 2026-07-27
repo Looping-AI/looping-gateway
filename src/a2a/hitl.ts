@@ -5,31 +5,32 @@ import type {
   SlackInputRequest
 } from "@chat-adapter/slack/blocks";
 import { isRecord } from "@/util/json";
+import { dataOf, dataPart, textPart } from "@/a2a/parts";
 
 /**
  * The gateway's human-in-the-loop (HITL) wire contract, carried inside A2A
- * `DataPart`s. A2A does not standardize a form schema (`DataPart.data` is
- * arbitrary JSON), so we namespace our own `data.type` discriminators — this is
- * spec-compliant and lets a non-HITL-aware client still read the sibling
- * `TextPart` fallback.
+ * `data` parts. A2A does not standardize a form schema (a part's `data` content
+ * is arbitrary JSON), so we namespace our own `data.type` discriminators — this
+ * is spec-compliant and lets a non-HITL-aware client still read the sibling
+ * text part fallback.
  *
  * Flow:
  * - An agent that needs a human decision transitions its task to
  *   `input-required` and emits a status update whose `status.message.parts`
- *   include a {@link HITL_REQUEST_TYPE} DataPart (plus a human-readable TextPart).
+ *   include a {@link HITL_REQUEST_TYPE} data part (plus a human-readable text part).
  * - The gateway renders it in Slack, captures the answer, and resumes the task
- *   with a new message carrying a {@link HITL_RESPONSE_TYPE} DataPart.
- * - On TTL expiry the gateway sends a {@link HITL_TIMEOUT_TYPE} DataPart instead.
+ *   with a new message carrying a {@link HITL_RESPONSE_TYPE} data part.
+ * - On TTL expiry the gateway sends a {@link HITL_TIMEOUT_TYPE} data part instead.
  *
  * An "approval" is just a two-option "choice" (Approve/Reject), so one shape
  * covers both.
  */
 
-/** DataPart `data.type` for an agent → gateway HITL request. */
+/** Data-part `type` for an agent → gateway HITL request. */
 export const HITL_REQUEST_TYPE = "io.looping.hitl.request";
-/** DataPart `data.type` for the gateway → agent answer that resumes the task. */
+/** Data-part `type` for the gateway → agent answer that resumes the task. */
 export const HITL_RESPONSE_TYPE = "io.looping.hitl.response";
-/** DataPart `data.type` for the gateway → agent timeout that ends the wait. */
+/** Data-part `type` for the gateway → agent timeout that ends the wait. */
 export const HITL_TIMEOUT_TYPE = "io.looping.hitl.timeout";
 
 /** Canonical option ids used when an `approval` request omits its own options. */
@@ -63,21 +64,13 @@ export type HitlOption = z.infer<typeof optionSchema>;
 
 /**
  * Find and validate a HITL request in an A2A message's parts. Returns `null`
- * when the message carries no (valid) HITL request DataPart — the caller then
+ * when the message carries no (valid) HITL request data part — the caller then
  * falls back to treating the `input-required` update as plain text.
  */
 export function parseHitlRequest(
   message: Message | undefined
 ): HitlRequest | null {
-  if (!message) return null;
-  for (const part of message.parts) {
-    if (part.kind !== "data") continue;
-    const data = part.data;
-    if (!isRecord(data) || data.type !== HITL_REQUEST_TYPE) continue;
-    const parsed = hitlRequestSchema.safeParse(data);
-    if (parsed.success) return parsed.data;
-  }
-  return null;
+  return parseDataPart(message, HITL_REQUEST_TYPE, hitlRequestSchema);
 }
 
 /** The canonical two options for an `approval` request that supplies none. */
@@ -125,8 +118,8 @@ export function optionLabel(
 
 /**
  * Build the parts of the resume message the gateway sends back onto the task.
- * `humanText` (the chosen option's label, or the freeform text) is the
- * TextPart a non-HITL client sees; the DataPart carries the structured answer.
+ * `humanText` (the chosen option's label, or the freeform text) is the text
+ * part a non-HITL client sees; the data part carries the structured answer.
  */
 export function buildHitlResponseParts(input: {
   requestId: string;
@@ -136,42 +129,33 @@ export function buildHitlResponseParts(input: {
   humanText: string;
 }): Part[] {
   return [
-    { kind: "text", text: input.humanText },
-    {
-      kind: "data",
-      data: {
-        type: HITL_RESPONSE_TYPE,
-        requestId: input.requestId,
-        ...(input.optionId ? { optionId: input.optionId } : {}),
-        ...(input.text ? { text: input.text } : {}),
-        answeredBy: input.answeredBy
-      }
-    }
+    textPart(input.humanText),
+    dataPart({
+      type: HITL_RESPONSE_TYPE,
+      requestId: input.requestId,
+      ...(input.optionId ? { optionId: input.optionId } : {}),
+      ...(input.text ? { text: input.text } : {}),
+      answeredBy: input.answeredBy
+    })
   ];
 }
 
 /** Build the parts of the timeout message sent when a HITL prompt expires. */
 export function buildHitlTimeoutParts(requestId: string): Part[] {
   return [
-    {
-      kind: "text",
-      text: "(No response was received within the allotted time.)"
-    },
-    { kind: "data", data: { type: HITL_TIMEOUT_TYPE, requestId } }
+    textPart("(No response was received within the allotted time.)"),
+    dataPart({ type: HITL_TIMEOUT_TYPE, requestId })
   ];
 }
 
 /**
  * Build the parts of the `input-required` status message an agent emits to raise
- * a HITL prompt: a human-readable TextPart fallback plus the structured request
- * DataPart the gateway renders in Slack. Symmetric to {@link buildHitlResponseParts};
- * the DataPart round-trips through {@link parseHitlRequest}.
+ * a HITL prompt: a human-readable text part fallback plus the structured request
+ * data part the gateway renders in Slack. Symmetric to {@link buildHitlResponseParts};
+ * the data part round-trips through {@link parseHitlRequest}.
  */
 export function buildHitlRequestParts(req: HitlRequest): Part[] {
-  return [
-    { kind: "text", text: req.prompt },
-    { kind: "data", data: { ...req, type: HITL_REQUEST_TYPE } }
-  ];
+  return [textPart(req.prompt), dataPart({ ...req, type: HITL_REQUEST_TYPE })];
 }
 
 const hitlResponseSchema = z
@@ -188,7 +172,7 @@ const hitlResponseSchema = z
 
 export type HitlResponse = z.infer<typeof hitlResponseSchema>;
 
-/** Find the DataPart of `type` in a message and validate it with `schema`. */
+/** Find the data part of `type` in a message and validate it with `schema`. */
 function parseDataPart<T>(
   message: Message | undefined,
   type: string,
@@ -196,8 +180,7 @@ function parseDataPart<T>(
 ): T | null {
   if (!message) return null;
   for (const part of message.parts) {
-    if (part.kind !== "data") continue;
-    const data = part.data;
+    const data = dataOf(part);
     if (!isRecord(data) || data.type !== type) continue;
     const parsed = schema.safeParse(data);
     if (parsed.success) return parsed.data;
@@ -207,7 +190,7 @@ function parseDataPart<T>(
 
 /**
  * Find and validate the gateway → agent answer that resumes a parked task.
- * Returns `null` when the message carries no HITL response DataPart.
+ * Returns `null` when the message carries no HITL response data part.
  */
 export function parseHitlResponse(
   message: Message | undefined

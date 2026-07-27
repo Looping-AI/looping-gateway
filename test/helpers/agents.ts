@@ -1,7 +1,11 @@
 import { vi } from "vitest";
 import { env } from "cloudflare:workers";
 import type { SessionMessage } from "agents/experimental/memory/session";
+import type { AgentExecutionEvent } from "@a2a-js/sdk/server";
+import { partsText } from "@/a2a/parts";
+import { EMBED_MODEL_ID } from "@/config";
 import type { SessionLike } from "@/agents/shared/session";
+import { userMessage } from "./a2a";
 
 /**
  * In-memory `SessionLike` for driving agent executors without a Durable Object.
@@ -44,6 +48,26 @@ export function fakeRecallEnv() {
     .spyOn(env.VECTORIZE, "query")
     .mockImplementation((async () => ({ count: 0, matches: [] })) as never);
   return { run, query };
+}
+
+/**
+ * Stub the whole `AI` binding so a built-in agent's turn completes offline.
+ *
+ * `remoteBindings: false` (vitest.config.ts) makes the real binding throw
+ * "Binding AI needs to be run remotely". Specs that only trigger an agent turn
+ * as a *side effect* — a Slack event that wakes the admin/onboarding DO — never
+ * await that turn, so the failure escapes on the DO's detached promise and
+ * vitest reports it as an unhandled rejection. Chat calls answer with `text`,
+ * embedding calls with one filler vector per input. Restore with
+ * `vi.restoreAllMocks()`.
+ */
+export function stubAgentAi(text = "stubbed agent reply") {
+  return vi
+    .spyOn(env.AI, "run")
+    .mockImplementation((async (model: string, inputs: { text?: string[] }) =>
+      model === EMBED_MODEL_ID
+        ? { data: (inputs.text ?? [""]).map(() => Array(1024).fill(0.1)) }
+        : { response: text }) as never);
 }
 
 // Minimal valid LanguageModelV3 generate result.
@@ -95,15 +119,12 @@ export function toolCallResult(toolName: string, input: unknown) {
 }
 
 /** Extract text from the terminal A2A task-status event captured by a test bus. */
-export function terminalTaskText(events: unknown[]): string | undefined {
-  const event = events.at(-1) as
-    | {
-        status?: {
-          message?: { parts?: Array<{ text?: string }> };
-        };
-      }
-    | undefined;
-  return event?.status?.message?.parts?.[0]?.text;
+export function terminalTaskText(
+  events: AgentExecutionEvent[]
+): string | undefined {
+  const event = events.at(-1);
+  if (event?.kind !== "statusUpdate") return undefined;
+  return partsText(event.data.status?.message?.parts);
 }
 
 /** A one-turn agent request plus a capturing event bus, shared by executor specs. */
@@ -112,7 +133,7 @@ export function makeRequest(opts: {
   text: string;
   metadata: Record<string, unknown>;
 }) {
-  const published: Array<{ parts: Array<{ text?: string }> }> = [];
+  const published: AgentExecutionEvent[] = [];
   let finished = false;
   const eventBus = {
     publish: (e: unknown) => published.push(e as never),
@@ -123,13 +144,10 @@ export function makeRequest(opts: {
   const requestContext = {
     contextId: opts.contextId,
     taskId: "task-test",
-    userMessage: {
-      kind: "message",
-      messageId: "m1",
-      role: "user",
-      parts: [{ kind: "text", text: opts.text }],
+    userMessage: userMessage(opts.text, {
+      contextId: opts.contextId,
       metadata: opts.metadata
-    }
+    })
   };
   return {
     published,

@@ -1,4 +1,3 @@
-import type { Task } from "@a2a-js/sdk";
 import { inputRequestToSlackBlocks } from "@chat-adapter/slack/blocks";
 import { HITL_REQUEST_TTL_SECONDS } from "@/config";
 import { agentRenderIdentity, type AgentRow } from "@/db/models/agents";
@@ -15,6 +14,7 @@ import {
   type HitlRequest,
   type HitlOption
 } from "@/a2a/hitl";
+import type { TaskSnapshot } from "@/a2a/snapshot";
 import { postBlocks, postReply, updateBlocks } from "@/wrappers/slack";
 
 /** Sanitize an agent-authored option (label/description are untrusted output). */
@@ -31,8 +31,8 @@ function sanitizeOption(option: HitlOption): HitlOption {
 /**
  * Render a human-in-the-loop prompt to Slack and park the task.
  *
- * Called from the delivery boundary when an `input-required` Task carries a HITL
- * request DataPart. Sanitizes the agent's prompt/options (Block Kit text never
+ * Called from the delivery boundary when an `input-required` snapshot carries a
+ * HITL request data part. Sanitizes the agent's prompt/options (Block Kit text never
  * passes through slackifyMarkdown), persists the request keyed by `requestId`
  * (idempotent — a redelivered push does not double-post), suspends the paired
  * `agent_tasks` row (so the fan-out stays undrained and stray callbacks no-op),
@@ -42,7 +42,7 @@ export async function deliverHitlRequest(
   token: string,
   row: AgentTaskRow,
   agent: AgentRow,
-  task: Task,
+  snapshot: TaskSnapshot,
   req: HitlRequest
 ): Promise<void> {
   const sanitized: HitlRequest = {
@@ -58,8 +58,8 @@ export async function deliverHitlRequest(
   const created = await createHitlRequest({
     requestId: req.requestId,
     token,
-    taskId: task.id,
-    contextId: task.contextId,
+    taskId: snapshot.taskId,
+    contextId: snapshot.contextId,
     agentName: row.agentName,
     channelId: row.channelId,
     threadTs: row.replyThreadTs,

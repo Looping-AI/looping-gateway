@@ -2,7 +2,9 @@ import { describe, it, expect, afterEach, vi } from "vitest";
 import { MockLanguageModelV3 } from "ai/test";
 import { AdminAgentExecutor, type SessionHost } from "@/agents/admin/executor";
 import type { UserAuthContext } from "@/auth";
-import type { Message } from "@a2a-js/sdk";
+import { Role, type Message } from "@a2a-js/sdk";
+import type { AgentExecutionEvent } from "@a2a-js/sdk/server";
+import { buildMessage } from "@/a2a/parts";
 import {
   buildHitlResponseParts,
   HITL_APPROVE_OPTION_ID,
@@ -153,12 +155,7 @@ describe("AdminAgentExecutor — HITL approval resume", () => {
 
   /** A resume request carrying `parts` (a HITL response DataPart) as the user turn. */
   function resumeRequest(parts: Message["parts"], wsId: number) {
-    const published: Array<{
-      status?: {
-        state?: string;
-        message?: { parts?: Array<{ text?: string }> };
-      };
-    }> = [];
+    const published: AgentExecutionEvent[] = [];
     let finished = false;
     const eventBus = {
       publish: (e: unknown) => published.push(e as never),
@@ -166,20 +163,29 @@ describe("AdminAgentExecutor — HITL approval resume", () => {
         finished = true;
       }
     };
+    const message = buildMessage({
+      messageId: "r1",
+      role: Role.ROLE_USER,
+      parts,
+      contextId: "C_ADMIN:thread-1",
+      metadata: {
+        user: { ...caller, adminWorkspaces: [wsId] },
+        agentKind: "admin",
+        adminWorkspaceId: wsId
+      }
+    });
+    // The executor re-wraps this into a fresh RequestContext, so it must carry
+    // the whole SendMessageRequest the v1.0 shape expects, not a loose message.
     const requestContext = {
       contextId: "C_ADMIN:thread-1",
       taskId: "task-test",
-      userMessage: {
-        kind: "message",
-        messageId: "r1",
-        role: "user",
-        parts,
-        metadata: {
-          user: { ...caller, adminWorkspaces: [wsId] },
-          agentKind: "admin",
-          adminWorkspaceId: wsId
-        }
-      }
+      request: {
+        tenant: "",
+        message,
+        configuration: undefined,
+        metadata: undefined
+      },
+      userMessage: message
     };
     return {
       published,

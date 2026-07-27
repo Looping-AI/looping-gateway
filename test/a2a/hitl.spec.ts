@@ -1,5 +1,12 @@
 import { describe, it, expect } from "vitest";
-import type { Message } from "@a2a-js/sdk";
+import { Role, type Message } from "@a2a-js/sdk";
+import {
+  buildMessage,
+  dataOf,
+  dataPart,
+  partsText,
+  textPart
+} from "@/a2a/parts";
 import {
   parseHitlRequest,
   parseHitlResponse,
@@ -19,23 +26,20 @@ import {
 } from "@/a2a/hitl";
 
 function msg(parts: Message["parts"]): Message {
-  return { kind: "message", messageId: "m1", role: "agent", parts };
+  return buildMessage({ messageId: "m1", role: Role.ROLE_AGENT, parts });
 }
 
 describe("parseHitlRequest", () => {
-  it("extracts a valid request DataPart", () => {
+  it("extracts a valid request data part", () => {
     const req = parseHitlRequest(
       msg([
-        { kind: "text", text: "Proceed?" },
-        {
-          kind: "data",
-          data: {
-            type: HITL_REQUEST_TYPE,
-            requestId: "req-1",
-            requestKind: "approval",
-            prompt: "Proceed?"
-          }
-        }
+        textPart("Proceed?"),
+        dataPart({
+          type: HITL_REQUEST_TYPE,
+          requestId: "req-1",
+          requestKind: "approval",
+          prompt: "Proceed?"
+        })
       ])
     );
     expect(req).not.toBeNull();
@@ -43,15 +47,13 @@ describe("parseHitlRequest", () => {
     expect(req?.requestKind).toBe("approval");
   });
 
-  it("returns null when no HITL DataPart is present", () => {
-    expect(parseHitlRequest(msg([{ kind: "text", text: "hi" }]))).toBeNull();
+  it("returns null when no HITL data part is present", () => {
+    expect(parseHitlRequest(msg([textPart("hi")]))).toBeNull();
   });
 
-  it("returns null for a DataPart of a different type", () => {
+  it("returns null for a data part of a different type", () => {
     expect(
-      parseHitlRequest(
-        msg([{ kind: "data", data: { type: "something.else", x: 1 } }])
-      )
+      parseHitlRequest(msg([dataPart({ type: "something.else", x: 1 })]))
     ).toBeNull();
   });
 
@@ -59,14 +61,11 @@ describe("parseHitlRequest", () => {
     expect(
       parseHitlRequest(
         msg([
-          {
-            kind: "data",
-            data: {
-              type: HITL_REQUEST_TYPE,
-              requestKind: "choice",
-              prompt: "?"
-            }
-          }
+          dataPart({
+            type: HITL_REQUEST_TYPE,
+            requestKind: "choice",
+            prompt: "?"
+          })
         ])
       )
     ).toBeNull();
@@ -76,20 +75,17 @@ describe("parseHitlRequest", () => {
     expect(parseHitlRequest(undefined)).toBeNull();
   });
 
-  it("prefers the first valid DataPart and ignores non-HITL data", () => {
+  it("prefers the first valid data part and ignores non-HITL data", () => {
     const req = parseHitlRequest(
       msg([
-        { kind: "data", data: { type: "noise" } },
-        {
-          kind: "data",
-          data: {
-            type: HITL_REQUEST_TYPE,
-            requestId: "req-x",
-            requestKind: "choice",
-            prompt: "Pick",
-            options: [{ id: "a", label: "A" }]
-          }
-        }
+        dataPart({ type: "noise" }),
+        dataPart({
+          type: HITL_REQUEST_TYPE,
+          requestId: "req-x",
+          requestKind: "choice",
+          prompt: "Pick",
+          options: [{ id: "a", label: "A" }]
+        })
       ])
     );
     expect(req?.requestId).toBe("req-x");
@@ -167,16 +163,15 @@ describe("buildHitlResponseParts", () => {
       answeredBy: "U1",
       humanText: "Approve"
     });
-    expect(parts[0]).toEqual({ kind: "text", text: "Approve" });
-    expect(parts[1]).toMatchObject({
-      kind: "data",
-      data: {
+    expect(parts[0]).toEqual(textPart("Approve"));
+    expect(parts[1]).toMatchObject(
+      dataPart({
         type: HITL_RESPONSE_TYPE,
         requestId: "req-1",
         optionId: "approve",
         answeredBy: "U1"
-      }
-    });
+      })
+    );
   });
 
   it("includes freeform text and omits optionId when absent", () => {
@@ -186,25 +181,24 @@ describe("buildHitlResponseParts", () => {
       answeredBy: "U2",
       humanText: "do the other thing"
     });
-    const data = (parts[1] as { data: Record<string, unknown> }).data;
+    const data = dataOf(parts[1]) as Record<string, unknown>;
     expect(data.text).toBe("do the other thing");
     expect(data.optionId).toBeUndefined();
   });
 });
 
 describe("buildHitlTimeoutParts", () => {
-  it("carries the timeout DataPart and a human fallback", () => {
+  it("carries the timeout data part and a human fallback", () => {
     const parts = buildHitlTimeoutParts("req-9");
-    expect(parts[0].kind).toBe("text");
-    expect(parts[1]).toEqual({
-      kind: "data",
-      data: { type: HITL_TIMEOUT_TYPE, requestId: "req-9" }
-    });
+    expect(partsText(parts)).toMatch(/no response was received/i);
+    expect(parts[1]).toEqual(
+      dataPart({ type: HITL_TIMEOUT_TYPE, requestId: "req-9" })
+    );
   });
 });
 
 describe("buildHitlRequestParts", () => {
-  it("carries a TextPart fallback plus the request DataPart, and round-trips", () => {
+  it("carries a text-part fallback plus the request data part, and round-trips", () => {
     const req = {
       type: HITL_REQUEST_TYPE,
       requestId: "req-42",
@@ -214,9 +208,9 @@ describe("buildHitlRequestParts", () => {
       allowFreeform: true
     } satisfies HitlRequest;
     const parts = buildHitlRequestParts(req);
-    expect(parts[0]).toEqual({ kind: "text", text: "Pick one" });
+    expect(parts[0]).toEqual(textPart("Pick one"));
 
-    // The DataPart is exactly what parseHitlRequest reads back.
+    // The data part is exactly what parseHitlRequest reads back.
     const parsed = parseHitlRequest(msg(parts));
     expect(parsed).toMatchObject({
       requestId: "req-42",
@@ -251,21 +245,18 @@ describe("parseHitlResponse", () => {
       humanText: "something else"
     });
     expect(parseHitlResponse(msg(parts))?.text).toBe("something else");
-    expect(parseHitlResponse(msg([{ kind: "text", text: "hi" }]))).toBeNull();
+    expect(parseHitlResponse(msg([textPart("hi")]))).toBeNull();
   });
 
   it("returns null for a malformed response with neither optionId nor text", () => {
     expect(
       parseHitlResponse(
         msg([
-          {
-            kind: "data",
-            data: {
-              type: HITL_RESPONSE_TYPE,
-              requestId: "req-3",
-              answeredBy: "U9"
-            }
-          }
+          dataPart({
+            type: HITL_RESPONSE_TYPE,
+            requestId: "req-3",
+            answeredBy: "U9"
+          })
         ])
       )
     ).toBeNull();
@@ -276,6 +267,6 @@ describe("parseHitlTimeout", () => {
   it("extracts the requestId and returns null when absent", () => {
     const parts = buildHitlTimeoutParts("req-7");
     expect(parseHitlTimeout(msg(parts))).toEqual({ requestId: "req-7" });
-    expect(parseHitlTimeout(msg([{ kind: "text", text: "hi" }]))).toBeNull();
+    expect(parseHitlTimeout(msg([textPart("hi")]))).toBeNull();
   });
 });

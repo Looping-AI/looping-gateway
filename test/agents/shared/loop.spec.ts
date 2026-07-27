@@ -2,6 +2,9 @@ import { describe, it, expect, vi } from "vitest";
 import { MockLanguageModelV3 } from "ai/test";
 import { tool, type LanguageModel } from "ai";
 import { z } from "zod";
+import { TaskState, type TaskStatusUpdateEvent } from "@a2a-js/sdk";
+import type { AgentExecutionEvent } from "@a2a-js/sdk/server";
+import { dataOf, partsText } from "@/a2a/parts";
 import type { ModelPair } from "@/agents/model";
 import type { SessionLike } from "@/agents/shared/session";
 import {
@@ -15,22 +18,13 @@ import {
   lengthResult,
   toolCallResult
 } from "../../helpers/agents";
+import { userMessage } from "../../helpers/a2a";
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-interface PublishedEvent {
-  kind: string;
-  id?: string;
-  taskId?: string;
-  contextId?: string;
-  final?: boolean;
-  status?: {
-    state: string;
-    message?: { messageId: string; parts: Array<{ text?: string }> };
-  };
-}
+type PublishedEvent = AgentExecutionEvent;
 
 function fakeEventBus() {
   const published: PublishedEvent[] = [];
@@ -46,36 +40,60 @@ function fakeRequestContext(
   text = "hello",
   opts: { contextId?: string; metadata?: Record<string, unknown> } = {}
 ) {
+  const contextId = opts.contextId ?? "ctx-1";
   return {
-    contextId: opts.contextId ?? "ctx-1",
+    contextId,
     taskId: "task-1",
-    userMessage: {
-      kind: "message",
-      messageId: "m1",
-      role: "user",
-      parts: [{ kind: "text", text }],
+    userMessage: userMessage(text, {
+      contextId,
       metadata: opts.metadata ?? {}
-    }
+    })
   } as never;
+}
+
+/** The status-update event at `index`, failing the test if it is another kind. */
+function statusEventAt(
+  bus: { published: PublishedEvent[] },
+  index: number
+): TaskStatusUpdateEvent {
+  const event = bus.published.at(index);
+  expect(event?.kind).toBe("statusUpdate");
+  return (event as { kind: "statusUpdate"; data: TaskStatusUpdateEvent }).data;
+}
+
+/** The task state of every status-update event published, in order. */
+function publishedStates(bus: { published: PublishedEvent[] }): TaskState[] {
+  return bus.published.flatMap((e) =>
+    e.kind === "statusUpdate" && e.data.status ? [e.data.status.state] : []
+  );
+}
+
+/** The concatenated text of every event published, for "never said X" checks. */
+function publishedText(bus: { published: PublishedEvent[] }): string {
+  return bus.published
+    .map((e) =>
+      e.kind === "statusUpdate" ? partsText(e.data.status?.message?.parts) : ""
+    )
+    .join("");
 }
 
 function expectTerminalReply(bus: { published: PublishedEvent[] }) {
   expect(bus.published[0]).toMatchObject({
     kind: "task",
-    id: "task-1",
-    contextId: "ctx-1",
-    status: { state: "submitted" }
+    data: {
+      id: "task-1",
+      contextId: "ctx-1",
+      status: { state: TaskState.TASK_STATE_SUBMITTED }
+    }
   });
 
-  const terminal = bus.published.at(-1);
+  const terminal = statusEventAt(bus, -1);
   expect(terminal).toMatchObject({
-    kind: "status-update",
     taskId: "task-1",
     contextId: "ctx-1",
-    final: true,
-    status: { state: "completed" }
+    status: { state: TaskState.TASK_STATE_COMPLETED }
   });
-  return terminal?.status?.message;
+  return terminal.status?.message;
 }
 
 function fakeModels(
@@ -168,10 +186,9 @@ describe("executeAgentTurn", () => {
     expect(bus.finished).toHaveBeenCalledTimes(1);
     // The task exists before its terminal response, allowing async acceptance.
     expect(bus.published).toHaveLength(2);
-    expect(expectTerminalReply(bus)).toMatchObject({
-      messageId: "m1:final",
-      parts: [{ text: "Hello!" }]
-    });
+    const terminal = expectTerminalReply(bus);
+    expect(terminal?.messageId).toBe("m1:final");
+    expect(partsText(terminal?.parts)).toBe("Hello!");
     // User turn then assistant turn persisted
     expect(session.messages.map((m) => m.role)).toEqual(["user", "assistant"]);
   });
@@ -225,9 +242,7 @@ describe("executeAgentTurn", () => {
     );
 
     expect(bus.finished).toHaveBeenCalledTimes(1);
-    expect(expectTerminalReply(bus)?.parts[0]).toMatchObject({
-      text: "Fallback reply"
-    });
+    expect(partsText(expectTerminalReply(bus)?.parts)).toBe("Fallback reply");
   });
 
   it("publishes the transient reply when a transient error propagates to the outer catch", async () => {
@@ -249,7 +264,7 @@ describe("executeAgentTurn", () => {
 
     expect(bus.finished).toHaveBeenCalledTimes(1);
     expect(bus.published).toHaveLength(2);
-    expect(expectTerminalReply(bus)?.parts[0].text).toMatch(
+    expect(partsText(expectTerminalReply(bus)?.parts)).toMatch(
       /temporarily unavailable/i
     );
   });
@@ -272,7 +287,7 @@ describe("executeAgentTurn", () => {
 
     expect(bus.finished).toHaveBeenCalledTimes(1);
     expect(bus.published).toHaveLength(2);
-    expect(expectTerminalReply(bus)?.parts[0].text).toBe(
+    expect(partsText(expectTerminalReply(bus)?.parts)).toBe(
       "Something went wrong. Please try again."
     );
   });
@@ -291,7 +306,7 @@ describe("executeAgentTurn", () => {
     );
 
     expect(bus.finished).toHaveBeenCalledTimes(1);
-    expect(expectTerminalReply(bus)?.parts[0].text).toMatch(
+    expect(partsText(expectTerminalReply(bus)?.parts)).toMatch(
       /temporarily unavailable/i
     );
     // User message WAS appended; assistant message was NOT (empty reply skipped)
@@ -312,7 +327,7 @@ describe("executeAgentTurn", () => {
     );
 
     expect(bus.finished).toHaveBeenCalledTimes(1);
-    expect(expectTerminalReply(bus)?.parts[0].text).toMatch(
+    expect(partsText(expectTerminalReply(bus)?.parts)).toMatch(
       /temporarily unavailable/i
     );
     // Assistant message must NOT be persisted when the reply was truncated
@@ -335,7 +350,7 @@ describe("executeAgentTurn", () => {
 
     expect(bus.finished).toHaveBeenCalledTimes(1);
     expect(bus.published).toHaveLength(2);
-    expect(expectTerminalReply(bus)?.parts[0].text).toBe(
+    expect(partsText(expectTerminalReply(bus)?.parts)).toBe(
       "Something went wrong. Please try again."
     );
   });
@@ -404,20 +419,18 @@ describe("executeAgentTurn", () => {
     );
 
     expect(bus.published).toHaveLength(3);
-    expect(bus.published[1]).toMatchObject({
-      kind: "status-update",
+    expect(statusEventAt(bus, 1)).toMatchObject({
       taskId: "task-1",
-      final: false,
       status: {
-        state: "working",
-        message: {
-          messageId: "m1:step:0",
-          parts: [{ text: "I will check that." }]
-        }
+        state: TaskState.TASK_STATE_WORKING,
+        message: { messageId: "m1:step:0" }
       }
     });
+    expect(partsText(statusEventAt(bus, 1).status?.message?.parts)).toBe(
+      "I will check that."
+    );
     expect(expectTerminalReply(bus)?.parts[0]).toMatchObject({
-      text: "Here is what I found."
+      content: { $case: "text", value: "Here is what I found." }
     });
     expect(session.messages.map((message) => message.role)).toEqual([
       "user",
@@ -474,21 +487,21 @@ describe("executeAgentTurn", () => {
 
     // The final step's text was streamed as a non-terminal update; the terminal
     // event completes the task with empty text so it isn't posted twice.
-    const stepTexts = bus.published
-      .filter(
-        (e): e is PublishedEvent =>
-          e.kind === "status-update" && e.final === false
-      )
-      .map((e) => e.status?.message?.parts[0]?.text);
+    const stepTexts = bus.published.flatMap((e) =>
+      e.kind === "statusUpdate" &&
+      e.data.status?.state === TaskState.TASK_STATE_WORKING
+        ? [partsText(e.data.status.message?.parts)]
+        : []
+    );
     const lastStepText = stepTexts.at(-1);
     expect(lastStepText).toBeTruthy();
 
     const terminal = expectTerminalReply(bus);
-    expect(terminal?.parts[0]?.text).toBe("");
+    expect(partsText(terminal?.parts)).toBe("");
 
     // The final text appears exactly once across every published event…
-    const allTexts = bus.published.map(
-      (e) => e.status?.message?.parts[0]?.text
+    const allTexts = bus.published.map((e) =>
+      e.kind === "statusUpdate" ? partsText(e.data.status?.message?.parts) : ""
     );
     expect(allTexts.filter((t) => t === lastStepText)).toHaveLength(1);
     // …yet the full reply is still persisted to session history.
@@ -560,13 +573,11 @@ describe("executeAgentTurn — cancellation", () => {
     // The second model call — the one that would have produced the answer — is
     // never made. That is the work the stop actually saves.
     expect(generations).toEqual([0]);
-    expect(bus.published.at(-1)).toMatchObject({
-      kind: "status-update",
-      final: true,
-      status: { state: "canceled" }
+    expect(statusEventAt(bus, -1)).toMatchObject({
+      status: { state: TaskState.TASK_STATE_CANCELED }
     });
     // Empty: the gateway posts its own "🛑 Stopped." notice.
-    expect(bus.published.at(-1)?.status?.message?.parts[0]?.text).toBe("");
+    expect(partsText(statusEventAt(bus, -1).status?.message?.parts)).toBe("");
     expect(bus.finished).toHaveBeenCalledTimes(1);
   });
 
@@ -614,9 +625,9 @@ describe("executeAgentTurn — cancellation", () => {
     await done;
 
     expect(generations).toEqual([0, 1]);
-    expect(expectTerminalReply(bus)?.parts[0]).toMatchObject({
-      text: "Here is the answer."
-    });
+    expect(partsText(expectTerminalReply(bus)?.parts)).toBe(
+      "Here is the answer."
+    );
   });
 
   it("keeps going when the stop check itself fails", async () => {
@@ -632,9 +643,9 @@ describe("executeAgentTurn — cancellation", () => {
     );
     await done;
 
-    expect(expectTerminalReply(bus)?.parts[0]).toMatchObject({
-      text: "Here is the answer."
-    });
+    expect(partsText(expectTerminalReply(bus)?.parts)).toBe(
+      "Here is the answer."
+    );
   });
 
   it("withholds the answer of a single-step turn that was stopped", async () => {
@@ -648,14 +659,10 @@ describe("executeAgentTurn — cancellation", () => {
     const { bus, done } = runTurn(session, model, async () => true);
     await done;
 
-    expect(bus.published.at(-1)).toMatchObject({
-      final: true,
-      status: { state: "canceled" }
+    expect(statusEventAt(bus, -1)).toMatchObject({
+      status: { state: TaskState.TASK_STATE_CANCELED }
     });
-    const texts = bus.published.map(
-      (e) => e.status?.message?.parts[0]?.text ?? ""
-    );
-    expect(texts.join("")).not.toContain("answered in one shot");
+    expect(publishedText(bus)).not.toContain("answered in one shot");
     // The compute was spent, so history records the reply was abandoned, not given.
     expect(session.messages[1]?.parts[0]).toMatchObject({
       text: expect.stringContaining("stopped by the user")
@@ -676,7 +683,7 @@ describe("executeAgentTurn — cancellation", () => {
     const { bus, done } = runTurn(session, model, async () => stopped);
     await done;
 
-    expect(bus.published.at(-1)?.status?.state).toBe("canceled");
+    expect(publishedStates(bus).at(-1)).toBe(TaskState.TASK_STATE_CANCELED);
   });
 });
 
@@ -737,32 +744,32 @@ describe("executeAgentTurn — HITL park", () => {
     expect(bus.finished).toHaveBeenCalledTimes(1);
     expect(generations).toBe(1);
 
-    // Terminal event is input-required (non-terminal task state) carrying the DataPart.
-    const last = bus.published.at(-1);
+    // Terminal event is input-required (an interrupted, non-terminal task
+    // state) carrying the HITL data part.
+    const last = statusEventAt(bus, -1);
     expect(last).toMatchObject({
-      kind: "status-update",
       taskId: "task-1",
-      final: true,
-      status: { state: "input-required", message: { messageId: "m1:hitl" } }
+      status: {
+        state: TaskState.TASK_STATE_INPUT_REQUIRED,
+        message: { messageId: "m1:hitl" }
+      }
     });
-    const parts = last?.status?.message?.parts as Array<{
-      text?: string;
-      kind?: string;
-      data?: { type?: string; requestId?: string };
-    }>;
-    expect(parts.some((p) => p.text === "Which environment?")).toBe(true);
+    const parts = last.status?.message?.parts ?? [];
+    expect(partsText(parts)).toBe("Which environment?");
     expect(
-      parts.some(
-        (p) =>
-          p.data?.type === "io.looping.hitl.request" &&
-          p.data.requestId === "req-1"
-      )
+      parts.some((p) => {
+        const data = dataOf(p) as
+          { type?: string; requestId?: string } | undefined;
+        return (
+          data?.type === "io.looping.hitl.request" && data.requestId === "req-1"
+        );
+      })
     ).toBe(true);
 
     // No completed/canceled terminal was published.
-    const states = bus.published.map((e) => e.status?.state);
-    expect(states).not.toContain("completed");
-    expect(states).not.toContain("canceled");
+    const states = publishedStates(bus);
+    expect(states).not.toContain(TaskState.TASK_STATE_COMPLETED);
+    expect(states).not.toContain(TaskState.TASK_STATE_CANCELED);
 
     // The prompt is persisted as the assistant turn so the resumed turn has context.
     expect(session.messages.map((m) => m.role)).toEqual(["user", "assistant"]);
@@ -798,8 +805,9 @@ describe("executeAgentTurn — HITL park", () => {
       })
     );
 
-    expect(bus.published.at(-1)?.status?.state).toBe("canceled");
-    const states = bus.published.map((e) => e.status?.state);
-    expect(states).not.toContain("input-required");
+    expect(publishedStates(bus).at(-1)).toBe(TaskState.TASK_STATE_CANCELED);
+    expect(publishedStates(bus)).not.toContain(
+      TaskState.TASK_STATE_INPUT_REQUIRED
+    );
   });
 });

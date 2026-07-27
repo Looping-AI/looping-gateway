@@ -2,18 +2,17 @@ import {
   ClientFactory,
   ClientFactoryOptions,
   JsonRpcTransportFactory,
-  TaskNotCancelableError,
-  TaskNotFoundError,
-  UnsupportedOperationError,
   type Client
 } from "@a2a-js/sdk/client";
+import { A2A_ERROR_CODE } from "@a2a-js/sdk/errors";
 import type {
   AgentCard,
   Message,
-  MessageSendParams,
-  PushNotificationConfig,
-  Task
+  SendMessageRequest,
+  Task,
+  TaskPushNotificationConfig
 } from "@a2a-js/sdk";
+import { isMessageResult } from "@/a2a/parts";
 
 /**
  * Where to send an A2A message:
@@ -123,11 +122,10 @@ async function buildRemoteClient(target: A2ARemoteTarget): Promise<Client> {
 }
 
 /**
- * Send one A2A message to a **local** (in-process) agent. We pass
- * `blocking: false`, so the SDK returns as soon as the agent accepts the turn (the
- * initial `submitted` Task, carrying the real SDK-assigned task id) rather than
- * awaiting generation — the same accept-only shape {@link sendA2ARemote} has, just
- * in-process without the HTTP/JWT hop. Generation and the Slack delivery run
+ * Send one A2A message to a **local** (in-process) agent. The request asks to
+ * return immediately, so the SDK answers as soon as the agent accepts the turn
+ * rather than awaiting generation — the same accept-only shape
+ * {@link sendA2ARemote} has, just in-process without the HTTP/JWT hop. Generation and the Slack delivery run
  * asynchronously inside the agent DO, which keeps itself alive until the terminal
  * delivery settles via a `ctx.waitUntil` liveness barrier. The caller only forwards
  * the task id for correlation and never handles model text directly.
@@ -135,14 +133,44 @@ async function buildRemoteClient(target: A2ARemoteTarget): Promise<Client> {
 export async function sendA2ALocal(
   target: A2ALocalTarget,
   message: Message,
-  pushNotificationConfig: PushNotificationConfig
+  taskPushNotificationConfig: TaskPushNotificationConfig
 ): Promise<A2AAccept> {
   const client = await buildLocalClient(target);
-  const params: MessageSendParams = {
+  return acceptedTask(
+    await client.sendMessage(sendRequest(message, taskPushNotificationConfig)),
+    message
+  );
+}
+
+/**
+ * Build the v1.0 `SendMessageRequest` both dispatch paths share.
+ *
+ * `returnImmediately: true` is v1.0's replacement for v0.3's `blocking: false`
+ * (the semantics are inverted): the agent must answer as soon as it has
+ * accepted the turn — the initial `submitted` Task, carrying the real
+ * SDK-assigned task id — instead of holding the request open until generation
+ * finishes. The reply arrives later on the push-notification callback, so no
+ * gateway request ever blocks on a model.
+ *
+ * `tenant` is empty because a gateway agent instance *is* its own tenant: local
+ * built-ins are addressed by Durable Object instance, and each remote agent has
+ * its own registered endpoint.
+ */
+function sendRequest(
+  message: Message,
+  taskPushNotificationConfig: TaskPushNotificationConfig
+): SendMessageRequest {
+  return {
+    tenant: "",
     message,
-    configuration: { pushNotificationConfig, blocking: false }
+    configuration: {
+      acceptedOutputModes: ["text/plain"],
+      taskPushNotificationConfig,
+      historyLength: undefined,
+      returnImmediately: true
+    },
+    metadata: undefined
   };
-  return acceptedTask(await client.sendMessage(params), message);
 }
 
 /** Result of accepting a message onto an A2A agent's task queue. */
@@ -161,7 +189,7 @@ function acceptedTask(
   result: Awaited<ReturnType<Client["sendMessage"]>>,
   message: Message
 ): A2AAccept {
-  if (result.kind === "task" && result.id.trim().length > 0) {
+  if (!isMessageResult(result) && result.id.trim().length > 0) {
     return { kind: "accepted", taskId: result.id };
   }
   console.error(
@@ -185,14 +213,13 @@ function acceptedTask(
 export async function sendA2ARemote(
   target: A2ARemoteTarget,
   message: Message,
-  pushNotificationConfig: PushNotificationConfig
+  taskPushNotificationConfig: TaskPushNotificationConfig
 ): Promise<A2AAccept> {
   const client = await buildRemoteClient(target);
-  const params: MessageSendParams = {
-    message,
-    configuration: { pushNotificationConfig }
-  };
-  return acceptedTask(await client.sendMessage(params), message);
+  return acceptedTask(
+    await client.sendMessage(sendRequest(message, taskPushNotificationConfig)),
+    message
+  );
 }
 
 /**
@@ -228,17 +255,42 @@ export async function cancelA2ARemote(
 ): Promise<CancelOutcome> {
   const client = await buildRemoteClient(target);
   try {
-    const task = await client.cancelTask({ id: taskId });
+    const task = await client.cancelTask({
+      tenant: "",
+      id: taskId,
+      metadata: undefined
+    });
     return { kind: "canceled", task };
   } catch (err) {
-    if (err instanceof TaskNotCancelableError)
-      return { kind: "not_cancelable" };
-    if (err instanceof TaskNotFoundError) return { kind: "not_found" };
-    if (err instanceof UnsupportedOperationError)
-      return { kind: "unsupported" };
-    return {
-      kind: "error",
-      message: err instanceof Error ? err.message : String(err)
-    };
+    switch (a2aErrorCode(err)) {
+      case A2A_ERROR_CODE.TASK_NOT_CANCELABLE:
+        return { kind: "not_cancelable" };
+      case A2A_ERROR_CODE.TASK_NOT_FOUND:
+        return { kind: "not_found" };
+      case A2A_ERROR_CODE.UNSUPPORTED_OPERATION:
+        return { kind: "unsupported" };
+      default:
+        return {
+          kind: "error",
+          message: err instanceof Error ? err.message : String(err)
+        };
+    }
   }
+}
+
+/**
+ * The A2A JSON-RPC error code carried by an error the SDK client threw.
+ *
+ * Deliberately reads the wire code instead of testing `instanceof` against the
+ * semantic error classes (`TaskNotFoundError` & co.): `@a2a-js/sdk/client` and
+ * `@a2a-js/sdk/errors` are separately bundled entry points that each carry
+ * their own copy of the error hierarchy, so the class the client throws is a
+ * *different class object* from the one importable here and `instanceof` is
+ * always false — every typed outcome would silently degrade to a generic
+ * error. The codes are spec-defined (A2A §5.4) and identical across both
+ * copies, so they are the stable thing to classify on.
+ */
+function a2aErrorCode(err: unknown): number | undefined {
+  const code = (err as { envelopeCode?: unknown } | null)?.envelopeCode;
+  return typeof code === "number" ? code : undefined;
 }

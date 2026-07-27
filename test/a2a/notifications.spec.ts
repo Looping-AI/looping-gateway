@@ -1,7 +1,10 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { env } from "cloudflare:workers";
-import type { Task, TaskState } from "@a2a-js/sdk";
-import { InMemoryPushNotificationStore } from "@a2a-js/sdk/server";
+import { TaskState, type StreamResponse, type Task } from "@a2a-js/sdk";
+import {
+  InMemoryPushNotificationStore,
+  ServerCallContext
+} from "@a2a-js/sdk/server";
 import { registerAgent } from "@/db/models/agents";
 import {
   setPublicUrl,
@@ -25,7 +28,22 @@ import {
   LocalPushNotificationSender,
   localPushNotificationConfig
 } from "@/a2a/notifications/local";
+import { snapshotOf } from "@/a2a/snapshot";
 import { makeKey, signJwt, type TestKey } from "../helpers/auth";
+import {
+  makeStatusUpdate,
+  makeTask as buildTask,
+  notificationBody,
+  statusEnvelope,
+  taskEnvelope
+} from "../helpers/a2a";
+
+/**
+ * The call context a v1.0 push-notification store/sender is threaded. The
+ * gateway's own bridge builds one per request; a `1.0` wire version is what a
+ * conformant peer negotiates via the `A2A-Version` header.
+ */
+const CTX = new ServerCallContext({ requestedVersion: "1.0" });
 
 const JKU = "https://agent.example.com/.well-known/jwks.json";
 const KID = "cb1";
@@ -78,8 +96,16 @@ function stubFetch(key: TestKey, posts: SlackPost[]) {
   );
 }
 
+/** The gateway's flattened view of a Task, as the local sender would derive it. */
+function snapshotOfTask(task: Task) {
+  return snapshotOf(taskEnvelope(task));
+}
+
 function makeTask(text: string): Task {
-  return makeStatusTask(text, { state: "completed", messageId: "r1" });
+  return makeStatusTask(text, {
+    state: TaskState.TASK_STATE_COMPLETED,
+    messageId: "r1"
+  });
 }
 
 /** Build a Task callback with an explicit state + status-message id. */
@@ -87,24 +113,32 @@ function makeStatusTask(
   text: string,
   opts: { state: TaskState; messageId?: string }
 ): Task {
-  return {
-    kind: "task",
-    id: "task-1",
-    contextId: "c1",
-    status: {
-      state: opts.state,
-      message: {
-        kind: "message",
-        messageId: opts.messageId ?? "r1",
-        role: "agent",
-        parts: [{ kind: "text", text }],
-        contextId: "c1"
-      }
-    }
-  };
+  return buildTask({ state: opts.state, text, messageId: opts.messageId });
+}
+
+/**
+ * A callback request carrying `response` as its body. v1.0 push notifications
+ * are the protobuf-JSON of a `StreamResponse`, so the body is produced by the
+ * generated encoder rather than hand-written — the same bytes a conformant
+ * remote agent would POST.
+ */
+function envelopeRequest(
+  bearer: string,
+  token: string,
+  response: StreamResponse
+): Request {
+  return rawCallbackRequest(bearer, token, notificationBody(response));
 }
 
 function callbackRequest(bearer: string, token: string, task: Task): Request {
+  return envelopeRequest(bearer, token, taskEnvelope(task));
+}
+
+function rawCallbackRequest(
+  bearer: string,
+  token: string,
+  body: unknown
+): Request {
   return new Request(`${ISSUER}${NOTIFICATIONS_PATH}`, {
     method: "POST",
     headers: {
@@ -112,7 +146,7 @@ function callbackRequest(bearer: string, token: string, task: Task): Request {
       [NOTIFICATION_TOKEN_HEADER]: token,
       "content-type": "application/json"
     },
-    body: JSON.stringify(task)
+    body: JSON.stringify(body)
   });
 }
 
@@ -223,7 +257,7 @@ describe("handleRemoteAgentNotification", () => {
     expect(posts).toHaveLength(0);
   });
 
-  it("400s and records the reason when the body is not a Task", async () => {
+  it("400s and records the reason when the body is not a task notification", async () => {
     const posts: SlackPost[] = [];
     stubFetch(key, posts);
     const bearer = await signJwt(key, { jku: JKU, sub: SUB, aud: AUD });
@@ -234,7 +268,7 @@ describe("handleRemoteAgentNotification", () => {
         [NOTIFICATION_TOKEN_HEADER]: NTOK,
         "content-type": "application/json"
       },
-      body: JSON.stringify({ kind: "message", not: "a task" })
+      body: JSON.stringify({ notAnEnvelope: true })
     });
 
     const res = await handleRemoteAgentNotification(req);
@@ -243,10 +277,10 @@ describe("handleRemoteAgentNotification", () => {
     expect(posts).toHaveLength(0);
     const row = await getAgentTaskByToken(NTOK);
     expect(row?.status).toBe("pending");
-    expect(row?.lastError).toContain("not a valid A2A Task");
+    expect(row?.lastError).toContain("not a valid A2A task notification");
   });
 
-  it("400s a Task-kind body missing status without reaching delivery", async () => {
+  it("400s a task envelope missing status without reaching delivery", async () => {
     const posts: SlackPost[] = [];
     stubFetch(key, posts);
     const bearer = await signJwt(key, { jku: JKU, sub: SUB, aud: AUD });
@@ -257,8 +291,8 @@ describe("handleRemoteAgentNotification", () => {
         [NOTIFICATION_TOKEN_HEADER]: NTOK,
         "content-type": "application/json"
       },
-      // kind: "task" but no status → would crash on task.status.state if cast.
-      body: JSON.stringify({ kind: "task", id: "task-1", contextId: "c1" })
+      // A task envelope with no status → would crash on `status.state` if cast.
+      body: JSON.stringify({ task: { id: "task-1", contextId: "c1" } })
     });
 
     const res = await handleRemoteAgentNotification(req);
@@ -267,7 +301,7 @@ describe("handleRemoteAgentNotification", () => {
     expect(posts).toHaveLength(0);
     const row = await getAgentTaskByToken(NTOK);
     expect(row?.status).toBe("pending");
-    expect(row?.lastError).toContain("not a valid A2A Task");
+    expect(row?.lastError).toContain("not a valid A2A task notification");
   });
 
   it("posts an intermediate (non-terminal) update, keeps the task pending, and keeps the 🛑", async () => {
@@ -279,7 +313,10 @@ describe("handleRemoteAgentNotification", () => {
       callbackRequest(
         bearer,
         NTOK,
-        makeStatusTask("working on it", { state: "working", messageId: "u1" })
+        makeStatusTask("working on it", {
+          state: TaskState.TASK_STATE_WORKING,
+          messageId: "u1"
+        })
       )
     );
 
@@ -296,12 +333,8 @@ describe("handleRemoteAgentNotification", () => {
     const posts: SlackPost[] = [];
     stubFetch(key, posts);
     const bearer = await signJwt(key, { jku: JKU, sub: SUB, aud: AUD });
-    const noIdTask: Task = {
-      kind: "task",
-      id: "task-1",
-      contextId: "c1",
-      status: { state: "working" } // no status.message → no messageId
-    };
+    // No status.message → no messageId to deduplicate an at-least-once retry on.
+    const noIdTask = buildTask({ state: TaskState.TASK_STATE_WORKING });
 
     const res = await handleRemoteAgentNotification(
       callbackRequest(bearer, NTOK, noIdTask)
@@ -323,7 +356,10 @@ describe("handleRemoteAgentNotification", () => {
       callbackRequest(
         bearer,
         NTOK,
-        makeStatusTask("step one", { state: "working", messageId: "u1" })
+        makeStatusTask("step one", {
+          state: TaskState.TASK_STATE_WORKING,
+          messageId: "u1"
+        })
       )
     );
     // Same messageId again (at-least-once retry) → not re-posted.
@@ -331,7 +367,10 @@ describe("handleRemoteAgentNotification", () => {
       callbackRequest(
         bearer,
         NTOK,
-        makeStatusTask("step one", { state: "working", messageId: "u1" })
+        makeStatusTask("step one", {
+          state: TaskState.TASK_STATE_WORKING,
+          messageId: "u1"
+        })
       )
     );
     // Distinct messageId → posted.
@@ -339,7 +378,10 @@ describe("handleRemoteAgentNotification", () => {
       callbackRequest(
         bearer,
         NTOK,
-        makeStatusTask("step two", { state: "working", messageId: "u2" })
+        makeStatusTask("step two", {
+          state: TaskState.TASK_STATE_WORKING,
+          messageId: "u2"
+        })
       )
     );
 
@@ -361,7 +403,10 @@ describe("handleRemoteAgentNotification", () => {
       callbackRequest(
         bearer,
         NTOK,
-        makeStatusTask("searching…", { state: "working", messageId: "u1" })
+        makeStatusTask("searching…", {
+          state: TaskState.TASK_STATE_WORKING,
+          messageId: "u1"
+        })
       )
     );
     const res = await handleRemoteAgentNotification(
@@ -371,6 +416,68 @@ describe("handleRemoteAgentNotification", () => {
     expect(res.status).toBe(200);
     expect(posts.map((p) => p.text)).toEqual(["searching…", "final answer"]);
     expect((await getAgentTaskByToken(NTOK))?.status).toBe("completed");
+  });
+
+  it("delivers a statusUpdate envelope, the delta form a v1.0 agent streams", async () => {
+    // v1.0 push notifications carry a StreamResponse, so a conformant agent may
+    // send a `statusUpdate` *delta* rather than a whole Task. It carries the same
+    // taskId/contextId/status, so the delivery boundary must treat it the same.
+    const posts: SlackPost[] = [];
+    stubFetch(key, posts);
+    const bearer = await signJwt(key, { jku: JKU, sub: SUB, aud: AUD });
+
+    await handleRemoteAgentNotification(
+      envelopeRequest(
+        bearer,
+        NTOK,
+        statusEnvelope(
+          makeStatusUpdate({
+            state: TaskState.TASK_STATE_WORKING,
+            text: "thinking…",
+            messageId: "u1"
+          })
+        )
+      )
+    );
+    const res = await handleRemoteAgentNotification(
+      envelopeRequest(
+        bearer,
+        NTOK,
+        statusEnvelope(
+          makeStatusUpdate({
+            state: TaskState.TASK_STATE_COMPLETED,
+            text: "all done",
+            messageId: "u2"
+          })
+        )
+      )
+    );
+
+    expect(res.status).toBe(200);
+    expect(posts.map((p) => p.text)).toEqual(["thinking…", "all done"]);
+    expect((await getAgentTaskByToken(NTOK))?.status).toBe("completed");
+  });
+
+  it("ignores an artifactUpdate envelope, which advances no task lifecycle", async () => {
+    const posts: SlackPost[] = [];
+    stubFetch(key, posts);
+    const bearer = await signJwt(key, { jku: JKU, sub: SUB, aud: AUD });
+
+    const res = await handleRemoteAgentNotification(
+      rawCallbackRequest(bearer, NTOK, {
+        artifactUpdate: {
+          taskId: "task-1",
+          contextId: "c1",
+          artifact: { artifactId: "a1", parts: [{ text: "chunk" }] }
+        }
+      })
+    );
+
+    // Rejected rather than silently accepted: nothing about the task's state
+    // changed, so there is no snapshot to deliver and the row stays pending.
+    expect(res.status).toBe(400);
+    expect(posts).toHaveLength(0);
+    expect((await getAgentTaskByToken(NTOK))?.status).toBe("pending");
   });
 
   it("delivers a trusted local built-in Task without accepting it on the public callback", async () => {
@@ -396,12 +503,17 @@ describe("handleRemoteAgentNotification", () => {
 
     await deliverLocalAgentTask(
       "local-token",
-      makeStatusTask("checking that", { state: "working", messageId: "u1" }),
+      snapshotOfTask(
+        makeStatusTask("checking that", {
+          state: TaskState.TASK_STATE_WORKING,
+          messageId: "u1"
+        })
+      )!,
       "admin"
     );
     await deliverLocalAgentTask(
       "local-token",
-      makeTask("Here is the answer"),
+      snapshotOfTask(makeTask("Here is the answer"))!,
       "admin"
     );
 
@@ -438,7 +550,7 @@ describe("handleRemoteAgentNotification", () => {
 
     await deliverLocalAgentTask(
       "admin-ws-token",
-      makeTask("registry updated"),
+      snapshotOfTask(makeTask("registry updated"))!,
       "admin"
     );
 
@@ -469,7 +581,7 @@ describe("handleRemoteAgentNotification", () => {
 
     await deliverLocalAgentTask(
       "admin-plain-token",
-      makeTask("registry updated"),
+      snapshotOfTask(makeTask("registry updated"))!,
       "admin"
     );
 
@@ -503,7 +615,7 @@ describe("handleRemoteAgentNotification", () => {
     // sanitized before it reaches Slack, just like a remote agent's.
     await deliverLocalAgentTask(
       "local-sanitize-token",
-      makeTask("hey <!channel> listen"),
+      snapshotOfTask(makeTask("hey <!channel> listen"))!,
       "admin"
     );
 
@@ -575,36 +687,94 @@ describe("handleRemoteAgentNotification", () => {
     const store = new InMemoryPushNotificationStore();
     await store.save(
       "local-sender-task",
+      CTX,
       localPushNotificationConfig("local-sender-token")
     );
     const sender = new LocalPushNotificationSender(store, "admin");
 
-    await sender.send({
-      ...makeStatusTask("acceptance text", {
-        state: "submitted",
-        messageId: "submitted-message"
-      }),
-      id: "local-sender-task"
-    });
-    await sender.send({
-      ...makeStatusTask("working update", {
-        state: "working",
-        messageId: "working-message"
-      }),
-      id: "local-sender-task"
-    });
+    const forSender = (text: string, state: TaskState, messageId: string) =>
+      taskEnvelope({
+        ...makeStatusTask(text, { state, messageId }),
+        id: "local-sender-task"
+      });
+
+    await sender.send(
+      forSender(
+        "acceptance text",
+        TaskState.TASK_STATE_SUBMITTED,
+        "submitted-message"
+      ),
+      CTX
+    );
+    await sender.send(
+      forSender(
+        "working update",
+        TaskState.TASK_STATE_WORKING,
+        "working-message"
+      ),
+      CTX
+    );
 
     expect(posts.map((post) => post.text)).toEqual(["working update"]);
+  });
+
+  it("delivers a statusUpdate envelope from the SDK's event processor", async () => {
+    // The SDK hands the sender whatever StreamResponse shape the executor's
+    // event produced: a `task` for the opening acceptance, then `statusUpdate`
+    // deltas for everything after. Both must reach the delivery boundary.
+    const posts: SlackPost[] = [];
+    stubFetch(key, posts);
+    await registerAgent({
+      name: "admindelta",
+      kind: "admin",
+      displayName: "Admin Delta",
+      a2aEndpoint: "https://agent.local/a2a",
+      notifyOn: "mention",
+      workspaceId: 0
+    });
+    await createAgentTask({
+      token: "delta-token",
+      taskId: "delta-task",
+      agentName: "admindelta",
+      channelId: "C-local",
+      messageTs: "1700.1",
+      replyThreadTs: null,
+      eventId: "Ev-delta"
+    });
+
+    const store = new InMemoryPushNotificationStore();
+    await store.save(
+      "delta-task",
+      CTX,
+      localPushNotificationConfig("delta-token")
+    );
+    const sender = new LocalPushNotificationSender(store, "admin");
+
+    const barrier = sender.whenSettled("delta-task");
+    await sender.send(
+      statusEnvelope(
+        makeStatusUpdate({
+          id: "delta-task",
+          state: TaskState.TASK_STATE_COMPLETED,
+          text: "delta reply",
+          messageId: "d1"
+        })
+      ),
+      CTX
+    );
+
+    await expect(barrier).resolves.toBeUndefined();
+    expect(posts.map((post) => post.text)).toEqual(["delta reply"]);
+    expect((await getAgentTaskByToken("delta-token"))?.status).toBe(
+      "completed"
+    );
   });
 
   it("surfaces a gateway notice and completes on a terminal failure with no text", async () => {
     const posts: SlackPost[] = [];
     stubFetch(key, posts);
     const bearer = await signJwt(key, { jku: JKU, sub: SUB, aud: AUD });
-    const failed: Task = {
-      ...makeTask("ignored"),
-      status: { state: "failed" }
-    };
+    const failed = buildTask({ state: TaskState.TASK_STATE_FAILED });
 
     const res = await handleRemoteAgentNotification(
       callbackRequest(bearer, NTOK, failed)
@@ -623,10 +793,7 @@ describe("handleRemoteAgentNotification", () => {
     const posts: SlackPost[] = [];
     stubFetch(key, posts);
     const bearer = await signJwt(key, { jku: JKU, sub: SUB, aud: AUD });
-    const canceled: Task = {
-      ...makeTask("ignored"),
-      status: { state: "canceled" }
-    };
+    const canceled = buildTask({ state: TaskState.TASK_STATE_CANCELED });
 
     const res = await handleRemoteAgentNotification(
       callbackRequest(bearer, NTOK, canceled)
@@ -710,7 +877,7 @@ describe("LocalPushNotificationSender.whenSettled (accept-first liveness barrier
         replyThreadTs: null,
         eventId: `Ev-${t.token}`
       });
-      await store.save(t.taskId, localPushNotificationConfig(t.token));
+      await store.save(t.taskId, CTX, localPushNotificationConfig(t.token));
     }
     return new LocalPushNotificationSender(store, "admin");
   }
@@ -731,11 +898,26 @@ describe("LocalPushNotificationSender.whenSettled (accept-first liveness barrier
     ]);
 
     const barrier = sender.whenSettled("flow-task");
-    await sender.send(taskFor("flow-task", "submitted", "accepting"));
-    await sender.send(taskFor("flow-task", "working", "working on it"));
+    await sender.send(
+      taskEnvelope(
+        taskFor("flow-task", TaskState.TASK_STATE_SUBMITTED, "accepting")
+      ),
+      CTX
+    );
+    await sender.send(
+      taskEnvelope(
+        taskFor("flow-task", TaskState.TASK_STATE_WORKING, "working on it")
+      ),
+      CTX
+    );
     expect(await isPending(barrier)).toBe(true);
 
-    await sender.send(taskFor("flow-task", "completed", "final answer"));
+    await sender.send(
+      taskEnvelope(
+        taskFor("flow-task", TaskState.TASK_STATE_COMPLETED, "final answer")
+      ),
+      CTX
+    );
     await expect(barrier).resolves.toBeUndefined();
     expect(posts.map((p) => p.text)).toEqual(["working on it", "final answer"]);
     expect((await getAgentTaskByToken("flow-tok"))?.status).toBe("completed");
@@ -749,13 +931,23 @@ describe("LocalPushNotificationSender.whenSettled (accept-first liveness barrier
     ]);
 
     const barrier = sender.whenSettled("park-task");
-    await sender.send(taskFor("park-task", "working", "one moment"));
+    await sender.send(
+      taskEnvelope(
+        taskFor("park-task", TaskState.TASK_STATE_WORKING, "one moment")
+      ),
+      CTX
+    );
     expect(await isPending(barrier)).toBe(true);
 
     // A parked (input-required) snapshot is the last activity in this isolate — the
     // human answers on a later, separate invocation — so the barrier must release
     // rather than idle to the 8-minute safety timeout.
-    await sender.send(taskFor("park-task", "input-required", "need input"));
+    await sender.send(
+      taskEnvelope(
+        taskFor("park-task", TaskState.TASK_STATE_INPUT_REQUIRED, "need input")
+      ),
+      CTX
+    );
     await expect(barrier).resolves.toBeUndefined();
   });
 
@@ -767,10 +959,19 @@ describe("LocalPushNotificationSender.whenSettled (accept-first liveness barrier
     ]);
 
     const barrier = sender.whenSettled("cxl-task");
-    await sender.send({
-      ...taskFor("cxl-task", "canceled"),
-      status: { state: "canceled" }
-    });
+    await sender.send(
+      taskEnvelope({
+        ...taskFor("cxl-task", TaskState.TASK_STATE_CANCELED),
+        // A terminal `canceled` with no status message at all: nothing to post,
+        // but the liveness barrier must still release.
+        status: {
+          state: TaskState.TASK_STATE_CANCELED,
+          message: undefined,
+          timestamp: undefined
+        }
+      }),
+      CTX
+    );
     await expect(barrier).resolves.toBeUndefined();
     expect(posts).toHaveLength(0);
     expect((await getAgentTaskByToken("cxl-tok"))?.status).toBe("completed");
@@ -800,11 +1001,16 @@ describe("LocalPushNotificationSender.whenSettled (accept-first liveness barrier
       eventId: "Ev-mis"
     });
     const store = new InMemoryPushNotificationStore();
-    await store.save("mis-task", localPushNotificationConfig("mis-tok"));
+    await store.save("mis-task", CTX, localPushNotificationConfig("mis-tok"));
     const sender = new LocalPushNotificationSender(store, "admin");
 
     const barrier = sender.whenSettled("mis-task");
-    await sender.send(taskFor("mis-task", "completed", "unreachable"));
+    await sender.send(
+      taskEnvelope(
+        taskFor("mis-task", TaskState.TASK_STATE_COMPLETED, "unreachable")
+      ),
+      CTX
+    );
     await expect(barrier).resolves.toBeUndefined();
     expect((await getAgentTaskByToken("mis-tok"))?.lastError).toBeTruthy();
   }, 10_000);
@@ -819,7 +1025,10 @@ describe("LocalPushNotificationSender.whenSettled (accept-first liveness barrier
 
     const a = sender.whenSettled("a-task");
     const b = sender.whenSettled("b-task");
-    await sender.send(taskFor("a-task", "completed", "done A"));
+    await sender.send(
+      taskEnvelope(taskFor("a-task", TaskState.TASK_STATE_COMPLETED, "done A")),
+      CTX
+    );
     await expect(a).resolves.toBeUndefined();
     expect(await isPending(b)).toBe(true);
   });
@@ -831,7 +1040,12 @@ describe("LocalPushNotificationSender.whenSettled (accept-first liveness barrier
       { token: "late-tok", taskId: "late-task" }
     ]);
 
-    await sender.send(taskFor("late-task", "completed", "answer"));
+    await sender.send(
+      taskEnvelope(
+        taskFor("late-task", TaskState.TASK_STATE_COMPLETED, "answer")
+      ),
+      CTX
+    );
     // Let the terminal delivery's .finally() record the settle.
     await new Promise((r) => setTimeout(r, 15));
     await expect(sender.whenSettled("late-task")).resolves.toBeUndefined();

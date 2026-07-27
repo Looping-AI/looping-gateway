@@ -14,6 +14,7 @@ import { registerAgent } from "@/db/models/agents";
 import { createAgentTask, completeAgentTask } from "@/db/models/agent-tasks";
 import type { MessageWorkflowParams } from "@/slack/types";
 import { stubSlack } from "../wrappers/slack-stub";
+import { stubAgentAi } from "../helpers/agents";
 import {
   trigger,
   makeAppMentionRequest,
@@ -30,10 +31,16 @@ import {
 //   handleUnreachable — covered indirectly via message.spec
 
 beforeEach(async () => {
+  // A mention in the admin channel wakes the real admin agent; stub its model so
+  // the turn finishes offline instead of rejecting on the DO's detached promise.
+  stubAgentAi();
   await setWorkspaceAdminChannel(0, "C_ORGADMIN");
 });
 
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => {
+  vi.unstubAllGlobals();
+  vi.restoreAllMocks();
+});
 
 function captureSlackWithReactions(): {
   post: PostCall[];

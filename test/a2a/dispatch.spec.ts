@@ -1,5 +1,11 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import type { Message } from "@a2a-js/sdk";
+import {
+  AgentCard,
+  Message,
+  SendMessageResponse,
+  Task,
+  TaskState
+} from "@a2a-js/sdk";
 import { jwtVerify } from "jose";
 import {
   _resetIssuerCacheForTest,
@@ -14,6 +20,9 @@ import { IDENTITY_CLAIM } from "@/auth/agent-outbound";
 import { importGatewayPublicKey } from "../helpers/auth";
 import { buildAgentCard } from "@/a2a/card";
 import { HITL_TIMEOUT_TYPE } from "@/a2a/hitl";
+import { dataPart, partsText, textPart } from "@/a2a/parts";
+import { agentMessage, makeTask } from "../helpers/a2a";
+import { stubAgentAi } from "../helpers/agents";
 import { registerAgent } from "@/db/models/agents";
 import {
   createAgentTask,
@@ -68,6 +77,27 @@ async function captureSlackNotice(
   return Response.json({ ok: true, ts: "1700.notice" });
 }
 
+/**
+ * Record a captured A2A POST. The message arrives as protobuf-JSON, so it is
+ * decoded through the generated codec — the specs then assert against the same
+ * typed shape the gateway sent.
+ */
+async function readRpc(
+  request: Request,
+  posts: RemotePost[]
+): Promise<{ id?: unknown; method?: string }> {
+  const rpc = (await request.clone().json()) as {
+    id?: unknown;
+    method?: string;
+    params?: { message?: unknown };
+  };
+  posts.push({
+    authorization: request.headers.get("authorization"),
+    message: Message.fromJSON(rpc.params?.message ?? {})
+  });
+  return rpc;
+}
+
 function stubRemote(posts: RemotePost[], notices?: SlackNotice[]) {
   const card = buildAgentCard({
     name: "Remote",
@@ -84,27 +114,40 @@ function stubRemote(posts: RemotePost[], notices?: SlackNotice[]) {
         return captureSlackNotice(request, notices);
       }
       if (method === "POST") {
-        const rpc = (await request.clone().json()) as {
-          id?: unknown;
-          params?: { message?: Message };
-        };
-        posts.push({
-          authorization: request.headers.get("authorization"),
-          message: rpc.params?.message as Message
-        });
+        const rpc = await readRpc(request, posts);
+        // `CancelTask` answers with the Task itself; `SendMessage` answers with
+        // a SendMessageResponse envelope. v1.0 gave the two distinct result
+        // shapes, so the stub has to branch on the method.
+        if (rpc.method === "CancelTask") {
+          return Response.json({
+            jsonrpc: "2.0",
+            id: rpc.id ?? 1,
+            result: Task.toJSON(
+              makeTask({
+                id: "task-9",
+                contextId: "reply",
+                state: TaskState.TASK_STATE_CANCELED
+              })
+            )
+          });
+        }
         // Async contract: a remote returns a Task ack immediately, not a reply.
         return Response.json({
           jsonrpc: "2.0",
           id: rpc.id ?? 1,
-          result: {
-            kind: "task",
-            id: "task-remote-1",
-            contextId: "reply",
-            status: { state: "submitted" }
-          }
+          result: SendMessageResponse.toJSON({
+            payload: {
+              $case: "task",
+              value: makeTask({
+                id: "task-remote-1",
+                contextId: "reply",
+                state: TaskState.TASK_STATE_SUBMITTED
+              })
+            }
+          })
         });
       }
-      return Response.json(card);
+      return Response.json(AgentCard.toJSON(card));
     })
   );
 }
@@ -128,33 +171,26 @@ function stubRemoteContractViolation(
         return captureSlackNotice(request, notices);
       }
       if (method === "POST") {
-        const rpc = (await request.clone().json()) as {
-          id?: unknown;
-          params?: { message?: Message };
-        };
-        posts.push({
-          authorization: request.headers.get("authorization"),
-          message: rpc.params?.message as Message
-        });
+        const rpc = await readRpc(request, posts);
         return Response.json({
           jsonrpc: "2.0",
           id: rpc.id ?? 1,
-          result: {
-            kind: "message",
-            messageId: "r1",
-            role: "agent",
-            parts: [{ kind: "text", text: "sync reply" }],
-            contextId: "reply"
-          }
+          result: SendMessageResponse.toJSON({
+            payload: {
+              $case: "message",
+              value: agentMessage("sync reply", { contextId: "reply" })
+            }
+          })
         });
       }
-      return Response.json(card);
+      return Response.json(AgentCard.toJSON(card));
     })
   );
 }
 
 afterEach(async () => {
   vi.unstubAllGlobals();
+  vi.restoreAllMocks();
   _resetIssuerCacheForTest();
   await setPublicUrl("https://gateway.test");
   await setAllowedRemoteAgentDomains([]);
@@ -164,6 +200,11 @@ afterEach(async () => {
 // serveA2A → DefaultRequestHandler → executor → Task acceptance, all in-process.
 // Reply delivery itself uses the trusted local notification sender.
 describe("dispatchToAgent (local Durable Object)", () => {
+  // Dispatch returns as soon as the task is accepted, so the agent's turn runs
+  // on unawaited work; stub its model so that turn finishes offline instead of
+  // rejecting against the AI binding.
+  beforeEach(() => stubAgentAi());
+
   it("reaches the AdminAgent A2A server and accepts a task", async () => {
     // Exercises the full local A2A path into the real AdminAgent DO (which runs
     // the AI loop over its Session/SQLite). The response is an A2A Task; status
@@ -309,19 +350,15 @@ describe("dispatchToAgent (local Durable Object)", () => {
       workspaceId: 7
     });
     expect(posts[0].message.metadata).not.toHaveProperty("provenance");
-    expect(posts[0].message.parts[0]).toMatchObject({
-      kind: "text",
-      text:
-        `<turn from="U1" id="U1" channel="general" ` +
+    expect(partsText(posts[0].message.parts)).toBe(
+      `<turn from="U1" id="U1" channel="general" ` +
         `at="${slackTsToIso("171813.100")}">first</turn>`
-    });
+    );
     // Beta's caller has a display name and no resolved channel → id fallback.
-    expect(posts[1].message.parts[0]).toMatchObject({
-      kind: "text",
-      text:
-        `<turn from="Grace" id="U2" channel="C_SHARED" ` +
+    expect(partsText(posts[1].message.parts)).toBe(
+      `<turn from="Grace" id="U2" channel="C_SHARED" ` +
         `at="${slackTsToIso("171813.200")}">second</turn>`
-    });
+    );
 
     const tokenA = posts[0].authorization?.split(" ")[1] ?? "";
     const tokenB = posts[1].authorization?.split(" ")[1] ?? "";
@@ -495,13 +532,10 @@ describe("timeoutAgentTask (remote continuation)", () => {
     expect(msg.referenceTaskIds).toEqual([TASK_ID]);
     // Deterministic, request-scoped messageId so a retried timeout dedupes at the remote.
     expect(msg.messageId).toBe(`${TOKEN}:t:${REQUEST_ID}`);
-    // Carries the HITL timeout signal (human-readable TextPart + structured DataPart).
+    // Carries the HITL timeout signal (human-readable text part + structured data part).
     expect(msg.parts).toEqual([
-      {
-        kind: "text",
-        text: "(No response was received within the allotted time.)"
-      },
-      { kind: "data", data: { type: HITL_TIMEOUT_TYPE, requestId: REQUEST_ID } }
+      textPart("(No response was received within the allotted time.)"),
+      dataPart({ type: HITL_TIMEOUT_TYPE, requestId: REQUEST_ID })
     ]);
     // Only routing extras on the wire — no caller/permission context.
     expect(msg.metadata).toEqual({ agentKind: "custom", workspaceId: 0 });

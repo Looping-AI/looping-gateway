@@ -1,4 +1,8 @@
-import type { Message } from "@a2a-js/sdk";
+import {
+  Role,
+  type Message,
+  type TaskPushNotificationConfig
+} from "@a2a-js/sdk";
 import { buildUserAuthContext, type UserAuthContext } from "@/auth";
 import { env } from "cloudflare:workers";
 import { signGatewayToken, type RemoteIdentity } from "@/auth/agent-outbound";
@@ -8,7 +12,9 @@ import { resumeFromInput } from "@/db/models/agent-tasks";
 import type { HitlRequestRow } from "@/db/models/hitl-requests";
 import { buildHitlResponseParts, buildHitlTimeoutParts } from "@/a2a/hitl";
 import { buildAgentCard } from "@/a2a/card";
+import { buildMessage, textPart } from "@/a2a/parts";
 import { localPushNotificationConfig } from "@/a2a/notifications/local";
+import { NOTIFICATIONS_PATH } from "@/a2a/notifications/remote";
 import { notifyHitlContinuationFailed } from "@/a2a/notifications/hitl";
 import {
   sendA2ALocal,
@@ -204,6 +210,28 @@ export function instanceNameFor(metadata: AgentTurnMetadata): string {
 }
 
 /**
+ * The push-notification config handed to a remote agent: the gateway's public
+ * callback URL plus the per-task validation token it must echo back. v1.0
+ * flattened v0.3's nested config into `TaskPushNotificationConfig`; `id` and
+ * `taskId` are assigned by the agent when it registers the config, so they go
+ * out empty. The callback's real authenticator is the remote's signed JWT (see
+ * `handleRemoteAgentNotification`) — `token` is the correlation key.
+ */
+function remotePushNotificationConfig(
+  issuer: string,
+  token: string
+): TaskPushNotificationConfig {
+  return {
+    tenant: "",
+    id: "",
+    taskId: "",
+    url: `${issuer}${NOTIFICATIONS_PATH}`,
+    token,
+    authentication: undefined
+  };
+}
+
+/**
  * The outcome of a dispatch. All agents accept a Task here and deliver their real
  * reply later: remote agents call the authenticated public callback, while local
  * built-ins use a trusted in-process sender. The workflow receives the shared
@@ -259,13 +287,12 @@ export async function dispatchToAgent(
       identity
     });
 
-    const remoteMessage: Message = {
-      kind: "message",
+    const remoteMessage = buildMessage({
       // Deterministic id so a retried dispatch is dedupable by the remote rather
       // than appended as a fresh turn (A2A `messageId` is the sender-set dedupe key).
       messageId: dispatchId,
-      role: "user",
-      parts: [{ kind: "text", text }],
+      role: Role.ROLE_USER,
+      parts: [textPart(text)],
       contextId: buildRemoteContextId(
         identity,
         payload.channelId,
@@ -276,7 +303,7 @@ export async function dispatchToAgent(
       // lives in the `<turn>` text; no gateway authorization or permission
       // context ever crosses this boundary.
       metadata: { ...payload.metadata }
-    };
+    });
 
     // Push-notification validation token = the same deterministic dispatch id. The
     // remote echoes it on the callback so the gateway correlates it to the pending
@@ -286,7 +313,7 @@ export async function dispatchToAgent(
     const accept = await sendA2ARemote(
       { endpoint: agent.a2aEndpoint, authToken: gatewayToken },
       remoteMessage,
-      { url: `${issuer}/a2a/notifications`, token: dispatchId }
+      remotePushNotificationConfig(issuer, dispatchId)
     );
     if (accept.kind === "accepted") {
       return { kind: "accepted", token: dispatchId, taskId: accept.taskId };
@@ -304,15 +331,14 @@ export async function dispatchToAgent(
     user: payload.user,
     ...payload.metadata
   };
-  const message: Message = {
-    kind: "message",
+  const message = buildMessage({
     // Deterministic id (same dedupe rationale as the remote path).
     messageId: dispatchId,
-    role: "user",
-    parts: [{ kind: "text", text }],
+    role: Role.ROLE_USER,
+    parts: [textPart(text)],
     contextId: localContextId,
     metadata: { ...metadata }
-  };
+  });
 
   const instanceName = instanceNameFor(metadata);
 
@@ -429,20 +455,19 @@ async function sendTaskContinuation(
       issuer,
       identity: buildRemoteIdentity(ref)
     });
-    const message: Message = {
-      kind: "message",
+    const message = buildMessage({
       messageId: input.messageId,
-      role: "user",
+      role: Role.ROLE_USER,
       taskId: row.taskId,
       contextId: row.contextId,
       referenceTaskIds: [row.taskId],
       parts: input.parts,
       metadata: { agentKind: "custom", workspaceId: agent.workspaceId }
-    };
+    });
     const accept = await sendA2ARemote(
       { endpoint: agent.a2aEndpoint, authToken: gatewayToken },
       message,
-      { url: `${issuer}/a2a/notifications`, token: row.token }
+      remotePushNotificationConfig(issuer, row.token)
     );
     if (accept.kind === "accepted") {
       await resumeFromInput(row.token);
@@ -477,16 +502,15 @@ async function sendTaskContinuation(
     metadata = { user: input.caller, agentKind: "onboarding" };
   }
 
-  const message: Message = {
-    kind: "message",
+  const message = buildMessage({
     messageId: input.messageId,
-    role: "user",
+    role: Role.ROLE_USER,
     taskId: row.taskId,
     contextId: row.contextId,
     referenceTaskIds: [row.taskId],
     parts: input.parts,
     metadata: { ...metadata }
-  };
+  });
   const instanceName = instanceNameFor(metadata);
   const stub = ns.get(ns.idFromName(instanceName));
   const fetchImpl = ((input2: RequestInfo | URL, init?: RequestInit) =>

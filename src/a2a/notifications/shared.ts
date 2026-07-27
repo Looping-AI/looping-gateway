@@ -1,18 +1,19 @@
-import type { Task } from "@a2a-js/sdk";
+import { TaskState } from "@a2a-js/sdk";
 import { agentRenderIdentity, type AgentRow } from "@/db/models/agents";
 import {
   completeAgentTask,
   recordReceivedMessageId,
   type AgentTaskRow
 } from "@/db/models/agent-tasks";
-import { extractText, isTerminalTaskState } from "@/a2a/parts";
+import { isTerminalTaskState, taskStateLabel } from "@/a2a/parts";
+import { snapshotText, type TaskSnapshot } from "@/a2a/snapshot";
 import { sanitizeAgentReply } from "@/a2a/client";
 import { parseHitlRequest } from "@/a2a/hitl";
 import { deliverHitlRequest } from "@/a2a/notifications/hitl";
 import { postReply } from "@/wrappers/slack";
 import { collectIfEventDrained } from "@/workflows/message-helpers";
 
-/** A malformed Task snapshot that is safe to report to a task's owner. */
+/** A malformed task snapshot that is safe to report to a task's owner. */
 export class TaskDeliveryValidationError extends Error {}
 
 /**
@@ -24,19 +25,21 @@ function terminalFailureNotice(agentName: string, state: string): string {
 }
 
 /**
- * Deliver one trusted Task snapshot through the durable task ledger. Each
+ * Deliver one trusted task snapshot through the durable task ledger. Each
  * notification boundary authenticates and validates its caller before invoking
- * this function; the agent's text is sanitized here regardless of boundary,
- * since even a built-in agent relays untrusted model output.
+ * this function, and normalizes whatever `StreamResponse` shape it received
+ * into a {@link TaskSnapshot} first; the agent's text is sanitized here
+ * regardless of boundary, since even a built-in agent relays untrusted model
+ * output.
  */
 export async function deliverTaskToSlack(
   token: string,
   row: AgentTaskRow,
   agent: AgentRow,
-  task: Task
+  snapshot: TaskSnapshot
 ): Promise<void> {
-  const state = task.status.state;
-  const text = sanitizeAgentReply(extractText(task));
+  const state = snapshot.state;
+  const text = sanitizeAgentReply(snapshotText(snapshot));
   // Resolved per delivery rather than carried from dispatch, so a rename or a
   // regenerated avatar mid-turn takes effect on the reply it produced. Deferred
   // until we know we are posting: most status updates are deduplicated or empty,
@@ -48,16 +51,16 @@ export async function deliverTaskToSlack(
   // awaiting a human answer (see deliverHitlRequest). An `input-required` update
   // *without* a HITL request falls through to the plain-text path below (posted
   // as a normal reply, row stays pending) — same as any other non-terminal state.
-  if (state === "input-required") {
-    const hitl = parseHitlRequest(task.status.message);
+  if (state === TaskState.TASK_STATE_INPUT_REQUIRED) {
+    const hitl = parseHitlRequest(snapshot.statusMessage);
     if (hitl) {
-      await deliverHitlRequest(token, row, agent, task, hitl);
+      await deliverHitlRequest(token, row, agent, snapshot, hitl);
       return;
     }
   }
 
   if (!isTerminalTaskState(state)) {
-    const updateId = task.status.message?.messageId;
+    const updateId = snapshot.statusMessage?.messageId;
     if (!updateId) {
       throw new TaskDeliveryValidationError(
         "non-terminal task updates must include a status.message.messageId; the gateway uses this to deduplicate at-least-once delivery"
@@ -81,7 +84,9 @@ export async function deliverTaskToSlack(
   // A stop is an outcome the user chose, not a failure to explain — and the
   // cancel workflow already posted "🛑 Stopped." Treat `canceled` like
   // `completed` and stay silent; only real failures get the notice.
-  const isChosenOutcome = state === "completed" || state === "canceled";
+  const isChosenOutcome =
+    state === TaskState.TASK_STATE_COMPLETED ||
+    state === TaskState.TASK_STATE_CANCELED;
 
   // Post before completion so a delivery failure leaves the row pending for a
   // retry. A replay after completion becomes a no-op at the boundary.
@@ -90,7 +95,7 @@ export async function deliverTaskToSlack(
     await postReply(
       row.channelId,
       row.replyThreadTs,
-      text || terminalFailureNotice(displayName, state),
+      text || terminalFailureNotice(displayName, taskStateLabel(state)),
       displayName,
       iconUrl
     );
