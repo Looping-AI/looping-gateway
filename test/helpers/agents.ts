@@ -3,6 +3,7 @@ import { env } from "cloudflare:workers";
 import type { SessionMessage } from "agents/experimental/memory/session";
 import type { AgentExecutionEvent } from "@a2a-js/sdk/server";
 import { partsText } from "@/a2a/parts";
+import { EMBED_MODEL_ID } from "@/config";
 import type { SessionLike } from "@/agents/shared/session";
 import { userMessage } from "./a2a";
 
@@ -47,6 +48,26 @@ export function fakeRecallEnv() {
     .spyOn(env.VECTORIZE, "query")
     .mockImplementation((async () => ({ count: 0, matches: [] })) as never);
   return { run, query };
+}
+
+/**
+ * Stub the whole `AI` binding so a built-in agent's turn completes offline.
+ *
+ * `remoteBindings: false` (vitest.config.ts) makes the real binding throw
+ * "Binding AI needs to be run remotely". Specs that only trigger an agent turn
+ * as a *side effect* — a Slack event that wakes the admin/onboarding DO — never
+ * await that turn, so the failure escapes on the DO's detached promise and
+ * vitest reports it as an unhandled rejection. Chat calls answer with `text`,
+ * embedding calls with one filler vector per input. Restore with
+ * `vi.restoreAllMocks()`.
+ */
+export function stubAgentAi(text = "stubbed agent reply") {
+  return vi
+    .spyOn(env.AI, "run")
+    .mockImplementation((async (model: string, inputs: { text?: string[] }) =>
+      model === EMBED_MODEL_ID
+        ? { data: (inputs.text ?? [""]).map(() => Array(1024).fill(0.1)) }
+        : { response: text }) as never);
 }
 
 // Minimal valid LanguageModelV3 generate result.

@@ -22,6 +22,7 @@ import { buildAgentCard } from "@/a2a/card";
 import { HITL_TIMEOUT_TYPE } from "@/a2a/hitl";
 import { dataPart, partsText, textPart } from "@/a2a/parts";
 import { agentMessage, makeTask } from "../helpers/a2a";
+import { stubAgentAi } from "../helpers/agents";
 import { registerAgent } from "@/db/models/agents";
 import {
   createAgentTask,
@@ -189,6 +190,7 @@ function stubRemoteContractViolation(
 
 afterEach(async () => {
   vi.unstubAllGlobals();
+  vi.restoreAllMocks();
   _resetIssuerCacheForTest();
   await setPublicUrl("https://gateway.test");
   await setAllowedRemoteAgentDomains([]);
@@ -198,6 +200,11 @@ afterEach(async () => {
 // serveA2A → DefaultRequestHandler → executor → Task acceptance, all in-process.
 // Reply delivery itself uses the trusted local notification sender.
 describe("dispatchToAgent (local Durable Object)", () => {
+  // Dispatch returns as soon as the task is accepted, so the agent's turn runs
+  // on unawaited work; stub its model so that turn finishes offline instead of
+  // rejecting against the AI binding.
+  beforeEach(() => stubAgentAi());
+
   it("reaches the AdminAgent A2A server and accepts a task", async () => {
     // Exercises the full local A2A path into the real AdminAgent DO (which runs
     // the AI loop over its Session/SQLite). The response is an A2A Task; status
