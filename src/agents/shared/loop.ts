@@ -3,11 +3,12 @@ import type { ExecutionEventBus, RequestContext } from "@a2a-js/sdk/server";
 import { Role, TaskState } from "@a2a-js/sdk";
 import type { Message } from "@a2a-js/sdk";
 import type {
-  GenerateTextOnStepFinishCallback,
+  GenerateTextOnStepEndCallback,
+  LanguageModel,
   StopCondition,
   ToolSet
 } from "ai";
-import { generateText, stepCountIs } from "ai";
+import { generateText, isStepCount } from "ai";
 import type { createModelPair } from "@/agents/model";
 import { buildMessage, textOf, textPart } from "@/a2a/parts";
 import { buildHitlRequestParts, type HitlRequest } from "@/a2a/hitl";
@@ -235,10 +236,10 @@ export async function executeAgentTurn(
     // Gateway in dispatch); persist it verbatim.
     await session.appendMessage(userSessionMessage(text));
     const history = await session.getHistory();
-    const system = (await session.refreshSystemPrompt()) + systemSuffix;
+    const instructions = (await session.refreshSystemPrompt()) + systemSuffix;
     const tools = { ...(await session.tools()), ...extraTools };
 
-    const onStepFinish: GenerateTextOnStepFinishCallback<ToolSet> = (step) => {
+    const onStepEnd: GenerateTextOnStepEndCallback<ToolSet> = (step) => {
       // Text from a tool-calling step is the agent's only genuine non-terminal
       // content. Tool-only steps stay silent in Slack.
       if (step.toolCalls.length === 0 || !step.text.trim()) return;
@@ -280,20 +281,22 @@ export async function executeAgentTurn(
     const stopIfHitlRequested: StopCondition<ToolSet> = () =>
       hitl.request !== null;
 
-    const generateArgs = {
-      system,
-      messages: toModelMessages(history),
-      tools,
-      stopWhen: [stepCountIs(MAX_STEPS), stopIfCanceled, stopIfHitlRequested],
-      onStepFinish
-    };
-
-    let result: Awaited<ReturnType<typeof generateText>>;
-    try {
-      result = await generateText({
-        model: cfg.models.primary(),
-        ...generateArgs
+    // One call shape, two models. The system prompt goes in `instructions`:
+    // `messages` rejects `role: "system"` entries by default, which is fine
+    // because `toModelMessages` only ever emits user/assistant turns.
+    const generate = (model: LanguageModel) =>
+      generateText({
+        model,
+        instructions,
+        messages: toModelMessages(history),
+        tools,
+        stopWhen: [isStepCount(MAX_STEPS), stopIfCanceled, stopIfHitlRequested],
+        onStepEnd
       });
+
+    let result: Awaited<ReturnType<typeof generate>>;
+    try {
+      result = await generate(cfg.models.primary());
     } catch (primaryErr) {
       console.warn(
         "[agent-loop] AI error on primary model, retrying with fallback",
@@ -304,10 +307,7 @@ export async function executeAgentTurn(
         }
       );
       modelId = cfg.models.fallbackId();
-      result = await generateText({
-        model: cfg.models.fallback(),
-        ...generateArgs
-      });
+      result = await generate(cfg.models.fallback());
     }
 
     // Re-check after generation, not only between steps. A turn the model answers

@@ -1,5 +1,7 @@
 import tseslint from "typescript-eslint";
 
+import local from "./eslint-rules/index.js";
+
 export default tseslint.config(
   {
     extends: [...tseslint.configs.recommended],
@@ -21,7 +23,7 @@ export default tseslint.config(
     // Type-aware pass — enables @deprecated detection without switching the
     // whole config to recommendedTypeChecked and its stricter rule set.
     files: ["src/**/*.ts", "test/**/*.ts"],
-    plugins: { "@typescript-eslint": tseslint.plugin },
+    plugins: { "@typescript-eslint": tseslint.plugin, local },
     languageOptions: {
       parser: tseslint.parser,
       parserOptions: {
@@ -30,7 +32,9 @@ export default tseslint.config(
       }
     },
     rules: {
-      "@typescript-eslint/no-deprecated": "error"
+      "@typescript-eslint/no-deprecated": "error",
+      // Covers the object-literal blind spot in the rule above (typescript-eslint#10883).
+      "local/no-deprecated-object-properties": "error"
     }
   },
   {
