@@ -110,9 +110,12 @@ async function runAgentTask(
     deleteAgentTask(token)
   );
 
-  // The only non-accepted outcome is a gateway-controlled error reply (an agent
-  // that failed to acknowledge the task, or an endpoint rejected by policy).
-  // Post it so the user isn't left in silence.
+  // The only non-accepted outcome is a gateway-controlled error reply: an agent
+  // that failed to acknowledge the task, an endpoint rejected by policy, or a
+  // deterministic A2A protocol refusal (the agent answered with a JSON-RPC error
+  // naming what it won't do). All three are verdicts rather than faults, so they
+  // arrive as a returned result instead of a throw and never reach the retry
+  // path above. Post it so the user isn't left in silence.
   try {
     if (result.text.trim()) {
       await step.do(`error-reply:${plan.agent.name}`, () =>

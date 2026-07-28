@@ -188,6 +188,39 @@ function stubRemoteContractViolation(
   );
 }
 
+/** A remote whose card resolves but whose POST answers with a JSON-RPC error. */
+function stubRemoteRpcError(
+  code: number,
+  posts: RemotePost[],
+  notices?: SlackNotice[]
+) {
+  const card = buildAgentCard({
+    name: "Remote",
+    description: "remote dispatch test agent",
+    url: ENDPOINT
+  });
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const request =
+        input instanceof Request ? input : new Request(input, init);
+      const method = request.method.toUpperCase();
+      if (request.url.includes("chat.postMessage")) {
+        return captureSlackNotice(request, notices);
+      }
+      if (method === "POST") {
+        const rpc = await readRpc(request, posts);
+        return Response.json({
+          jsonrpc: "2.0",
+          id: rpc.id ?? 1,
+          error: { code, message: "refused" }
+        });
+      }
+      return Response.json(AgentCard.toJSON(card));
+    })
+  );
+}
+
 afterEach(async () => {
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
@@ -421,6 +454,67 @@ describe("dispatchToAgent (local Durable Object)", () => {
       expect(result.text).toContain("required task acknowledgment");
     }
     expect(posts).toHaveLength(1);
+  });
+
+  const protocolDispatch = () =>
+    dispatchToAgent(
+      {
+        name: "remote-refuser",
+        kind: "custom",
+        a2aEndpoint: ENDPOINT,
+        workspaceId: 7
+      },
+      {
+        eventId: "Ev-protocol-remote",
+        text: "hello",
+        channelId: "C1",
+        channelName: "general",
+        threadTs: "171813.100",
+        messageTs: "171813.100",
+        user: user("U1"),
+        metadata: { agentKind: "custom", workspaceId: 7 }
+      }
+    );
+
+  it("reports a version mismatch specifically, without throwing", async () => {
+    // The migration case: an agent still on A2A v0.3 must be named as such,
+    // not retried until it degrades into the generic "unreachable" notice.
+    await setPublicUrl("https://gateway.test");
+    await setAllowedRemoteAgentDomains(["example.com"]);
+    const posts: RemotePost[] = [];
+    stubRemoteRpcError(-32009, posts);
+
+    const result = await protocolDispatch();
+
+    expect(result.kind).toBe("error_reply");
+    if (result.kind === "error_reply") {
+      expect(result.text).toContain("A2A v1.0");
+      expect(result.text).toContain("remote-refuser");
+      expect(result.text).toContain("contact the agent developer");
+    }
+    expect(posts).toHaveLength(1); // sent once — no retry
+  });
+
+  it("says a push-less agent cannot be used at all, not 'try again'", async () => {
+    await setPublicUrl("https://gateway.test");
+    await setAllowedRemoteAgentDomains(["example.com"]);
+    stubRemoteRpcError(-32003, []);
+
+    const result = await protocolDispatch();
+
+    expect(result.kind).toBe("error_reply");
+    if (result.kind === "error_reply") {
+      expect(result.text).toContain("push notifications");
+      expect(result.text).toContain("can't be used with the gateway");
+    }
+  });
+
+  it("throws on -32603 so the workflow step still retries", async () => {
+    await setPublicUrl("https://gateway.test");
+    await setAllowedRemoteAgentDomains(["example.com"]);
+    stubRemoteRpcError(-32603, []);
+
+    await expect(protocolDispatch()).rejects.toThrow();
   });
 });
 

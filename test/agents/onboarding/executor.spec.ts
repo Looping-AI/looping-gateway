@@ -4,13 +4,15 @@ import { OnboardingAgentExecutor } from "@/agents/onboarding/executor";
 import type { SessionHost } from "@/agents/shared/session";
 import type { UserAuthContext } from "@/auth";
 import type { AgentExecutionEvent } from "@a2a-js/sdk/server";
+import { TaskState } from "@a2a-js/sdk";
 import {
   FakeSession,
   fakeRecallEnv,
   okResult,
   toolCallResult,
   makeRequest,
-  terminalTaskText
+  terminalTaskText,
+  terminalTaskState
 } from "../../helpers/agents";
 import { userMessage } from "../../helpers/a2a";
 
@@ -76,7 +78,10 @@ describe("OnboardingAgentExecutor", () => {
 
     expect(t.isFinished()).toBe(true);
     expect(t.published).toHaveLength(2);
-    expect(terminalTaskText(t.published)?.toLowerCase()).toContain("error");
+    // The state — not wording in the reply — is what tells the gateway this
+    // turn broke; v1.0 gives a failing task no other machine-readable signal.
+    expect(terminalTaskState(t.published)).toBe(TaskState.TASK_STATE_FAILED);
+    expect(terminalTaskText(t.published)).toBeTruthy();
   });
 
   it("offers recall and routes it through the user namespace", async () => {
@@ -142,7 +147,8 @@ describe("OnboardingAgentExecutor", () => {
 
     expect(finished).toBe(true);
     expect(published).toHaveLength(2);
-    expect(terminalTaskText(published)?.toLowerCase()).toContain("error");
+    expect(terminalTaskState(published)).toBe(TaskState.TASK_STATE_FAILED);
+    expect(terminalTaskText(published)).toBeTruthy();
     expect(modelCalled).toBe(false);
   });
 });

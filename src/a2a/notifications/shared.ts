@@ -17,11 +17,24 @@ import { collectIfEventDrained } from "@/workflows/message-helpers";
 export class TaskDeliveryValidationError extends Error {}
 
 /**
- * Gateway-controlled notice posted when an agent ends a turn in a failure state
- * without text of its own. It contains no agent-controlled content.
+ * What the user sees when an agent ends a turn in a failure state (`failed` or
+ * `rejected`). The marker is gateway-authored and prefixed; `text`, when present,
+ * is the agent's own already-sanitized message.
+ *
+ * A2A v1.0 has no structured task-level error — `TaskStatus` is only
+ * `{state, message, timestamp}` — so a failing agent's sole way to explain itself
+ * is prose in `status.message`, which is byte-identical in shape to a successful
+ * reply. Without this marker a failure reads as a normal answer, which is exactly
+ * how a well-behaved agent's `failed` task used to render.
  */
-function terminalFailureNotice(agentName: string, state: string): string {
-  return `*Agent ${agentName}* ended without a reply (state: ${state}). If you were expecting an answer, please contact the agent developer.`;
+function terminalFailureText(
+  agentName: string,
+  state: string,
+  text: string
+): string {
+  return text
+    ? `⚠️ *Agent ${agentName}* (${state}):\n${text}`
+    : `*Agent ${agentName}* ended without a reply (state: ${state}). If you were expecting an answer, please contact the agent developer.`;
 }
 
 /**
@@ -95,7 +108,9 @@ export async function deliverTaskToSlack(
     await postReply(
       row.channelId,
       row.replyThreadTs,
-      text || terminalFailureNotice(displayName, taskStateLabel(state)),
+      isChosenOutcome
+        ? text
+        : terminalFailureText(displayName, taskStateLabel(state), text),
       displayName,
       iconUrl
     );

@@ -69,8 +69,9 @@ export class OnboardingAgentExecutor implements AgentExecutor {
       // The dispatch token is the A2A messageId, and the gateway records a 🛑
       // against that same token — so the running turn can read its own stop flag.
       isCanceled: isCancelRequested,
-      unexpectedReply:
-        "Sorry, I hit an unexpected error. Please try again in a moment.",
+      // Terse: this rides on a `failed` task, so the delivery boundary already
+      // prefixes "⚠️ *Agent …* (failed):" — the apology belongs in one place.
+      unexpectedReply: "Something went wrong handling that. Please try again.",
       prepare: async (_text, metadata) => {
         // Validate the deserialized wire metadata at this boundary. The Slack
         // user is a guaranteed precondition (sender-less events are dropped by

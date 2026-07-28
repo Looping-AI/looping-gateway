@@ -786,6 +786,92 @@ describe("handleRemoteAgentNotification", () => {
     expect((await getAgentTaskByToken(NTOK))?.status).toBe("completed");
   });
 
+  it("marks a terminal failure that carries the agent's own text", async () => {
+    // A2A v1.0 gives a failing task no structured error, so its explanation is
+    // prose in `status.message` — shaped identically to a successful reply.
+    // Without the marker this renders as a normal answer.
+    const posts: SlackPost[] = [];
+    stubFetch(key, posts);
+    const bearer = await signJwt(key, { jku: JKU, sub: SUB, aud: AUD });
+    const failed = buildTask({
+      state: TaskState.TASK_STATE_FAILED,
+      text: "Sorry, I hit an unexpected error.",
+      messageId: "f1"
+    });
+
+    const res = await handleRemoteAgentNotification(
+      callbackRequest(bearer, NTOK, failed)
+    );
+
+    expect(res.status).toBe(200);
+    expect(posts).toHaveLength(1);
+    expect(posts[0].text).toContain("⚠️");
+    expect(posts[0].text).toContain("(failed)");
+    expect(posts[0].text).toContain("Sorry, I hit an unexpected error.");
+    expect((await getAgentTaskByToken(NTOK))?.status).toBe("completed");
+  });
+
+  it("marks a terminal `rejected` distinctly from `failed`", async () => {
+    const posts: SlackPost[] = [];
+    stubFetch(key, posts);
+    const bearer = await signJwt(key, { jku: JKU, sub: SUB, aud: AUD });
+    const rejected = buildTask({
+      state: TaskState.TASK_STATE_REJECTED,
+      text: "I won't do that.",
+      messageId: "r1"
+    });
+
+    const res = await handleRemoteAgentNotification(
+      callbackRequest(bearer, NTOK, rejected)
+    );
+
+    expect(res.status).toBe(200);
+    expect(posts[0].text).toContain("(rejected)");
+    expect(posts[0].text).toContain("I won't do that.");
+  });
+
+  it("leaves a successful reply completely unmarked", async () => {
+    // The regression that matters most: the marker must never leak onto the
+    // normal path, even for text that reads like an apology.
+    const posts: SlackPost[] = [];
+    stubFetch(key, posts);
+    const bearer = await signJwt(key, { jku: JKU, sub: SUB, aud: AUD });
+    const completed = buildTask({
+      state: TaskState.TASK_STATE_COMPLETED,
+      text: "Sorry, I hit an unexpected error.",
+      messageId: "c1"
+    });
+
+    const res = await handleRemoteAgentNotification(
+      callbackRequest(bearer, NTOK, completed)
+    );
+
+    expect(res.status).toBe(200);
+    expect(posts).toHaveLength(1);
+    expect(posts[0].text).toBe("Sorry, I hit an unexpected error.");
+  });
+
+  it("does not mark a `canceled` task that carries text", async () => {
+    // `canceled` is an outcome the user chose, not a failure to explain — the
+    // cancel workflow already posted "🛑 Stopped."
+    const posts: SlackPost[] = [];
+    stubFetch(key, posts);
+    const bearer = await signJwt(key, { jku: JKU, sub: SUB, aud: AUD });
+    const canceled = buildTask({
+      state: TaskState.TASK_STATE_CANCELED,
+      text: "partial work",
+      messageId: "x1"
+    });
+
+    const res = await handleRemoteAgentNotification(
+      callbackRequest(bearer, NTOK, canceled)
+    );
+
+    expect(res.status).toBe(200);
+    expect(posts).toHaveLength(1);
+    expect(posts[0].text).toBe("partial work");
+  });
+
   it("stays silent on a terminal `canceled` with no text", async () => {
     // The counterpart of the failure notice above: a stop is an outcome the user
     // chose, and the cancel workflow already posted "🛑 Stopped." A notice here

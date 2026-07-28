@@ -112,8 +112,10 @@ export class AdminAgentExecutor implements AgentExecutor {
       // The dispatch token is the A2A messageId, and the gateway records a 🛑
       // against that same token — so the running turn can read its own stop flag.
       isCanceled: isCancelRequested,
+      // Terse: this rides on a `failed` task, so the delivery boundary already
+      // prefixes "⚠️ *Agent …* (failed):" — the apology belongs in one place.
       unexpectedReply:
-        "Sorry, I hit an unexpected error handling that admin request. Please reach out to your developer and check the error logs for more details.",
+        "Couldn't handle that admin request. Check the error logs for details.",
       prepare: async (_text, metadata, turn) => {
         // Validate the deserialized wire metadata at this boundary. Both the
         // workspace id and the Slack user are guaranteed preconditions (the

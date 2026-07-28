@@ -120,10 +120,14 @@ export async function resolveMessage(
  * through the authenticated callback and built-ins through the trusted local
  * sender.
  *
- * Retry policy. A rejected endpoint (`InvalidEndpointError`) is a policy verdict,
- * not a transient fault: stay silent and do NOT retry. Everything else (network
- * blip, accept timeout) is thrown so the `dispatch` step retries — which is safe
- * now because the dispatch id is deterministic (`buildDispatchId`), so a re-send
+ * Retry policy. Two kinds of verdict are deterministic and must NOT be retried:
+ * a rejected endpoint (`InvalidEndpointError`, caught here) and a permanent A2A
+ * protocol refusal, which `sendA2A*` already folds into a returned `error_reply`
+ * rather than a throw — re-sending an identical request earns an identical
+ * refusal, so retrying only delays a specific message behind a generic
+ * "unreachable" one. Everything else (network blip, accept timeout, an agent's
+ * own `INTERNAL_ERROR`) is thrown so the `dispatch` step retries — which is safe
+ * because the dispatch id is deterministic (`buildDispatchId`), so a re-send
  * carries the same A2A `messageId` and push `token`; a conformant remote dedupes
  * on the `messageId` instead of appending the turn twice, giving at-least-once
  * delivery with exactly-once effect.

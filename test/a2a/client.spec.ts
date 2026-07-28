@@ -232,6 +232,58 @@ const rpcError = (id: unknown, code: number, message = "err") => ({
   error: { code, message }
 });
 
+describe("sendA2ARemote — A2A protocol refusals", () => {
+  it.each([
+    [-32009, "version not supported"],
+    [-32602, "malformed request"],
+    [-32004, "unsupported operation"],
+    [-32003, "push notifications unsupported"]
+  ])(
+    "folds %i into a protocol_error instead of throwing (%s)",
+    async (code) => {
+      stubRemoteRpc((id) => rpcError(id, code));
+      const out = await sendA2ARemote(
+        { endpoint: ENDPOINT, authToken: "t" },
+        userMessage("hi"),
+        PUSH
+      );
+      expect(out).toEqual({
+        kind: "protocol_error",
+        code,
+        reason: expect.any(String)
+      });
+    }
+  );
+
+  it("rethrows -32603 so the workflow still retries an agent-side fault", async () => {
+    // The carve-out that keeps a recoverable blip from becoming a hard failure.
+    stubRemoteRpc((id) => rpcError(id, -32603, "boom"));
+    await expect(
+      sendA2ARemote(
+        { endpoint: ENDPOINT, authToken: "t" },
+        userMessage("hi"),
+        PUSH
+      )
+    ).rejects.toThrow(/boom/);
+  });
+
+  it("rethrows a transport failure with its original message", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        throw new Error("ECONNREFUSED");
+      })
+    );
+    await expect(
+      sendA2ARemote(
+        { endpoint: ENDPOINT, authToken: "t" },
+        userMessage("hi"),
+        PUSH
+      )
+    ).rejects.toThrow(/ECONNREFUSED/);
+  });
+});
+
 describe("cancelA2ARemote — A2A tasks/cancel", () => {
   it("returns canceled with the updated task on success", async () => {
     const canceled = makeTask({
