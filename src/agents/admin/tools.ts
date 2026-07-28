@@ -33,6 +33,8 @@ import {
   setAdminDisplayName
 } from "@/db/models/workspace-configs";
 import { SHARED_INFRA_ROOTS } from "@/a2a/endpoint";
+import { hasSlackCommandSequence } from "@/util/slack-text";
+import { sanitizeDisplayName } from "@/util/display-name";
 import {
   buildAvatarPrompt,
   buildAgentAvatarPrompt,
@@ -133,6 +135,24 @@ function shape(a: AgentRow, channels: string[]): ToolResult {
 /** Shape an agent row for the model (small, with its channel attachments). */
 async function present(a: AgentRow): Promise<ToolResult> {
   return shape(a, await getAgentChannels(a.name));
+}
+
+/**
+ * Reject a caller-chosen display name that carries a Slack command sequence
+ * (`<!channel>`, `<!here>`, …). Display names are also defanged at the render
+ * choke point (`agentRenderIdentity`), which is what keeps card-derived names
+ * safe; here — where a human picked the name through the admin — refusing beats
+ * silently storing a name that renders differently than they asked for.
+ */
+function ensureNoBroadcastName(displayName?: string): ToolResult | null {
+  if (displayName !== undefined && hasSlackCommandSequence(displayName)) {
+    return {
+      error:
+        "Display name cannot contain Slack command sequences like <!channel>, " +
+        "<!here> or <!subteam^…> — they would @-notify the channel."
+    };
+  }
+  return null;
 }
 
 /** Resolve a write target: must exist, belong to this workspace, and be a custom agent. */
@@ -321,6 +341,8 @@ export async function agentsCreate(
 ): Promise<ToolResult> {
   const denied = ensureAgentAdmin(deps);
   if (denied) return denied;
+  const rejected = ensureNoBroadcastName(args.displayName);
+  if (rejected) return rejected;
 
   if (RESERVED_NAMES.has(args.name))
     return { error: `"${args.name}" is a reserved built-in agent name.` };
@@ -363,6 +385,8 @@ export async function agentsUpdate(
 ): Promise<ToolResult> {
   const denied = ensureAgentAdmin(deps);
   if (denied) return denied;
+  const rejected = ensureNoBroadcastName(args.displayName);
+  if (rejected) return rejected;
 
   const target = await requireWritableAgent(deps, args.name);
   if ("error" in target) return target;
@@ -749,8 +773,10 @@ export async function selfSetDisplayName(
 ): Promise<ToolResult> {
   const denied = ensureSelfAdmin(deps);
   if (denied) return denied;
+  const rejected = ensureNoBroadcastName(args.displayName);
+  if (rejected) return rejected;
 
-  const displayName = args.displayName.trim();
+  const displayName = sanitizeDisplayName(args.displayName);
   if (!displayName) return { error: "Display name cannot be empty." };
   await setAdminDisplayName(deps.wsId, displayName);
   return {

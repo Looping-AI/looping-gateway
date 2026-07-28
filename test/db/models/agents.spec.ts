@@ -97,6 +97,28 @@ describe("agentRenderIdentity", () => {
     });
   });
 
+  it("defangs a broadcast sequence in a display name (it reaches message text)", async () => {
+    await upsertWorkspace({
+      id: 24,
+      name: "ws24",
+      adminChannelId: "C_WS24_ADMIN"
+    });
+    await setAdminDisplayName(24, "<!channel>");
+    const admin = await getAgent("admin");
+    expect(
+      (await agentRenderIdentity(admin!, "C_WS24_ADMIN")).displayName
+    ).toBe("@channel");
+
+    // A custom agent's name can come straight off its own A2A card.
+    await env.DB.prepare(
+      "INSERT OR IGNORE INTO agents (name, kind, display_name, enabled, notify_on, a2a_endpoint, workspace_id) VALUES ('custom-w', 'custom', '<!here> Helper', 1, 'mention', 'https://example.com/w', 0)"
+    ).run();
+    const agent = await getAgent("custom-w");
+    expect((await agentRenderIdentity(agent!, "C_ANY")).displayName).toBe(
+      "@here Helper"
+    );
+  });
+
   it("falls back to the machine name when an agent has no display name", async () => {
     await env.DB.prepare(
       "INSERT OR IGNORE INTO agents (name, kind, enabled, notify_on, a2a_endpoint, workspace_id) VALUES ('custom-z', 'custom', 1, 'mention', 'https://example.com/z', 0)"

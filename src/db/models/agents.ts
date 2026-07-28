@@ -3,6 +3,7 @@ import { getDb } from "../client";
 import * as schema from "../schema";
 import { getWorkspaceByAdminChannel } from "./workspaces";
 import { getAdminDisplayName, getAdminIconUrl } from "./workspace-configs";
+import { sanitizeDisplayName } from "@/util/display-name";
 
 export type AgentRow = typeof schema.agents.$inferSelect;
 export type AgentKind = AgentRow["kind"];
@@ -114,8 +115,13 @@ export async function agentRenderIdentity(
   agent: AgentRow,
   channelId: string
 ): Promise<AgentRenderIdentity> {
+  // Every display name is sanitized here rather than at each writer: this is the
+  // one choke point all Slack-facing identities pass through, and the names arrive
+  // from sources the gateway does not control (an agent's own A2A card, the admin
+  // model's tool calls). A name that sanitizes to nothing falls back to the
+  // machine name, which is a validated slug.
   const row: AgentRenderIdentity = {
-    displayName: agent.displayName ?? agent.name,
+    displayName: sanitizeDisplayName(agent.displayName ?? "") || agent.name,
     iconUrl: agent.iconUrl ?? null
   };
   if (agent.kind !== "admin") return row;
@@ -129,7 +135,7 @@ export async function agentRenderIdentity(
     getAdminIconUrl(ws.id)
   ]);
   return {
-    displayName: displayName || row.displayName,
+    displayName: sanitizeDisplayName(displayName ?? "") || row.displayName,
     iconUrl: iconUrl || row.iconUrl
   };
 }
