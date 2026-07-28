@@ -33,7 +33,7 @@
   "dependencies": {
     "@a2a-js/sdk": "^1.0.0",
     "@chat-adapter/slack": "^4.35.0",
-    "agents": "^0.19.0",
+    "agents": "^0.20.0",
     "ai": "^7.0.37",
     "chat": "^4.35.0",
     "drizzle-orm": "^0.45.2",
