@@ -5,10 +5,13 @@ import {
   listAgents,
   getAgentsForChannel,
   getAgentInChannel,
-  agentRenderIdentity
+  agentRenderIdentity,
+  registerAgent,
+  updateAgent
 } from "@/db/models/agents";
 import { upsertWorkspace } from "@/db/models/workspaces";
 import {
+  getAdminDisplayName,
   setAdminDisplayName,
   setAdminIconUrl
 } from "@/db/models/workspace-configs";
@@ -45,6 +48,44 @@ describe("agents", () => {
     expect(all.map((e) => e.agent.name)).toContain("custom-x");
     expect(await getAgentInChannel("C_MAP", "custom-x")).not.toBeNull();
     expect(await getAgentInChannel("C_UNMAPPED", "custom-x")).toBeNull();
+  });
+});
+
+describe("display names are sanitized at the write", () => {
+  it("registerAgent neutralizes a card-derived name", async () => {
+    const row = await registerAgent({
+      name: "bcast-register",
+      kind: "custom",
+      // What a hostile remote agent publishes as its A2A card name.
+      displayName: "<!channel> Helper",
+      a2aEndpoint: "https://bcast-register.example.com/a2a",
+      notifyOn: "mention",
+      workspaceId: 0
+    });
+    expect(row.displayName).toBe("channel Helper");
+    const stored = await env.DB.prepare(
+      "SELECT display_name FROM agents WHERE name = 'bcast-register'"
+    ).first<{ display_name: string }>();
+    expect(stored?.display_name).toBe("channel Helper");
+  });
+
+  it("updateAgent neutralizes a re-derived card name", async () => {
+    await registerAgent({
+      name: "bcast-update",
+      kind: "custom",
+      displayName: "Fine",
+      a2aEndpoint: "https://bcast-update.example.com/a2a",
+      notifyOn: "mention",
+      workspaceId: 0
+    });
+    await updateAgent("bcast-update", { displayName: "<!here>\nHelper" });
+    expect((await getAgent("bcast-update"))?.displayName).toBe("here Helper");
+  });
+
+  it("setAdminDisplayName neutralizes the config value", async () => {
+    await upsertWorkspace({ id: 24, name: "ws24", adminChannelId: null });
+    await setAdminDisplayName(24, "@channel");
+    expect(await getAdminDisplayName(24)).toBe("channel");
   });
 });
 
@@ -95,28 +136,6 @@ describe("agentRenderIdentity", () => {
       displayName: "Custom Y",
       iconUrl: "https://gw.example.com/icons/0/custom-y/cc.jpg"
     });
-  });
-
-  it("defangs a broadcast sequence in a display name (it reaches message text)", async () => {
-    await upsertWorkspace({
-      id: 24,
-      name: "ws24",
-      adminChannelId: "C_WS24_ADMIN"
-    });
-    await setAdminDisplayName(24, "<!channel>");
-    const admin = await getAgent("admin");
-    expect(
-      (await agentRenderIdentity(admin!, "C_WS24_ADMIN")).displayName
-    ).toBe("@channel");
-
-    // A custom agent's name can come straight off its own A2A card.
-    await env.DB.prepare(
-      "INSERT OR IGNORE INTO agents (name, kind, display_name, enabled, notify_on, a2a_endpoint, workspace_id) VALUES ('custom-w', 'custom', '<!here> Helper', 1, 'mention', 'https://example.com/w', 0)"
-    ).run();
-    const agent = await getAgent("custom-w");
-    expect((await agentRenderIdentity(agent!, "C_ANY")).displayName).toBe(
-      "@here Helper"
-    );
   });
 
   it("falls back to the machine name when an agent has no display name", async () => {

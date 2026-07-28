@@ -33,7 +33,7 @@ import {
   setAdminDisplayName
 } from "@/db/models/workspace-configs";
 import { SHARED_INFRA_ROOTS } from "@/a2a/endpoint";
-import { hasSlackCommandSequence } from "@/util/slack-text";
+import { hasSlackBroadcast } from "@/util/slack-text";
 import { sanitizeDisplayName } from "@/util/display-name";
 import {
   buildAvatarPrompt,
@@ -138,18 +138,19 @@ async function present(a: AgentRow): Promise<ToolResult> {
 }
 
 /**
- * Reject a caller-chosen display name that carries a Slack command sequence
- * (`<!channel>`, `<!here>`, …). Display names are also defanged at the render
- * choke point (`agentRenderIdentity`), which is what keeps card-derived names
+ * Reject a caller-chosen display name that carries a channel-wide mention, in
+ * either spelling (`<!channel>` or a plain `@channel`). The model-layer writers
+ * neutralize such a name unconditionally, which is what keeps card-derived names
  * safe; here — where a human picked the name through the admin — refusing beats
- * silently storing a name that renders differently than they asked for.
+ * silently storing a name that reads differently than they asked for.
  */
 function ensureNoBroadcastName(displayName?: string): ToolResult | null {
-  if (displayName !== undefined && hasSlackCommandSequence(displayName)) {
+  if (displayName !== undefined && hasSlackBroadcast(displayName)) {
     return {
       error:
-        "Display name cannot contain Slack command sequences like <!channel>, " +
-        "<!here> or <!subteam^…> — they would @-notify the channel."
+        "Display name cannot contain a channel-wide mention — @channel, @here, " +
+        "@everyone, or their <!channel> / <!subteam^…> form. They would notify " +
+        "everyone in the channel."
     };
   }
   return null;

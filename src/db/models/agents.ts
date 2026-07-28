@@ -44,7 +44,15 @@ export interface AgentChannelEntry {
   workspaceId: number | null;
 }
 
-/** Insert a new agent row. Caller is responsible for uniqueness checks. */
+/**
+ * Insert a new agent row. Caller is responsible for uniqueness checks.
+ *
+ * `displayName` is sanitized here, at the write, so no unsafe name can enter the
+ * table in the first place — see {@link sanitizeDisplayName}. This is the last
+ * writer in the path, and the admin tools reject a *human-chosen* name outright
+ * rather than silently rewriting it; sanitizing here covers the names the gateway
+ * does not control (a remote agent's own A2A card).
+ */
 export async function registerAgent(
   input: RegisterAgentInput
 ): Promise<AgentRow> {
@@ -54,7 +62,7 @@ export async function registerAgent(
     .values({
       name: input.name.trim().toLowerCase(),
       kind: input.kind,
-      displayName: input.displayName?.trim() || null,
+      displayName: sanitizeDisplayName(input.displayName ?? "") || null,
       iconUrl: input.iconUrl?.trim() || null,
       a2aEndpoint: input.a2aEndpoint,
       notifyOn: input.notifyOn,
@@ -115,13 +123,10 @@ export async function agentRenderIdentity(
   agent: AgentRow,
   channelId: string
 ): Promise<AgentRenderIdentity> {
-  // Every display name is sanitized here rather than at each writer: this is the
-  // one choke point all Slack-facing identities pass through, and the names arrive
-  // from sources the gateway does not control (an agent's own A2A card, the admin
-  // model's tool calls). A name that sanitizes to nothing falls back to the
-  // machine name, which is a validated slug.
+  // Names are safe by construction here: every writer sanitizes (registerAgent,
+  // updateAgent, setAdminDisplayName), so nothing needs defanging at render.
   const row: AgentRenderIdentity = {
-    displayName: sanitizeDisplayName(agent.displayName ?? "") || agent.name,
+    displayName: agent.displayName ?? agent.name,
     iconUrl: agent.iconUrl ?? null
   };
   if (agent.kind !== "admin") return row;
@@ -135,7 +140,7 @@ export async function agentRenderIdentity(
     getAdminIconUrl(ws.id)
   ]);
   return {
-    displayName: sanitizeDisplayName(displayName ?? "") || row.displayName,
+    displayName: displayName || row.displayName,
     iconUrl: iconUrl || row.iconUrl
   };
 }
@@ -232,7 +237,11 @@ export async function listChannelsForAgents(
     .where(inArray(schema.agentChannels.agentName, agentNames));
 }
 
-/** Update mutable fields of an agent. Only provided patch fields are written. */
+/**
+ * Update mutable fields of an agent. Only provided patch fields are written.
+ * `displayName` is sanitized on the way in for the same reason as in
+ * {@link registerAgent}.
+ */
 export async function updateAgent(
   name: string,
   patch: UpdateAgentPatch
@@ -242,7 +251,7 @@ export async function updateAgent(
     .update(schema.agents)
     .set({
       ...(patch.displayName !== undefined
-        ? { displayName: patch.displayName?.trim() || null }
+        ? { displayName: sanitizeDisplayName(patch.displayName ?? "") || null }
         : {}),
       ...(patch.iconUrl !== undefined
         ? { iconUrl: patch.iconUrl?.trim() || null }

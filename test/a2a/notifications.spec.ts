@@ -620,8 +620,7 @@ describe("handleRemoteAgentNotification", () => {
     );
 
     expect(posts).toHaveLength(1);
-    expect(posts[0].text).not.toContain("<!channel>");
-    expect(posts[0].text).toContain("@channel");
+    expect(posts[0].text).toBe("hey channel listen");
   });
 
   it("rejects a built-in agent's token on the public remote callback (401, nothing posted)", async () => {

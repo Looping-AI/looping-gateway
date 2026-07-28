@@ -355,13 +355,15 @@ describe("sanitizeAgentReply — untrusted reply hardening", () => {
     expect(sanitizeAgentReply("a\tb\nc")).toBe("a\tb\nc");
   });
 
-  it("defangs Slack broadcast sequences so a hostile reply can't @-notify a channel", () => {
+  it("neutralizes channel-wide mentions so a hostile reply can't notify everyone", () => {
     const reply = sanitizeAgentReply(
       "urgent <!channel> and <!here> and <!subteam^S1|@grp> now"
     );
-    expect(reply).not.toContain("<!");
-    expect(reply).toContain("@channel");
-    expect(reply).toContain("@here");
-    expect(reply).toContain("@subteam^S1|@grp");
+    expect(reply).toBe("urgent channel and here and subteam^S1|@grp now");
+
+    // The plain spelling too — Slack links these up when link_names is set.
+    expect(sanitizeAgentReply("ping @channel and @everyone")).toBe(
+      "ping channel and everyone"
+    );
   });
 });

@@ -7,9 +7,14 @@ import { sanitizeSlackText } from "@/util/slack-text";
  * and an un-overridden custom agent inherits the name published on the remote's own
  * A2A card. It is not only `chat.postMessage`'s `username` (which Slack does not
  * parse) — it is also interpolated into message *text* on the agent-failure notice,
- * where a `<!channel>` name would fire a channel-wide ping. So it goes through the
- * same sanitizer as reply text, with whitespace collapsed to keep it one line.
- * Returns "" when nothing renderable survives; callers fall back to the agent name.
+ * where a `<!channel>`/`@channel` name would fire a channel-wide ping. So it goes
+ * through the same sanitizer as reply text, with whitespace collapsed to keep it
+ * one line.
+ *
+ * Applied by **every writer** of a display name (`registerAgent`, `updateAgent`,
+ * `setAdminDisplayName`), so an unsafe name cannot exist in the database and read
+ * paths need no guard of their own. Returns "" when nothing renderable survives;
+ * writers store null and rendering falls back to the agent's machine name.
  */
 export function sanitizeDisplayName(name: string): string {
   return sanitizeSlackText(name).replace(/\s+/g, " ").trim();

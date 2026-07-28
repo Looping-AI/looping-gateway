@@ -72,8 +72,8 @@ function remoteFetchImpl(authToken?: string): typeof fetch {
 
 /**
  * Sanitize an agent reply before it reaches Slack: {@link sanitizeSlackText}
- * (strip control characters, defang broadcast sequences so a hostile agent can't
- * @-notify a whole channel) plus a length cap so it can't flood or break Slack.
+ * (strip control characters, neutralize channel-wide mentions in both spellings so
+ * a hostile agent can't notify everyone) plus a length cap so it can't flood Slack.
  * Applied at every delivery boundary — the remote push-notification callback and
  * the local in-process sender alike — because even a built-in agent relays
  * untrusted model output.
