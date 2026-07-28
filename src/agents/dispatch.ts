@@ -16,10 +16,12 @@ import { buildMessage, textPart } from "@/a2a/parts";
 import { localPushNotificationConfig } from "@/a2a/notifications/local";
 import { NOTIFICATIONS_PATH } from "@/a2a/notifications/remote";
 import { notifyHitlContinuationFailed } from "@/a2a/notifications/hitl";
+import { A2A_ERROR_CODE } from "@a2a-js/sdk/errors";
 import {
   sendA2ALocal,
   sendA2ARemote,
   cancelA2ARemote,
+  type A2AAccept,
   type CancelOutcome
 } from "@/a2a/client";
 import { originOf, validateRemoteEndpoint } from "@/a2a/endpoint";
@@ -243,6 +245,84 @@ export type DispatchResult =
   | { kind: "accepted"; token: string; taskId: string };
 
 /**
+ * User-facing explanation of a deterministic A2A protocol refusal. Each code is
+ * a spec-defined verdict about the request, so the user gets the actual reason
+ * instead of the generic "couldn't be reached" a retry-exhaustion would produce.
+ *
+ * The copy lives here rather than in `@/a2a/errors` because `a2a/` owns protocol
+ * facts while dispatch owns what a user is told — and only dispatch knows whose
+ * fault it is. On the *local* path the refusal comes from the gateway's own A2A
+ * server (`src/a2a/serve.ts`), so "contact the agent developer" would be wrong.
+ */
+function protocolErrorText(
+  agent: Pick<DispatchAgentRef, "name" | "kind">,
+  code: number
+): string {
+  const who = `The agent *${agent.name}*`;
+  let reason: string;
+  switch (code) {
+    case A2A_ERROR_CODE.VERSION_NOT_SUPPORTED:
+      reason = `${who} rejected the request because it doesn't speak A2A v1.0.`;
+      break;
+    case A2A_ERROR_CODE.INVALID_PARAMS:
+    case A2A_ERROR_CODE.PARSE_ERROR:
+    case A2A_ERROR_CODE.INVALID_REQUEST:
+      reason = `${who} rejected the request as malformed.`;
+      break;
+    case A2A_ERROR_CODE.UNSUPPORTED_OPERATION:
+    case A2A_ERROR_CODE.METHOD_NOT_FOUND:
+      reason = `${who} doesn't support the message-send operation the gateway uses.`;
+      break;
+    case A2A_ERROR_CODE.PUSH_NOTIFICATION_NOT_SUPPORTED:
+      // Not a "try again later": the gateway is push-only by construction, so
+      // this agent cannot deliver a reply through it at all.
+      reason =
+        `${who} doesn't support push notifications, which the gateway ` +
+        `requires to deliver replies — it can't be used with the gateway.`;
+      break;
+    case A2A_ERROR_CODE.CONTENT_TYPE_NOT_SUPPORTED:
+      reason = `${who} doesn't accept plain-text messages.`;
+      break;
+    case A2A_ERROR_CODE.EXTENSION_SUPPORT_REQUIRED:
+      reason = `${who} requires an A2A extension the gateway doesn't implement.`;
+      break;
+    default:
+      reason = `${who} rejected the request (A2A error ${code}).`;
+  }
+  return localNamespaceFor(agent.kind)
+    ? `${reason} This is a gateway bug — please check the error logs.`
+    : `${reason} Please contact the agent developer.`;
+}
+
+/**
+ * Fold an {@link A2AAccept} into the workflow-facing {@link DispatchResult}.
+ * Shared by both dispatch branches so local and remote agents report a
+ * non-accept identically, differing only in the copy each earns.
+ */
+function dispatchResultFor(
+  accept: A2AAccept,
+  agent: Pick<DispatchAgentRef, "name" | "kind">,
+  token: string
+): DispatchResult {
+  switch (accept.kind) {
+    case "accepted":
+      return { kind: "accepted", token, taskId: accept.taskId };
+    case "protocol_error":
+      return {
+        kind: "error_reply",
+        text: protocolErrorText(agent, accept.code)
+      };
+    case "contract_violation":
+      return {
+        kind: "error_reply",
+        text: localNamespaceFor(agent.kind)
+          ? "Local agent did not provide the required task acknowledgment."
+          : "Remote agent did not provide the required task acknowledgment."
+      };
+  }
+}
+
+/**
  * Dispatch a user message to an agent over A2A. Routing is by `agent.kind`:
  * built-in local agents are reached in-process via their DO `stub.fetch`; custom
  * agents go over real HTTP at their `a2aEndpoint`. Both return task acceptance
@@ -315,13 +395,7 @@ export async function dispatchToAgent(
       remoteMessage,
       remotePushNotificationConfig(issuer, dispatchId)
     );
-    if (accept.kind === "accepted") {
-      return { kind: "accepted", token: dispatchId, taskId: accept.taskId };
-    }
-    return {
-      kind: "error_reply",
-      text: "Remote agent did not provide the required task acknowledgment."
-    };
+    return dispatchResultFor(accept, agent, dispatchId);
   }
 
   // Local agent → in-process via DO stub.fetch. Trusted same-worker dispatch, so
@@ -356,13 +430,7 @@ export async function dispatchToAgent(
     message,
     localPushNotificationConfig(dispatchId)
   );
-  if (accept.kind === "accepted") {
-    return { kind: "accepted", token: dispatchId, taskId: accept.taskId };
-  }
-  return {
-    kind: "error_reply",
-    text: "Local agent did not provide the required task acknowledgment."
-  };
+  return dispatchResultFor(accept, agent, dispatchId);
 }
 
 /** A human's answer to a HITL prompt, as captured from Slack. */
@@ -391,11 +459,34 @@ const SYSTEM_CALLER: UserAuthContext = {
 };
 
 /**
- * Whether a parked task was successfully handed back to its agent. `"failed"`
+ * Whether a parked task was successfully handed back to its agent. `failed`
  * covers every reason the continuation could not be delivered (agent gone, no
- * endpoint, or a non-accept) — the caller surfaces it to the user identically.
+ * endpoint, or a non-accept). `detail` carries a gateway-authored sentence when
+ * the agent gave an actual A2A verdict, so the notice can say what went wrong
+ * instead of guessing "unreachable"; it is absent when there is nothing more
+ * specific to report.
  */
-type ContinuationOutcome = "resumed" | "failed";
+type ContinuationOutcome =
+  { kind: "resumed" } | { kind: "failed"; detail?: string };
+
+/**
+ * Why a continuation could not be handed back, as a gateway-authored sentence,
+ * or `undefined` when the generic unreachable notice is the honest answer.
+ *
+ * `TASK_NOT_FOUND` is meaningful on this path and nowhere else: the agent is
+ * reachable and speaking A2A, it has simply forgotten the parked task — which is
+ * the opposite of what "looks unreachable" would tell the user.
+ */
+function continuationFailureDetail(
+  agent: Pick<DispatchAgentRef, "name" | "kind">,
+  accept: A2AAccept
+): string | undefined {
+  if (accept.kind !== "protocol_error") return undefined;
+  if (accept.code === A2A_ERROR_CODE.TASK_NOT_FOUND) {
+    return `The agent *${agent.name}* no longer has this task.`;
+  }
+  return protocolErrorText(agent, accept.code);
+}
 
 /**
  * Continue a task parked on a human-in-the-loop prompt. Mirrors
@@ -420,7 +511,7 @@ async function sendTaskContinuation(
       agent: row.agentName,
       requestId: row.requestId
     });
-    return "failed";
+    return { kind: "failed" };
   }
   if (!row.taskId) {
     // A parked task always has a taskId (it was accepted before it could park),
@@ -428,7 +519,7 @@ async function sendTaskContinuation(
     console.error("[hitl] continuation: request has no taskId", {
       requestId: row.requestId
     });
-    return "failed";
+    return { kind: "failed" };
   }
 
   const ns = localNamespaceFor(agent.kind);
@@ -442,7 +533,7 @@ async function sendTaskContinuation(
       console.error("[hitl] continuation: gateway public URL not discovered", {
         requestId: row.requestId
       });
-      return "failed";
+      return { kind: "failed" };
     }
     const ref: DispatchAgentRef = {
       name: agent.name,
@@ -471,13 +562,14 @@ async function sendTaskContinuation(
     );
     if (accept.kind === "accepted") {
       await resumeFromInput(row.token);
-      return "resumed";
+      return { kind: "resumed" };
     }
     console.error("[hitl] continuation: remote did not accept", {
       agent: agent.name,
-      requestId: row.requestId
+      requestId: row.requestId,
+      accept: accept.kind
     });
-    return "failed";
+    return { kind: "failed", detail: continuationFailureDetail(agent, accept) };
   }
 
   // Local built-in → in-process via DO stub.fetch. The DO instance is
@@ -491,7 +583,7 @@ async function sendTaskContinuation(
         channelId: row.channelId,
         requestId: row.requestId
       });
-      return "failed";
+      return { kind: "failed" };
     }
     metadata = {
       user: input.caller,
@@ -527,13 +619,14 @@ async function sendTaskContinuation(
   );
   if (accept.kind === "accepted") {
     await resumeFromInput(row.token);
-    return "resumed";
+    return { kind: "resumed" };
   }
   console.error("[hitl] continuation: local agent did not accept", {
     agent: agent.name,
-    requestId: row.requestId
+    requestId: row.requestId,
+    accept: accept.kind
   });
-  return "failed";
+  return { kind: "failed", detail: continuationFailureDetail(agent, accept) };
 }
 
 /**
@@ -559,7 +652,9 @@ export async function resumeAgentTask(
     messageId: `${row.token}:r:${row.requestId}`,
     caller
   });
-  if (outcome === "failed") await notifyHitlContinuationFailed(row);
+  if (outcome.kind === "failed") {
+    await notifyHitlContinuationFailed(row, outcome.detail);
+  }
 }
 
 /**
@@ -575,7 +670,9 @@ export async function timeoutAgentTask(row: HitlRequestRow): Promise<void> {
     messageId: `${row.token}:t:${row.requestId}`,
     caller: SYSTEM_CALLER
   });
-  if (outcome === "failed") await notifyHitlContinuationFailed(row);
+  if (outcome.kind === "failed") {
+    await notifyHitlContinuationFailed(row, outcome.detail);
+  }
 }
 
 /**

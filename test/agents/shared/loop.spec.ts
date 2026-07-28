@@ -77,7 +77,10 @@ function publishedText(bus: { published: PublishedEvent[] }): string {
     .join("");
 }
 
-function expectTerminalReply(bus: { published: PublishedEvent[] }) {
+function expectTerminalReply(
+  bus: { published: PublishedEvent[] },
+  state: TaskState = TaskState.TASK_STATE_COMPLETED
+) {
   expect(bus.published[0]).toMatchObject({
     kind: "task",
     data: {
@@ -91,7 +94,7 @@ function expectTerminalReply(bus: { published: PublishedEvent[] }) {
   expect(terminal).toMatchObject({
     taskId: "task-1",
     contextId: "ctx-1",
-    status: { state: TaskState.TASK_STATE_COMPLETED }
+    status: { state }
   });
   return terminal.status?.message;
 }
@@ -287,9 +290,11 @@ describe("executeAgentTurn", () => {
 
     expect(bus.finished).toHaveBeenCalledTimes(1);
     expect(bus.published).toHaveLength(2);
-    expect(partsText(expectTerminalReply(bus)?.parts)).toBe(
-      "Something went wrong. Please try again."
-    );
+    // `failed`, not `completed`: A2A v1.0 has no structured task error, so the
+    // state is the only thing that tells the gateway this turn broke.
+    expect(
+      partsText(expectTerminalReply(bus, TaskState.TASK_STATE_FAILED)?.parts)
+    ).toBe("Something went wrong. Please try again.");
   });
 
   it("publishes the transient reply and skips persist when model returns empty text", async () => {
@@ -350,9 +355,9 @@ describe("executeAgentTurn", () => {
 
     expect(bus.finished).toHaveBeenCalledTimes(1);
     expect(bus.published).toHaveLength(2);
-    expect(partsText(expectTerminalReply(bus)?.parts)).toBe(
-      "Something went wrong. Please try again."
-    );
+    expect(
+      partsText(expectTerminalReply(bus, TaskState.TASK_STATE_FAILED)?.parts)
+    ).toBe("Something went wrong. Please try again.");
   });
 
   it("always calls finished() even when the second appendMessage throws", async () => {

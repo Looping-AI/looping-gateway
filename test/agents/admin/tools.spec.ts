@@ -471,6 +471,39 @@ describe("admin tools — derive displayName from card (iconUrl is never card-so
     expect(row?.displayName).toBe("My Override");
   });
 
+  it("rejects an admin-supplied displayName with a channel-wide mention", async () => {
+    const wsId = await freshWsId("tools-ws-derive-broadcast");
+    const d = depsWith(wsId, ctx({ adminWorkspaces: [wsId] }), async () => ({
+      pin: {
+        cardSigningJku: "https://bcast.example.com/.well-known/jwks.json",
+        cardSigningKid: "kb"
+      },
+      displayName: "From Card"
+    }));
+    const created = (await agentsCreate(d, {
+      name: "broadcast-name-agent",
+      displayName: "<!here> Helper",
+      a2aEndpoint: "https://bcast.example.com/a2a",
+      notifyOn: "mention"
+    })) as { error?: string };
+    expect(created.error).toContain("channel-wide mention");
+    expect(await getAgent("broadcast-name-agent")).toBeNull();
+
+    await agentsCreate(d, {
+      name: "broadcast-name-agent",
+      a2aEndpoint: "https://bcast.example.com/a2a",
+      notifyOn: "mention"
+    });
+    const updated = (await agentsUpdate(d, {
+      name: "broadcast-name-agent",
+      displayName: "@channel"
+    })) as { error?: string };
+    expect(updated.error).toContain("channel-wide mention");
+    expect((await getAgent("broadcast-name-agent"))?.displayName).toBe(
+      "From Card"
+    );
+  });
+
   it("endpoint update re-derives displayName but never touches iconUrl", async () => {
     const wsId = await freshWsId("tools-ws-derive-c");
     const pin = {
@@ -812,6 +845,18 @@ describe("admin tools — self_set_display_name", () => {
     expect(await selfSetDisplayName(d, { displayName: "   " })).toHaveProperty(
       "error"
     );
+  });
+
+  it("rejects a display name carrying a channel-wide mention, either spelling", async () => {
+    const wsId = await freshWsId("tools-ws-selfname-broadcast");
+    const d = deps(wsId, ctx({ adminWorkspaces: [wsId] }));
+    for (const displayName of ["Ops <!channel> Bot", "Ops @here Bot"]) {
+      const res = (await selfSetDisplayName(d, { displayName })) as {
+        error?: string;
+      };
+      expect(res.error).toContain("channel-wide mention");
+      expect(await getAdminDisplayName(wsId)).toBeNull();
+    }
   });
 
   it("denies a non-admin caller", async () => {

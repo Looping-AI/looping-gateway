@@ -239,19 +239,24 @@ describe("MessageWorkflow — remote custom agents", () => {
   const REMOTE_CHANNEL = "C_REMOTE";
   const AGENT_NAME = "remote-test";
 
+  type RemoteMode = "accepted" | "contract_violation" | "protocol_error";
+
   /**
    * Stub global fetch to route Slack API calls and remote agent calls separately.
    * The remote endpoint returns either an accepted Task ack or a contract-violating
    * Message (which `dispatchToAgent` normalises to `error_reply`).
    */
   function stubFetch({
-    remoteMode = "accepted" as "accepted" | "contract_violation",
+    remoteMode = "accepted" as RemoteMode,
     slackPosts,
-    slackReactions
+    slackReactions,
+    remotePosts
   }: {
-    remoteMode?: "accepted" | "contract_violation";
+    remoteMode?: RemoteMode;
     slackPosts?: PostCall[];
     slackReactions?: ReactionCall[];
+    /** Counts dispatch POSTs so a test can assert the step did not retry. */
+    remotePosts?: { count: number };
   } = {}) {
     const card = buildAgentCard({
       name: "Remote Test",
@@ -301,6 +306,17 @@ describe("MessageWorkflow — remote custom agents", () => {
 
         // Remote agent dispatch (POST).
         const rpc = (await request.clone().json()) as { id?: unknown };
+        if (remotePosts) remotePosts.count += 1;
+
+        if (remoteMode === "protocol_error") {
+          // A deterministic A2A refusal: the agent understood the request and
+          // said no (here: it doesn't speak v1.0).
+          return Response.json({
+            jsonrpc: "2.0",
+            id: rpc.id ?? 1,
+            error: { code: -32009, message: "unsupported version" }
+          });
+        }
 
         if (remoteMode === "accepted") {
           return Response.json({
@@ -423,6 +439,34 @@ describe("MessageWorkflow — remote custom agents", () => {
       // The error_reply text is posted to Slack so the user isn't left in silence.
       expect(slackPosts).toHaveLength(1);
       expect(slackPosts[0].text).toContain("required task acknowledgment");
+    } finally {
+      await introspector.dispose();
+    }
+  });
+
+  it("task row deleted and a specific notice posted on an A2A protocol refusal, without retrying", async () => {
+    // The whole point of classifying protocol errors: a deterministic refusal
+    // must reach the user as itself, on the first attempt, rather than being
+    // retried until it degrades into the generic "unreachable" notice.
+    const slackPosts: PostCall[] = [];
+    const remotePosts = { count: 0 };
+    stubFetch({ remoteMode: "protocol_error", slackPosts, remotePosts });
+    const introspector = await introspectWorkflow(env.MESSAGE_WORKFLOW);
+    try {
+      const { body, eventId } = makeChannelMessageRequest(REMOTE_CHANNEL);
+      expect((await trigger(body)).status).toBe(200);
+
+      const [instance] = await introspector.get();
+      await instance.waitForStatus("complete");
+
+      // No push callback will arrive — the row must be cleaned up.
+      expect(await getAgentTaskByToken(await tokenFor(eventId))).toBeNull();
+      expect(slackPosts).toHaveLength(1);
+      expect(slackPosts[0].text).toContain("A2A v1.0");
+      expect(slackPosts[0].text).toContain(AGENT_NAME);
+      expect(slackPosts[0].text).not.toContain(AGENT_UNREACHABLE_BASE_TEXT);
+      // Dispatched exactly once: the step returned a result, so it never retried.
+      expect(remotePosts.count).toBe(1);
     } finally {
       await introspector.dispose();
     }

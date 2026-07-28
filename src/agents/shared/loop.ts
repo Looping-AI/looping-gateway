@@ -378,10 +378,16 @@ export async function executeAgentTurn(
       err: String(err),
       stack: err instanceof Error ? err.stack : undefined
     });
-    const reply = isTransientAiError(err)
-      ? TRANSIENT_REPLY
-      : cfg.unexpectedReply;
-    publishTerminal(reply);
+    // A transient blip is a turn that completed by saying "try again" — the work
+    // is recoverable and nothing is broken. An unexpected error is a real
+    // failure, so report it as one: `failed` is what makes the delivery boundary
+    // mark it in Slack instead of rendering the apology as a normal reply. A2A
+    // v1.0 carries no structured task error, so the state is the only signal.
+    if (isTransientAiError(err)) {
+      publishTerminal(TRANSIENT_REPLY);
+    } else {
+      publishTerminal(cfg.unexpectedReply, TaskState.TASK_STATE_FAILED);
+    }
   } finally {
     eventBus.finished();
   }

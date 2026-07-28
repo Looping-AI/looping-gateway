@@ -2,6 +2,7 @@ import { vi } from "vitest";
 import { env } from "cloudflare:workers";
 import type { SessionMessage } from "agents/experimental/memory/session";
 import type { AgentExecutionEvent } from "@a2a-js/sdk/server";
+import type { TaskState } from "@a2a-js/sdk";
 import { partsText } from "@/a2a/parts";
 import { EMBED_MODEL_ID } from "@/config";
 import type { SessionLike } from "@/agents/shared/session";
@@ -125,6 +126,19 @@ export function terminalTaskText(
   const event = events.at(-1);
   if (event?.kind !== "statusUpdate") return undefined;
   return partsText(event.data.status?.message?.parts);
+}
+
+/**
+ * The terminal A2A state a test bus captured. A2A v1.0 carries no structured
+ * task error, so this state is the only machine-readable signal that a turn
+ * failed — assert on it rather than on wording in the reply.
+ */
+export function terminalTaskState(
+  events: AgentExecutionEvent[]
+): TaskState | undefined {
+  const event = events.at(-1);
+  if (event?.kind !== "statusUpdate") return undefined;
+  return event.data.status?.state;
 }
 
 /** A one-turn agent request plus a capturing event bus, shared by executor specs. */

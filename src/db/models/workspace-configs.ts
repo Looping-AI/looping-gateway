@@ -2,6 +2,7 @@ import { eq, sql, and } from "drizzle-orm";
 import { getDb } from "../client";
 import * as schema from "../schema";
 import { ORG_WORKSPACE_ID } from "./workspaces";
+import { sanitizeDisplayName } from "@/util/display-name";
 
 // ---------------------------------------------------------------------------
 // Key namespaces
@@ -37,6 +38,7 @@ export const OperatorConfigKeys = {
    * Display name of this workspace's admin agent, set by the admin itself via the
    * `self_set_display_name` tool. Stored per workspace (the `admin` registry row is shared
    * across workspaces) and read by the router to override the row's displayName.
+   * Write it only through {@link setAdminDisplayName}, which sanitizes it.
    */
   ADMIN_DISPLAY_NAME: "admin_display_name"
 } as const;
@@ -211,7 +213,12 @@ export async function getAdminDisplayName(
   return getConfig(workspaceId, OperatorConfigKeys.ADMIN_DISPLAY_NAME);
 }
 
-/** Set (upsert) the admin display name for a workspace. */
+/**
+ * Set (upsert) the admin display name for a workspace. The **only** writer of
+ * this key: it sanitizes the name (see {@link sanitizeDisplayName}) so a stored
+ * name can never carry a Slack command sequence into a message. Writing the key
+ * through the generic {@link setConfig} bypasses that and is not allowed.
+ */
 export async function setAdminDisplayName(
   workspaceId: number,
   displayName: string
@@ -219,6 +226,6 @@ export async function setAdminDisplayName(
   return setConfig(
     workspaceId,
     OperatorConfigKeys.ADMIN_DISPLAY_NAME,
-    displayName
+    sanitizeDisplayName(displayName)
   );
 }

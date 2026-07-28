@@ -152,18 +152,20 @@ export async function markHitlPromptResolved(
  * answer still stands; only the handoff failed. Posted under the gateway's own
  * identity, not the agent's — the agent is the thing that's broken. Best-effort: a
  * failed post is logged, never thrown.
+ *
+ * `detail` is a gateway-authored sentence naming an actual A2A verdict the agent
+ * returned. Without one we fall back to "looks unreachable", which is only an
+ * inference — so it must not be stated when the agent demonstrably answered.
  */
 export async function notifyHitlContinuationFailed(
-  row: HitlRequestRow
+  row: HitlRequestRow,
+  detail?: string
 ): Promise<void> {
+  const text = detail
+    ? `⚠️ Couldn't continue this task. ${detail}`
+    : `⚠️ Couldn't reach *${row.agentName}* to continue this task — the agent looks unreachable. Please check the agent.`;
   try {
-    await postReply(
-      row.channelId,
-      row.threadTs,
-      `⚠️ Couldn't reach *${row.agentName}* to continue this task — the agent looks unreachable. Please check the agent.`,
-      null,
-      null
-    );
+    await postReply(row.channelId, row.threadTs, text, null, null);
   } catch (err) {
     console.error("[hitl] failed to post continuation-failure notice", {
       requestId: row.requestId,

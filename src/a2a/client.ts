@@ -13,6 +13,8 @@ import type {
   TaskPushNotificationConfig
 } from "@a2a-js/sdk";
 import { isMessageResult } from "@/a2a/parts";
+import { classifyA2AError, isPermanentProtocolError } from "@/a2a/errors";
+import { sanitizeSlackText } from "@/util/slack-text";
 
 /**
  * Where to send an A2A message:
@@ -69,25 +71,15 @@ function remoteFetchImpl(authToken?: string): typeof fetch {
 }
 
 /**
- * Sanitize an agent reply before it reaches Slack: strip control characters
- * (keep newlines and tabs), defang Slack broadcast/command sequences so a hostile
- * agent can't @-notify a whole channel, and cap the length so it can't flood or
- * break Slack. Applied at every delivery boundary — the remote push-notification
- * callback and the local in-process sender alike — because even a built-in agent
- * relays untrusted model output.
+ * Sanitize an agent reply before it reaches Slack: {@link sanitizeSlackText}
+ * (strip control characters, neutralize channel-wide mentions in both spellings so
+ * a hostile agent can't notify everyone) plus a length cap so it can't flood Slack.
+ * Applied at every delivery boundary — the remote push-notification callback and
+ * the local in-process sender alike — because even a built-in agent relays
+ * untrusted model output.
  */
 export function sanitizeAgentReply(text: string): string {
-  // Strip C0 control chars except \t, \n, \r.
-  const stripped = text.replace(
-    /[\u0000-\u0008\u000b\u000c\u000e-\u001f]/g,
-    ""
-  );
-  // Defang Slack broadcast/command sequences (<!channel>, <!here>, <!everyone>,
-  // <!subteam^…>) so a hostile reply can't @-notify a whole channel — even if a
-  // downstream conversion error makes postReply post the raw text. slackifyMarkdown
-  // escapes these on the normal path; this is the belt-and-suspenders at the trust
-  // boundary. Legitimate mentions (<@U…>, <#C…>) are intentionally left intact.
-  const safe = stripped.replace(/<!([^>\n]*)>/g, "@$1");
+  const safe = sanitizeSlackText(text);
   return safe.length > MAX_REPLY_CHARS
     ? `${safe.slice(0, MAX_REPLY_CHARS)}…`
     : safe;
@@ -136,8 +128,8 @@ export async function sendA2ALocal(
   taskPushNotificationConfig: TaskPushNotificationConfig
 ): Promise<A2AAccept> {
   const client = await buildLocalClient(target);
-  return acceptedTask(
-    await client.sendMessage(sendRequest(message, taskPushNotificationConfig)),
+  return acceptOrProtocolError(
+    () => client.sendMessage(sendRequest(message, taskPushNotificationConfig)),
     message
   );
 }
@@ -183,7 +175,53 @@ export type A2AAccept =
   | {
       /** Remote omitted the required async Task acceptance/id. */
       kind: "contract_violation";
+    }
+  | {
+      /**
+       * The agent answered with a deterministic A2A protocol refusal — a
+       * JSON-RPC error envelope with any code but `INTERNAL_ERROR`. Retrying is
+       * pointless (see {@link isPermanentProtocolError}), so this is returned
+       * rather than thrown: the caller turns it into a specific user-facing
+       * notice instead of letting a workflow step retry into a generic
+       * "unreachable".
+       */
+      kind: "protocol_error";
+      code: number;
+      reason: string;
     };
+
+/**
+ * Run one `sendMessage` and fold a permanent protocol refusal into the
+ * {@link A2AAccept} union. Transport faults and `INTERNAL_ERROR` rethrow
+ * unchanged so the caller's retry path is untouched.
+ *
+ * Only the send itself is wrapped — client construction (card discovery over
+ * HTTP for a remote) stays outside, since a discovery failure is a transport
+ * fault that must remain retryable.
+ */
+async function acceptOrProtocolError(
+  send: () => Promise<Awaited<ReturnType<Client["sendMessage"]>>>,
+  message: Message
+): Promise<A2AAccept> {
+  try {
+    return acceptedTask(await send(), message);
+  } catch (err) {
+    const info = classifyA2AError(err);
+    if (info.kind === "protocol" && isPermanentProtocolError(info.code)) {
+      console.error("[a2a] agent refused the request with an A2A error", {
+        contextId: message.contextId,
+        code: info.code,
+        reason: info.reason,
+        message: info.message
+      });
+      return { kind: "protocol_error", code: info.code, reason: info.reason };
+    }
+    // Rethrow the *original* error object, not a wrapper: the unreachable notice
+    // surfaces `err.message` to the user and the stack is what makes a transport
+    // fault diagnosable in logs.
+    throw err;
+  }
+}
 
 function acceptedTask(
   result: Awaited<ReturnType<Client["sendMessage"]>>,
@@ -216,8 +254,8 @@ export async function sendA2ARemote(
   taskPushNotificationConfig: TaskPushNotificationConfig
 ): Promise<A2AAccept> {
   const client = await buildRemoteClient(target);
-  return acceptedTask(
-    await client.sendMessage(sendRequest(message, taskPushNotificationConfig)),
+  return acceptOrProtocolError(
+    () => client.sendMessage(sendRequest(message, taskPushNotificationConfig)),
     message
   );
 }
@@ -262,35 +300,21 @@ export async function cancelA2ARemote(
     });
     return { kind: "canceled", task };
   } catch (err) {
-    switch (a2aErrorCode(err)) {
-      case A2A_ERROR_CODE.TASK_NOT_CANCELABLE:
-        return { kind: "not_cancelable" };
-      case A2A_ERROR_CODE.TASK_NOT_FOUND:
-        return { kind: "not_found" };
-      case A2A_ERROR_CODE.UNSUPPORTED_OPERATION:
-        return { kind: "unsupported" };
-      default:
-        return {
-          kind: "error",
-          message: err instanceof Error ? err.message : String(err)
-        };
+    const info = classifyA2AError(err);
+    if (info.kind === "protocol") {
+      switch (info.code) {
+        case A2A_ERROR_CODE.TASK_NOT_CANCELABLE:
+          return { kind: "not_cancelable" };
+        case A2A_ERROR_CODE.TASK_NOT_FOUND:
+          return { kind: "not_found" };
+        case A2A_ERROR_CODE.UNSUPPORTED_OPERATION:
+          return { kind: "unsupported" };
+      }
     }
+    // Every other code falls through to `error` on purpose: only the three
+    // outcomes above mean the agent will send no further callback, so only they
+    // may complete the ledger row (see `cancelAndReconcile`). On anything else
+    // the task may still be running and its callback must still route to Slack.
+    return { kind: "error", message: info.message };
   }
-}
-
-/**
- * The A2A JSON-RPC error code carried by an error the SDK client threw.
- *
- * Deliberately reads the wire code instead of testing `instanceof` against the
- * semantic error classes (`TaskNotFoundError` & co.): `@a2a-js/sdk/client` and
- * `@a2a-js/sdk/errors` are separately bundled entry points that each carry
- * their own copy of the error hierarchy, so the class the client throws is a
- * *different class object* from the one importable here and `instanceof` is
- * always false — every typed outcome would silently degrade to a generic
- * error. The codes are spec-defined (A2A §5.4) and identical across both
- * copies, so they are the stable thing to classify on.
- */
-function a2aErrorCode(err: unknown): number | undefined {
-  const code = (err as { envelopeCode?: unknown } | null)?.envelopeCode;
-  return typeof code === "number" ? code : undefined;
 }

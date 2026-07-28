@@ -3,6 +3,7 @@ import { getDb } from "../client";
 import * as schema from "../schema";
 import { getWorkspaceByAdminChannel } from "./workspaces";
 import { getAdminDisplayName, getAdminIconUrl } from "./workspace-configs";
+import { sanitizeDisplayName } from "@/util/display-name";
 
 export type AgentRow = typeof schema.agents.$inferSelect;
 export type AgentKind = AgentRow["kind"];
@@ -43,7 +44,15 @@ export interface AgentChannelEntry {
   workspaceId: number | null;
 }
 
-/** Insert a new agent row. Caller is responsible for uniqueness checks. */
+/**
+ * Insert a new agent row. Caller is responsible for uniqueness checks.
+ *
+ * `displayName` is sanitized here, at the write, so no unsafe name can enter the
+ * table in the first place — see {@link sanitizeDisplayName}. This is the last
+ * writer in the path, and the admin tools reject a *human-chosen* name outright
+ * rather than silently rewriting it; sanitizing here covers the names the gateway
+ * does not control (a remote agent's own A2A card).
+ */
 export async function registerAgent(
   input: RegisterAgentInput
 ): Promise<AgentRow> {
@@ -53,7 +62,7 @@ export async function registerAgent(
     .values({
       name: input.name.trim().toLowerCase(),
       kind: input.kind,
-      displayName: input.displayName?.trim() || null,
+      displayName: sanitizeDisplayName(input.displayName ?? "") || null,
       iconUrl: input.iconUrl?.trim() || null,
       a2aEndpoint: input.a2aEndpoint,
       notifyOn: input.notifyOn,
@@ -114,6 +123,8 @@ export async function agentRenderIdentity(
   agent: AgentRow,
   channelId: string
 ): Promise<AgentRenderIdentity> {
+  // Names are safe by construction here: every writer sanitizes (registerAgent,
+  // updateAgent, setAdminDisplayName), so nothing needs defanging at render.
   const row: AgentRenderIdentity = {
     displayName: agent.displayName ?? agent.name,
     iconUrl: agent.iconUrl ?? null
@@ -226,7 +237,11 @@ export async function listChannelsForAgents(
     .where(inArray(schema.agentChannels.agentName, agentNames));
 }
 
-/** Update mutable fields of an agent. Only provided patch fields are written. */
+/**
+ * Update mutable fields of an agent. Only provided patch fields are written.
+ * `displayName` is sanitized on the way in for the same reason as in
+ * {@link registerAgent}.
+ */
 export async function updateAgent(
   name: string,
   patch: UpdateAgentPatch
@@ -236,7 +251,7 @@ export async function updateAgent(
     .update(schema.agents)
     .set({
       ...(patch.displayName !== undefined
-        ? { displayName: patch.displayName?.trim() || null }
+        ? { displayName: sanitizeDisplayName(patch.displayName ?? "") || null }
         : {}),
       ...(patch.iconUrl !== undefined
         ? { iconUrl: patch.iconUrl?.trim() || null }
