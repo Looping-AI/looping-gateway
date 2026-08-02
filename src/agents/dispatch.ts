@@ -36,6 +36,8 @@ export interface DispatchAgentRef {
   name: string;
   kind: AgentRow["kind"];
   a2aEndpoint: string;
+  /** Which agent to address at `a2aEndpoint` — see `agents.tenantId`. */
+  tenantId: string;
   workspaceId: number;
 }
 
@@ -173,15 +175,33 @@ export function buildRemoteContextId(
   );
 }
 
-// The Durable Object namespace for a built-in local agent `kind`, or `undefined`
-// for custom agents (reached over HTTP at their `a2aEndpoint`). Routing is decided
-// by `kind`, not the endpoint: a kind that resolves to a namespace here is local.
-// Direct `env` access keeps the binding types intact — renaming a binding fails to
-// compile here rather than string-indexing `env` and casting the type away.
+/**
+ * The Durable Object namespace for a built-in local agent, or `undefined` for
+ * custom agents (reached over HTTP at their `a2aEndpoint`).
+ *
+ * Two decisions, deliberately kept on two different fields:
+ *
+ *  - **`kind` decides local vs remote.** It is set by the gateway when the row
+ *    is created and no admin can choose it.
+ *  - **`tenantId` decides which local agent**, the same field that picks which
+ *    agent at a remote endpoint. So one column means "which agent" on both
+ *    paths, and a locally-generated agent later becomes a tenant resolved from
+ *    a table rather than a new arm of this `switch`.
+ *
+ * The `kind` guard has to come first and has to stay on `kind`. Routing
+ * local-vs-remote off `tenantId` alone would let a **custom remote agent
+ * registered with `tenantId: "admin"` be dispatched into this gateway's own
+ * AdminAgent** — privilege escalation through a field an org admin types.
+ * `dispatch.spec.ts` asserts that directly.
+ *
+ * Direct `env` access keeps the binding types intact — renaming a binding fails
+ * to compile here rather than string-indexing `env` and casting the type away.
+ */
 function localNamespaceFor(
-  kind: AgentRow["kind"]
+  agent: Pick<AgentRow, "kind" | "tenantId">
 ): DurableObjectNamespace | undefined {
-  switch (kind) {
+  if (agent.kind === "custom") return undefined;
+  switch (agent.tenantId) {
     case "admin":
       return env.AdminAgent;
     case "onboarding":
@@ -255,7 +275,7 @@ export type DispatchResult =
  * server (`src/a2a/serve.ts`), so "contact the agent developer" would be wrong.
  */
 function protocolErrorText(
-  agent: Pick<DispatchAgentRef, "name" | "kind">,
+  agent: Pick<DispatchAgentRef, "name" | "kind" | "tenantId">,
   code: number
 ): string {
   const who = `The agent *${agent.name}*`;
@@ -289,7 +309,7 @@ function protocolErrorText(
     default:
       reason = `${who} rejected the request (A2A error ${code}).`;
   }
-  return localNamespaceFor(agent.kind)
+  return localNamespaceFor(agent)
     ? `${reason} This is a gateway bug — please check the error logs.`
     : `${reason} Please contact the agent developer.`;
 }
@@ -301,7 +321,7 @@ function protocolErrorText(
  */
 function dispatchResultFor(
   accept: A2AAccept,
-  agent: Pick<DispatchAgentRef, "name" | "kind">,
+  agent: Pick<DispatchAgentRef, "name" | "kind" | "tenantId">,
   token: string
 ): DispatchResult {
   switch (accept.kind) {
@@ -315,7 +335,7 @@ function dispatchResultFor(
     case "contract_violation":
       return {
         kind: "error_reply",
-        text: localNamespaceFor(agent.kind)
+        text: localNamespaceFor(agent)
           ? "Local agent did not provide the required task acknowledgment."
           : "Remote agent did not provide the required task acknowledgment."
       };
@@ -333,7 +353,7 @@ export async function dispatchToAgent(
   payload: DispatchPayload
 ): Promise<DispatchResult> {
   const localContextId = buildContextId(payload.channelId, payload.threadTs);
-  const ns = localNamespaceFor(agent.kind);
+  const ns = localNamespaceFor(agent);
 
   // Deterministic per-dispatch id → the A2A `messageId` (dedupe key) and, for
   // remotes, the push `token`. Stable across retries so re-delivery is idempotent.
@@ -364,7 +384,8 @@ export async function dispatchToAgent(
     const gatewayToken = await signGatewayToken({
       audience: audienceFor(agent.a2aEndpoint),
       issuer,
-      identity
+      identity,
+      tenant: agent.tenantId
     });
 
     const remoteMessage = buildMessage({
@@ -391,7 +412,11 @@ export async function dispatchToAgent(
     // its pinned card key (that JWT is the real authenticator — this token is the
     // correlation/dedupe key, stable across retries so they collapse to one row).
     const accept = await sendA2ARemote(
-      { endpoint: agent.a2aEndpoint, authToken: gatewayToken },
+      {
+        endpoint: agent.a2aEndpoint,
+        authToken: gatewayToken,
+        tenant: agent.tenantId
+      },
       remoteMessage,
       remotePushNotificationConfig(issuer, dispatchId)
     );
@@ -426,7 +451,7 @@ export async function dispatchToAgent(
   });
 
   const accept = await sendA2ALocal(
-    { card, fetchImpl },
+    { card, fetchImpl, tenant: agent.tenantId },
     message,
     localPushNotificationConfig(dispatchId)
   );
@@ -478,7 +503,7 @@ type ContinuationOutcome =
  * the opposite of what "looks unreachable" would tell the user.
  */
 function continuationFailureDetail(
-  agent: Pick<DispatchAgentRef, "name" | "kind">,
+  agent: Pick<DispatchAgentRef, "name" | "kind" | "tenantId">,
   accept: A2AAccept
 ): string | undefined {
   if (accept.kind !== "protocol_error") return undefined;
@@ -522,7 +547,7 @@ async function sendTaskContinuation(
     return { kind: "failed" };
   }
 
-  const ns = localNamespaceFor(agent.kind);
+  const ns = localNamespaceFor(agent);
 
   if (!ns) {
     // Custom agent → real HTTP, same identity/endpoint checks as dispatch.
@@ -539,12 +564,14 @@ async function sendTaskContinuation(
       name: agent.name,
       kind: agent.kind,
       a2aEndpoint: agent.a2aEndpoint,
+      tenantId: agent.tenantId,
       workspaceId: agent.workspaceId
     };
     const gatewayToken = await signGatewayToken({
       audience: audienceFor(agent.a2aEndpoint),
       issuer,
-      identity: buildRemoteIdentity(ref)
+      identity: buildRemoteIdentity(ref),
+      tenant: agent.tenantId
     });
     const message = buildMessage({
       messageId: input.messageId,
@@ -556,7 +583,11 @@ async function sendTaskContinuation(
       metadata: { agentKind: "custom", workspaceId: agent.workspaceId }
     });
     const accept = await sendA2ARemote(
-      { endpoint: agent.a2aEndpoint, authToken: gatewayToken },
+      {
+        endpoint: agent.a2aEndpoint,
+        authToken: gatewayToken,
+        tenant: agent.tenantId
+      },
       message,
       remotePushNotificationConfig(issuer, row.token)
     );
@@ -613,7 +644,7 @@ async function sendTaskContinuation(
     pushNotifications: true
   });
   const accept = await sendA2ALocal(
-    { card, fetchImpl },
+    { card, fetchImpl, tenant: agent.tenantId },
     message,
     localPushNotificationConfig(row.token)
   );
@@ -692,7 +723,7 @@ export async function cancelAgentTask(
   agent: DispatchAgentRef,
   taskId: string
 ): Promise<CancelOutcome> {
-  if (localNamespaceFor(agent.kind)) {
+  if (localNamespaceFor(agent)) {
     return { kind: "not_cancelable" };
   }
 
@@ -708,11 +739,16 @@ export async function cancelAgentTask(
   const gatewayToken = await signGatewayToken({
     audience: audienceFor(agent.a2aEndpoint),
     issuer,
-    identity: buildRemoteIdentity(agent)
+    identity: buildRemoteIdentity(agent),
+    tenant: agent.tenantId
   });
 
   return cancelA2ARemote(
-    { endpoint: agent.a2aEndpoint, authToken: gatewayToken },
+    {
+      endpoint: agent.a2aEndpoint,
+      authToken: gatewayToken,
+      tenant: agent.tenantId
+    },
     taskId
   );
 }

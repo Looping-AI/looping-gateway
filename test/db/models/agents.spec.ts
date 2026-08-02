@@ -29,6 +29,31 @@ describe("agents", () => {
     expect(onboarding?.displayName).toBe("Onboarding Agent");
   });
 
+  it("backfills built-in tenant ids rather than leaving them empty", async () => {
+    // The seed predates the column (0001 vs 0019), so these come from the
+    // migration's backfill. They are what `localNamespaceFor` switches on, so
+    // an empty or wrong tenant here stops built-in dispatch resolving at all.
+    expect((await getAgent("admin"))?.tenantId).toBe("admin");
+    expect((await getAgent("onboarding"))?.tenantId).toBe("onboarding");
+  });
+
+  it("refuses a row with no tenant, and one with an empty tenant", async () => {
+    // `NOT NULL` with no default, plus a CHECK — "required" is the database's
+    // rule rather than every insert remembering. Without the CHECK, `''` would
+    // satisfy NOT NULL and become the sentinel this column exists to avoid.
+    await expect(
+      env.DB.prepare(
+        "INSERT INTO agents (name, kind, enabled, notify_on, a2a_endpoint, workspace_id) VALUES ('no-tenant', 'custom', 1, 'mention', 'https://example.com/x', 0)"
+      ).run()
+    ).rejects.toThrow();
+
+    await expect(
+      env.DB.prepare(
+        "INSERT INTO agents (name, kind, enabled, notify_on, a2a_endpoint, tenant_id, workspace_id) VALUES ('empty-tenant', 'custom', 1, 'mention', 'https://example.com/x', '', 0)"
+      ).run()
+    ).rejects.toThrow();
+  });
+
   it("listAgents returns at least the two seeded agents", async () => {
     const agents = await listAgents();
     const names = agents.map((a) => a.name);
@@ -39,7 +64,7 @@ describe("agents", () => {
   it("resolves an agent for a mapped channel", async () => {
     // Insert a custom agent directly, then map it to a channel.
     await env.DB.prepare(
-      "INSERT OR IGNORE INTO agents (name, kind, enabled, notify_on, a2a_endpoint, workspace_id) VALUES ('custom-x', 'custom', 1, 'mention', 'https://example.com/custom-x', 0)"
+      "INSERT OR IGNORE INTO agents (name, kind, enabled, notify_on, a2a_endpoint, tenant_id, workspace_id) VALUES ('custom-x', 'custom', 1, 'mention', 'https://example.com/custom-x', 'main', 0)"
     ).run();
     await env.DB.prepare(
       "INSERT INTO agent_channels (channel_id, agent_name) VALUES ('C_MAP', 'custom-x')"
@@ -59,6 +84,7 @@ describe("display names are sanitized at the write", () => {
       // What a hostile remote agent publishes as its A2A card name.
       displayName: "<!channel> Helper",
       a2aEndpoint: "https://bcast-register.example.com/a2a",
+      tenantId: "main",
       notifyOn: "mention",
       workspaceId: 0
     });
@@ -75,6 +101,7 @@ describe("display names are sanitized at the write", () => {
       kind: "custom",
       displayName: "Fine",
       a2aEndpoint: "https://bcast-update.example.com/a2a",
+      tenantId: "main",
       notifyOn: "mention",
       workspaceId: 0
     });
@@ -129,7 +156,7 @@ describe("agentRenderIdentity", () => {
 
   it("uses the row as-is for a custom agent (its identity is not workspace-scoped)", async () => {
     await env.DB.prepare(
-      "INSERT OR IGNORE INTO agents (name, kind, display_name, icon_url, enabled, notify_on, a2a_endpoint, workspace_id) VALUES ('custom-y', 'custom', 'Custom Y', 'https://gw.example.com/icons/0/custom-y/cc.jpg', 1, 'mention', 'https://example.com/y', 0)"
+      "INSERT OR IGNORE INTO agents (name, kind, display_name, icon_url, enabled, notify_on, a2a_endpoint, tenant_id, workspace_id) VALUES ('custom-y', 'custom', 'Custom Y', 'https://gw.example.com/icons/0/custom-y/cc.jpg', 1, 'mention', 'https://example.com/y', 'main', 0)"
     ).run();
     const agent = await getAgent("custom-y");
     expect(await agentRenderIdentity(agent!, "C_ANY")).toEqual({
@@ -140,7 +167,7 @@ describe("agentRenderIdentity", () => {
 
   it("falls back to the machine name when an agent has no display name", async () => {
     await env.DB.prepare(
-      "INSERT OR IGNORE INTO agents (name, kind, enabled, notify_on, a2a_endpoint, workspace_id) VALUES ('custom-z', 'custom', 1, 'mention', 'https://example.com/z', 0)"
+      "INSERT OR IGNORE INTO agents (name, kind, enabled, notify_on, a2a_endpoint, tenant_id, workspace_id) VALUES ('custom-z', 'custom', 1, 'mention', 'https://example.com/z', 'main', 0)"
     ).run();
     const agent = await getAgent("custom-z");
     expect(await agentRenderIdentity(agent!, "C_ANY")).toEqual({

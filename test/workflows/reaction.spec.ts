@@ -83,6 +83,7 @@ async function seedPendingTask(
     kind: "custom",
     displayName: "Remote",
     a2aEndpoint: "https://agent.example.com/a2a",
+    tenantId: "main",
     notifyOn: "mention",
     workspaceId: 0
   });

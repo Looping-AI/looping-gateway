@@ -104,7 +104,10 @@ export interface AdminToolDeps {
 }
 
 /** Verify a remote agent endpoint + signed card; resolves to pin and card-derived metadata. */
-export type EndpointVerifier = (endpoint: string) => Promise<VerifiedAgentCard>;
+export type EndpointVerifier = (
+  endpoint: string,
+  tenantId: string
+) => Promise<VerifiedAgentCard>;
 
 // CardSigningPin is re-exported so existing imports from this module keep working.
 export type { CardSigningPin };
@@ -333,6 +336,7 @@ export type AgentsCreateArgs = {
   name: string;
   displayName?: string;
   a2aEndpoint: string;
+  tenantId: string;
   notifyOn: NotifyOn;
 };
 
@@ -349,9 +353,11 @@ export async function agentsCreate(
     return { error: `"${args.name}" is a reserved built-in agent name.` };
   if (await getAgent(args.name))
     return { error: `An agent named "${args.name}" already exists.` };
+  if (!args.tenantId.trim())
+    return { error: "A tenant id is required to register a custom agent." };
   let verified: VerifiedAgentCard;
   try {
-    verified = await deps.verifyEndpoint(args.a2aEndpoint);
+    verified = await deps.verifyEndpoint(args.a2aEndpoint, args.tenantId);
   } catch (err) {
     return {
       error: `Endpoint verification failed: ${(err as Error).message}`
@@ -364,6 +370,7 @@ export async function agentsCreate(
     // No icon at registration — a custom agent's avatar is gateway-hosted and set
     // later by the admin via `agents_regenerate_avatar` (never from the card).
     a2aEndpoint: args.a2aEndpoint,
+    tenantId: args.tenantId.trim(),
     notifyOn: args.notifyOn,
     workspaceId: deps.wsId,
     cardSigningJku: verified.pin.cardSigningJku,
@@ -377,6 +384,7 @@ export type AgentsUpdateArgs = {
   displayName?: string;
   enabled?: boolean;
   a2aEndpoint?: string;
+  tenantId?: string;
   notifyOn?: NotifyOn;
 };
 
@@ -396,13 +404,20 @@ export async function agentsUpdate(
   // `displayName` is refreshed from the new card unless the caller explicitly
   // overrides it here. `iconUrl` is NOT touched — the avatar is gateway-hosted
   // and admin-generated, so it survives endpoint changes.
+  //
+  // A changed *tenant* re-verifies for the same reason a changed endpoint does:
+  // it re-points the agent at a different agent, and the new tenant has to
+  // actually exist there. Skipping it would let a typo register cleanly and
+  // fail on the next dispatch instead.
   let verified: VerifiedAgentCard | undefined;
-  if (
-    args.a2aEndpoint !== undefined &&
-    args.a2aEndpoint !== target.a2aEndpoint
-  ) {
+  const endpoint = args.a2aEndpoint ?? target.a2aEndpoint;
+  const tenantId = args.tenantId?.trim() ?? target.tenantId;
+  if (endpoint !== target.a2aEndpoint || tenantId !== target.tenantId) {
+    if (!tenantId) {
+      return { error: `A tenant id is required for "${args.name}".` };
+    }
     try {
-      verified = await deps.verifyEndpoint(args.a2aEndpoint);
+      verified = await deps.verifyEndpoint(endpoint, tenantId);
     } catch (err) {
       return {
         error: `Endpoint verification failed: ${(err as Error).message}`
@@ -426,6 +441,7 @@ export async function agentsUpdate(
       args.displayName !== undefined ? args.displayName : verified?.displayName,
     enabled: args.enabled,
     a2aEndpoint: args.a2aEndpoint,
+    tenantId: args.tenantId?.trim(),
     notifyOn: args.notifyOn,
     ...(verified
       ? {
@@ -820,6 +836,16 @@ export function buildAdminTools(deps: AdminToolDeps): ToolSet {
         a2aEndpoint: z
           .string()
           .describe("Remote A2A endpoint URL for the custom agent (required)"),
+        tenantId: z
+          .string()
+          .min(1)
+          .describe(
+            "Which agent at that endpoint (required). One endpoint can serve " +
+              "several agents, so the URL alone does not identify one — the " +
+              "agent's operator gives you this id (e.g. `reactive`). It is sent " +
+              "on every request and verified against the agent's card at " +
+              "registration."
+          ),
         notifyOn: z
           .enum(["mention", "channel_messages"])
           .describe(
@@ -842,6 +868,14 @@ export function buildAdminTools(deps: AdminToolDeps): ToolSet {
             "Set false to disable — disabled agents receive no messages and won't be routed to"
           ),
         a2aEndpoint: z.string().optional(),
+        tenantId: z
+          .string()
+          .min(1)
+          .optional()
+          .describe(
+            "Change which agent at the endpoint this row addresses. Re-verifies " +
+              "against the agent's card, same as changing the endpoint does."
+          ),
         notifyOn: z
           .enum(["mention", "channel_messages"])
           .optional()

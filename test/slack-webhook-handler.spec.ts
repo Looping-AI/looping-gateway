@@ -44,7 +44,7 @@ function spyWorkflow(
 // and still fires the message/reaction workflows (app_mention, edits, plain msgs).
 beforeEach(async () => {
   await env.DB.prepare(
-    "INSERT OR IGNORE INTO agents (name, kind, enabled, notify_on, a2a_endpoint, workspace_id) VALUES ('wf-c1', 'custom', 1, 'channel_messages', 'https://example.com/wf-c1', 0)"
+    "INSERT OR IGNORE INTO agents (name, kind, enabled, notify_on, a2a_endpoint, tenant_id, workspace_id) VALUES ('wf-c1', 'custom', 1, 'channel_messages', 'https://example.com/wf-c1', 'main', 0)"
   ).run();
   await env.DB.prepare(
     "INSERT OR IGNORE INTO agent_channels (channel_id, agent_name) VALUES ('C1', 'wf-c1')"
@@ -689,7 +689,7 @@ describe("lifecycle events", () => {
   it("wakes a mention-only agent when its name appears in prevText of a message_deleted", async () => {
     // Register a mention-only agent named "del-agent" on channel C1.
     await env.DB.prepare(
-      "INSERT OR IGNORE INTO agents (name, kind, enabled, notify_on, a2a_endpoint, workspace_id) VALUES ('del-agent', 'custom', 1, 'mention', 'https://example.com/del-agent', 0)"
+      "INSERT OR IGNORE INTO agents (name, kind, enabled, notify_on, a2a_endpoint, tenant_id, workspace_id) VALUES ('del-agent', 'custom', 1, 'mention', 'https://example.com/del-agent', 'main', 0)"
     ).run();
     await env.DB.prepare(
       "INSERT OR IGNORE INTO agent_channels (channel_id, agent_name) VALUES ('C1', 'del-agent')"
@@ -725,7 +725,7 @@ describe("lifecycle events", () => {
   it("does not wake a mention-only agent when its name appears in neither text nor prevText of a message_deleted", async () => {
     // Register a mention-only agent named "quiet-agent" on channel C1.
     await env.DB.prepare(
-      "INSERT OR IGNORE INTO agents (name, kind, enabled, notify_on, a2a_endpoint, workspace_id) VALUES ('quiet-agent', 'custom', 1, 'mention', 'https://example.com/quiet-agent', 0)"
+      "INSERT OR IGNORE INTO agents (name, kind, enabled, notify_on, a2a_endpoint, tenant_id, workspace_id) VALUES ('quiet-agent', 'custom', 1, 'mention', 'https://example.com/quiet-agent', 'main', 0)"
     ).run();
     await env.DB.prepare(
       "INSERT OR IGNORE INTO agent_channels (channel_id, agent_name) VALUES ('C1', 'quiet-agent')"

@@ -105,6 +105,7 @@ export async function resolveMessage(
       name: t.agent.name,
       kind: t.agent.kind,
       a2aEndpoint: t.agent.a2aEndpoint,
+      tenantId: t.agent.tenantId,
       workspaceId: t.agent.workspaceId
     },
     workspaceId: t.workspaceId,

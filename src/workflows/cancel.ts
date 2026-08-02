@@ -49,6 +49,7 @@ export async function cancelTaskRow(
     name: agent.name,
     kind: agent.kind,
     a2aEndpoint: agent.a2aEndpoint,
+    tenantId: agent.tenantId,
     workspaceId: agent.workspaceId
   };
 

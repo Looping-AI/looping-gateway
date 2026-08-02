@@ -60,6 +60,7 @@ describe("admin tools — agents_create / agents_read", () => {
       name: "tool-agent-a",
       displayName: "Tool Agent A",
       a2aEndpoint: "https://example.com/tool-agent-a",
+      tenantId: "unregister_agent",
       notifyOn: "mention"
     });
     expect(reg).toMatchObject({ ok: true });
@@ -82,6 +83,7 @@ describe("admin tools — agents_create / agents_read", () => {
       await agentsCreate(d, {
         name: "nope",
         a2aEndpoint: "https://example.com/nope",
+        tenantId: "main",
         notifyOn: "mention"
       })
     ).toHaveProperty("error");
@@ -98,6 +100,7 @@ describe("admin tools — agents_create / agents_read", () => {
       await agentsCreate(d, {
         name: "admin",
         a2aEndpoint: "https://example.com/admin",
+        tenantId: "main",
         notifyOn: "mention"
       })
     ).toHaveProperty("error");
@@ -109,12 +112,14 @@ describe("admin tools — agents_create / agents_read", () => {
     await agentsCreate(d2, {
       name: "dup-agent",
       a2aEndpoint: "https://example.com/dup-agent",
+      tenantId: "main",
       notifyOn: "mention"
     });
     expect(
       await agentsCreate(d2, {
         name: "dup-agent",
         a2aEndpoint: "https://example.com/dup-agent",
+        tenantId: "main",
         notifyOn: "mention"
       })
     ).toHaveProperty("error");
@@ -126,6 +131,7 @@ describe("admin tools — agents_create / agents_read", () => {
     await agentsCreate(d, {
       name: "chan-agent",
       a2aEndpoint: "https://example.com/chan-agent",
+      tenantId: "main",
       notifyOn: "mention"
     });
     await agentsUpdate(d, {
@@ -163,6 +169,7 @@ describe("admin tools — agents_create / agents_read", () => {
     await agentsCreate(owner, {
       name: "chan-owned",
       a2aEndpoint: "https://example.com/chan-owned",
+      tenantId: "main",
       notifyOn: "mention"
     });
     const other = deps(wsB, ctx({ adminWorkspaces: [wsB] }));
@@ -186,6 +193,7 @@ describe("admin tools — agents_create / agents_read", () => {
     await agentsCreate(d, {
       name: "dm-guard-agent",
       a2aEndpoint: "https://example.com/dm-guard-agent",
+      tenantId: "main",
       notifyOn: "mention"
     });
     expect(
@@ -202,6 +210,7 @@ describe("admin tools — agents_create / agents_read", () => {
     await agentsCreate(d, {
       name: "admin-guard-agent",
       a2aEndpoint: "https://example.com/admin-guard-agent",
+      tenantId: "main",
       notifyOn: "mention"
     });
     await setWorkspaceAdminChannel(wsId, "C_ADMIN_CH");
@@ -220,6 +229,7 @@ describe("admin tools — agents_create / agents_read", () => {
     await agentsCreate(owner, {
       name: "wsa-agent",
       a2aEndpoint: "https://example.com/wsa-agent",
+      tenantId: "main",
       notifyOn: "mention"
     });
     const other = deps(wsB, ctx({ adminWorkspaces: [wsB] }));
@@ -279,6 +289,7 @@ describe("admin tools — human-in-the-loop", () => {
     await agentsCreate(d, {
       name: "gate-agent",
       a2aEndpoint: "https://example.com/gate-agent",
+      tenantId: "main",
       notifyOn: "mention"
     });
 
@@ -328,6 +339,7 @@ describe("admin tools — card-signing verification + pin (TOFU)", () => {
     const reg = await agentsCreate(d, {
       name: "pinned-agent",
       a2aEndpoint: "https://signed.example.com/a2a",
+      tenantId: "unregister_agent",
       notifyOn: "mention"
     });
     expect(reg).toMatchObject({ ok: true });
@@ -347,6 +359,7 @@ describe("admin tools — card-signing verification + pin (TOFU)", () => {
     const res = await agentsCreate(d, {
       name: "unsigned-agent",
       a2aEndpoint: "https://unsigned.example.com/a2a",
+      tenantId: "main",
       notifyOn: "mention"
     });
     expect(res).toHaveProperty("error");
@@ -370,6 +383,7 @@ describe("admin tools — card-signing verification + pin (TOFU)", () => {
     await agentsCreate(original, {
       name: "tofu-agent",
       a2aEndpoint: "https://a.example.com/a2a",
+      tenantId: "main",
       notifyOn: "mention"
     });
 
@@ -387,7 +401,8 @@ describe("admin tools — card-signing verification + pin (TOFU)", () => {
     );
     const res = await agentsUpdate(repointed, {
       name: "tofu-agent",
-      a2aEndpoint: "https://b.example.com/a2a"
+      a2aEndpoint: "https://b.example.com/a2a",
+      tenantId: "main"
     });
     expect(res).toHaveProperty("error");
     expect((res as { error: string }).error).toContain("different key");
@@ -411,11 +426,13 @@ describe("admin tools — card-signing verification + pin (TOFU)", () => {
     await agentsCreate(d, {
       name: "tofu-ok-agent",
       a2aEndpoint: "https://same.example.com/a2a",
+      tenantId: "main",
       notifyOn: "mention"
     });
     const res = await agentsUpdate(d, {
       name: "tofu-ok-agent",
-      a2aEndpoint: "https://same.example.com/v2"
+      a2aEndpoint: "https://same.example.com/v2",
+      tenantId: "main"
     });
     expect(res).toMatchObject({ ok: true });
     const row = await getAgent("tofu-ok-agent");
@@ -444,6 +461,7 @@ describe("admin tools — derive displayName from card (iconUrl is never card-so
     await agentsCreate(d, {
       name: "derive-agent",
       a2aEndpoint: "https://derive.example.com/a2a",
+      tenantId: "main",
       notifyOn: "mention"
     });
     const row = await getAgent("derive-agent");
@@ -465,6 +483,7 @@ describe("admin tools — derive displayName from card (iconUrl is never card-so
       name: "derive-override-agent",
       displayName: "My Override",
       a2aEndpoint: "https://derive2.example.com/a2a",
+      tenantId: "main",
       notifyOn: "mention"
     });
     const row = await getAgent("derive-override-agent");
@@ -484,6 +503,7 @@ describe("admin tools — derive displayName from card (iconUrl is never card-so
       name: "broadcast-name-agent",
       displayName: "<!here> Helper",
       a2aEndpoint: "https://bcast.example.com/a2a",
+      tenantId: "main",
       notifyOn: "mention"
     })) as { error?: string };
     expect(created.error).toContain("channel-wide mention");
@@ -492,6 +512,7 @@ describe("admin tools — derive displayName from card (iconUrl is never card-so
     await agentsCreate(d, {
       name: "broadcast-name-agent",
       a2aEndpoint: "https://bcast.example.com/a2a",
+      tenantId: "main",
       notifyOn: "mention"
     });
     const updated = (await agentsUpdate(d, {
@@ -517,6 +538,7 @@ describe("admin tools — derive displayName from card (iconUrl is never card-so
     await agentsCreate(d, {
       name: "rederive-agent",
       a2aEndpoint: "https://rederive.example.com/v1",
+      tenantId: "main",
       notifyOn: "mention"
     });
     // Give the agent a gateway-hosted avatar, then re-point the endpoint.
@@ -542,7 +564,8 @@ describe("admin tools — derive displayName from card (iconUrl is never card-so
 
     await agentsUpdate(d, {
       name: "rederive-agent",
-      a2aEndpoint: "https://rederive.example.com/v2"
+      a2aEndpoint: "https://rederive.example.com/v2",
+      tenantId: "main"
     });
     const row = await getAgent("rederive-agent");
     expect(row?.a2aEndpoint).toBe("https://rederive.example.com/v2");
@@ -564,11 +587,13 @@ describe("admin tools — derive displayName from card (iconUrl is never card-so
     await agentsCreate(d, {
       name: "override2-agent",
       a2aEndpoint: "https://override2.example.com/v1",
+      tenantId: "main",
       notifyOn: "mention"
     });
     await agentsUpdate(d, {
       name: "override2-agent",
       a2aEndpoint: "https://override2.example.com/v2",
+      tenantId: "main",
       displayName: "Manual Override"
     });
     const row = await getAgent("override2-agent");
@@ -893,6 +918,7 @@ describe("admin tools — agents_regenerate_avatar", () => {
     await agentsCreate(d, {
       name,
       a2aEndpoint: `https://${name}.example.com/a2a`,
+      tenantId: "main",
       notifyOn: "mention"
     });
   }

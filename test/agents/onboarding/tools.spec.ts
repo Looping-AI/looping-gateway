@@ -36,6 +36,7 @@ describe("onboarding tools — directory_read agents", () => {
       name: "onb-mine-agent",
       kind: "custom",
       a2aEndpoint: "https://example.com/onb-mine",
+      tenantId: "main",
       notifyOn: "mention",
       workspaceId: mine
     });
@@ -43,6 +44,7 @@ describe("onboarding tools — directory_read agents", () => {
       name: "onb-other-agent",
       kind: "custom",
       a2aEndpoint: "https://example.com/onb-other",
+      tenantId: "main",
       notifyOn: "mention",
       workspaceId: other
     });
@@ -65,6 +67,7 @@ describe("onboarding tools — directory_read agents", () => {
       name: "onb-disabled-agent",
       kind: "custom",
       a2aEndpoint: "https://example.com/onb-disabled",
+      tenantId: "main",
       notifyOn: "mention",
       workspaceId: wsId
     });

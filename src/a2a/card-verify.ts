@@ -1,12 +1,14 @@
 import {
   AGENT_CARD_PATH,
+  A2A_PROTOCOL_VERSION,
+  A2A_VERSION_HEADER,
   AgentCard,
   canonicalizeAgentCard,
   verifyAgentCardSignature as createCardVerifier,
   type AgentCardSignature
 } from "@a2a-js/sdk";
 import { base64url, type JWK } from "jose";
-import { originOf, validateRemoteEndpoint } from "./endpoint";
+import { audienceFor, originOf, validateRemoteEndpoint } from "./endpoint";
 
 /**
  * "A knows B is really B" — verify a remote agent's **signed AgentCard**
@@ -221,19 +223,149 @@ export async function verifyAgentCardSignature(
 }
 
 /**
- * One-shot verifier used at agent registration: fetch the card from the
- * endpoint, verify its signature, and return the pin plus card-derived metadata
- * (displayName) to persist alongside the agent row. The agent's avatar is NOT
- * sourced from the card — `iconUrl` is a gateway-internal, admin-generated value.
+ * Fetch one tenant's AgentCard via `GetExtendedAgentCard` (A2A §3.1.11).
+ *
+ * The well-known path serves a **stub** describing the origin, because that URI
+ * is per-authority (RFC 8615) and a host may serve many agents. A tenant's own
+ * card — its name, skills and signature — is only reachable here, and the call
+ * is authenticated: the agent verifies our gateway JWT before answering, so the
+ * token has to name the tenant being asked about.
+ */
+async function fetchExtendedAgentCard(
+  endpoint: string,
+  tenantId: string,
+  authToken: string
+): Promise<AgentCard> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+  let res: Response;
+  try {
+    res = await fetch(endpoint, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${authToken}`,
+        [A2A_VERSION_HEADER]: A2A_PROTOCOL_VERSION
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "GetExtendedAgentCard",
+        params: { tenant: tenantId }
+      }),
+      signal: controller.signal
+    });
+  } catch (err) {
+    throw new AgentCardVerificationError(
+      `failed to fetch the extended card for tenant '${tenantId}': ${(err as Error).message}`
+    );
+  } finally {
+    clearTimeout(timer);
+  }
+
+  if (!res.ok) {
+    throw new AgentCardVerificationError(
+      `extended card request for tenant '${tenantId}' failed: HTTP ${res.status}`
+    );
+  }
+  const text = await res.text();
+  if (text.length > MAX_CARD_LENGTH) {
+    throw new AgentCardVerificationError(
+      `extended card for tenant '${tenantId}' too large`
+    );
+  }
+
+  let body: { result?: unknown; error?: { message?: string } };
+  try {
+    body = JSON.parse(text) as typeof body;
+  } catch {
+    throw new AgentCardVerificationError(
+      `extended card for tenant '${tenantId}' is not valid JSON`
+    );
+  }
+  // JSON-RPC transports errors at HTTP 200, so this is the real failure path —
+  // an unknown tenant or a refused token arrives here, not above.
+  if (body.error) {
+    throw new AgentCardVerificationError(
+      `agent refused the extended card request for tenant '${tenantId}': ` +
+        `${body.error.message ?? "unknown error"}`
+    );
+  }
+  if (!body.result || typeof body.result !== "object") {
+    throw new AgentCardVerificationError(
+      `agent returned no card for tenant '${tenantId}'`
+    );
+  }
+  try {
+    return AgentCard.fromJSON(body.result);
+  } catch (err) {
+    throw new AgentCardVerificationError(
+      `invalid extended card for tenant '${tenantId}': ${(err as Error).message}`
+    );
+  }
+}
+
+export interface VerifyRemoteAgentArgs {
+  endpoint: string;
+  /** Which agent at `endpoint` is being registered. */
+  tenantId: string;
+  allowedDomains?: string[];
+  /**
+   * Mint the gateway JWT authorizing the extended-card call. Injected rather
+   * than imported so these handlers stay offline-testable, the same seam
+   * `AdminToolDeps.verifyEndpoint` uses.
+   */
+  authToken: (audience: string, tenant: string) => Promise<string>;
+}
+
+/**
+ * One-shot verifier used at agent registration.
+ *
+ * Two cards, one key:
+ *
+ *  1. The **stub** at the well-known path establishes who this origin is, and
+ *     its signature resolves the `jku`/`kid` pinned Trust-On-First-Use.
+ *  2. The **tenant's** card, fetched through `GetExtendedAgentCard`, is what
+ *     the agent row is actually about — its `displayName` comes from here.
+ *
+ * The second is verified against the *same* pin: one origin, one signing key,
+ * so a tenant card signed by anything else is a different provider answering.
+ *
+ * Its declared tenant is checked too. Without that a typo'd tenant id would
+ * register cleanly — the stub verifies no matter which tenant was asked for —
+ * and only surface as a 401 on the first real dispatch, long after the admin
+ * who could fix it has moved on.
  */
 export async function verifyRemoteAgentEndpoint(
-  endpoint: string,
-  allowedDomains: string[] = []
+  args: VerifyRemoteAgentArgs
 ): Promise<VerifiedAgentCard> {
-  const card = await fetchAgentCard(endpoint, allowedDomains);
-  const pin = await verifyAgentCardSignature(card, { allowedDomains });
-  return {
-    pin,
-    displayName: card.name
-  };
+  const { endpoint, tenantId } = args;
+  const allowedDomains = args.allowedDomains ?? [];
+
+  const stub = await fetchAgentCard(endpoint, allowedDomains);
+  const pin = await verifyAgentCardSignature(stub, { allowedDomains });
+
+  const token = await args.authToken(audienceFor(endpoint), tenantId);
+  const card = await fetchExtendedAgentCard(endpoint, tenantId, token);
+
+  const tenantPin = await verifyAgentCardSignature(card, { allowedDomains });
+  if (
+    tenantPin.cardSigningJku !== pin.cardSigningJku ||
+    tenantPin.cardSigningKid !== pin.cardSigningKid
+  ) {
+    throw new AgentCardVerificationError(
+      `the card for tenant '${tenantId}' is signed by a different key than the ` +
+        `origin's own card — one origin serves one signing identity`
+    );
+  }
+
+  const declared = card.supportedInterfaces?.[0]?.tenant ?? "";
+  if (declared !== tenantId) {
+    throw new AgentCardVerificationError(
+      `the agent returned a card declaring tenant '${declared || "<none>"}' ` +
+        `for a request naming '${tenantId}'`
+    );
+  }
+
+  return { pin, displayName: card.name };
 }

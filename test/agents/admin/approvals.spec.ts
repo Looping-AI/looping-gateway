@@ -15,6 +15,7 @@ async function registerCustom(name: string, wsId: number): Promise<void> {
     kind: "custom",
     displayName: name,
     a2aEndpoint: `https://example.com/${name}`,
+    tenantId: "main",
     notifyOn: "mention",
     workspaceId: wsId
   });

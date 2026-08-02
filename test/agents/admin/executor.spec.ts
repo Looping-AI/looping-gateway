@@ -202,6 +202,7 @@ describe("AdminAgentExecutor — HITL approval resume", () => {
       kind: "custom",
       displayName: "Resume Del",
       a2aEndpoint: "https://example.com/resume-del",
+      tenantId: "main",
       notifyOn: "mention",
       workspaceId: wsId
     });
@@ -241,6 +242,7 @@ describe("AdminAgentExecutor — HITL approval resume", () => {
       kind: "custom",
       displayName: "Resume Keep",
       a2aEndpoint: "https://example.com/resume-keep",
+      tenantId: "main",
       notifyOn: "mention",
       workspaceId: wsId
     });

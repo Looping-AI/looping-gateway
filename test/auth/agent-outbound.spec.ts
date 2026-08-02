@@ -9,6 +9,8 @@ import { audienceFor } from "@/a2a/endpoint";
 import { importGatewayPublicKey } from "../helpers/auth";
 
 const AUD = "https://agent.example.com";
+/** Which agent at `AUD` the token authorizes — required on every mint. */
+const TENANT = "main";
 const PUBLIC_URL = "https://gateway.test";
 const EXPECTED_JKU = `${PUBLIC_URL}/.well-known/jwks.json`;
 
@@ -36,6 +38,7 @@ describe("signGatewayToken", () => {
     const token = await signGatewayToken({
       audience: AUD,
       issuer: PUBLIC_URL,
+      tenant: TENANT,
       identity: {
         key: "custom:7:analytics",
         name: "analytics",
@@ -74,6 +77,7 @@ describe("signGatewayToken", () => {
     const token = await signGatewayToken({
       audience: AUD,
       issuer: PUBLIC_URL,
+      tenant: TENANT,
       identity: {
         key: "custom:0:shared-endpoint",
         name: "shared-endpoint",
@@ -96,6 +100,7 @@ describe("signGatewayToken", () => {
     const token = await signGatewayToken({
       audience: AUD,
       issuer: PUBLIC_URL,
+      tenant: TENANT,
       identity: {
         key: "custom:0:demo",
         name: "demo",
@@ -129,6 +134,7 @@ describe("signGatewayToken", () => {
       const token = await signGatewayToken({
         audience: audienceFor(ENDPOINT),
         issuer: PUBLIC_URL,
+        tenant: TENANT,
         identity: {
           key: "custom:7:analytics",
           name: "analytics",
@@ -170,6 +176,7 @@ describe("signGatewayToken", () => {
     const token = await signGatewayToken({
       audience: AUD,
       issuer: PUBLIC_URL,
+      tenant: TENANT,
       identity: {
         key: "custom:0:demo",
         name: "demo",
@@ -195,6 +202,7 @@ describe("signGatewayToken", () => {
     const token = await signGatewayToken({
       audience: AUD,
       issuer: PUBLIC_URL,
+      tenant: TENANT,
       identity: {
         key: "custom:0:demo",
         name: "demo",

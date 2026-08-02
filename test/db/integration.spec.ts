@@ -40,6 +40,7 @@ describe("agents — registry CRUD", () => {
       kind: "custom",
       displayName: "Crud Agent 1",
       a2aEndpoint: "https://example.com/crud-1",
+      tenantId: "main",
       notifyOn: "mention",
       workspaceId: ws.id
     });
@@ -53,12 +54,14 @@ describe("agents — registry CRUD", () => {
     const updated = await updateAgent("crud-agent-1", {
       displayName: "Renamed",
       enabled: false,
-      a2aEndpoint: "https://example.com/a2a"
+      a2aEndpoint: "https://example.com/a2a",
+      tenantId: "main"
     });
     expect(updated).toMatchObject({
       displayName: "Renamed",
       enabled: false,
-      a2aEndpoint: "https://example.com/a2a"
+      a2aEndpoint: "https://example.com/a2a",
+      tenantId: "main"
     });
 
     await unregisterAgent("crud-agent-1");
@@ -72,6 +75,7 @@ describe("agents — registry CRUD", () => {
       name: "crud-agent-scoped",
       kind: "custom",
       a2aEndpoint: "https://example.com/crud-scoped",
+      tenantId: "main",
       notifyOn: "mention",
       workspaceId: wsA.id
     });
@@ -87,6 +91,7 @@ describe("agents — registry CRUD", () => {
       name: "crud-agent-ch",
       kind: "custom",
       a2aEndpoint: "https://example.com/crud-ch",
+      tenantId: "main",
       notifyOn: "mention",
       workspaceId: ws.id
     });

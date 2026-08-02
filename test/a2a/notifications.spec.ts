@@ -166,6 +166,7 @@ beforeEach(async () => {
     kind: "custom",
     displayName: "Remote",
     a2aEndpoint: "https://agent.example.com/a2a",
+    tenantId: "main",
     notifyOn: "mention",
     workspaceId: 0,
     cardSigningJku: JKU,
@@ -488,6 +489,7 @@ describe("handleRemoteAgentNotification", () => {
       kind: "admin",
       displayName: "Admin Local",
       a2aEndpoint: "https://agent.local/a2a",
+      tenantId: "admin",
       notifyOn: "mention",
       workspaceId: 0
     });
@@ -598,6 +600,7 @@ describe("handleRemoteAgentNotification", () => {
       kind: "admin",
       displayName: "Admin Sanitize",
       a2aEndpoint: "https://agent.local/a2a",
+      tenantId: "admin",
       notifyOn: "mention",
       workspaceId: 0
     });
@@ -631,6 +634,7 @@ describe("handleRemoteAgentNotification", () => {
       kind: "admin",
       displayName: "Admin Public",
       a2aEndpoint: "https://agent.local/a2a",
+      tenantId: "admin",
       notifyOn: "mention",
       workspaceId: 0
     });
@@ -670,6 +674,7 @@ describe("handleRemoteAgentNotification", () => {
       kind: "admin",
       displayName: "Admin Sender",
       a2aEndpoint: "https://agent.local/a2a",
+      tenantId: "admin",
       notifyOn: "mention",
       workspaceId: 0
     });
@@ -728,6 +733,7 @@ describe("handleRemoteAgentNotification", () => {
       kind: "admin",
       displayName: "Admin Delta",
       a2aEndpoint: "https://agent.local/a2a",
+      tenantId: "admin",
       notifyOn: "mention",
       workspaceId: 0
     });
@@ -948,6 +954,7 @@ describe("LocalPushNotificationSender.whenSettled (accept-first liveness barrier
       kind: "admin",
       displayName: "Admin Bar",
       a2aEndpoint: "https://agent.local/a2a",
+      tenantId: "admin",
       notifyOn: "mention",
       workspaceId: 0
     });
@@ -1073,6 +1080,7 @@ describe("LocalPushNotificationSender.whenSettled (accept-first liveness barrier
       kind: "onboarding",
       displayName: "Mismatch",
       a2aEndpoint: "https://agent.local/a2a",
+      tenantId: "onboarding",
       notifyOn: "mention",
       workspaceId: 0
     });

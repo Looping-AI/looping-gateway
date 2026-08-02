@@ -6,7 +6,7 @@ import {
   Task,
   TaskState
 } from "@a2a-js/sdk";
-import { jwtVerify } from "jose";
+import { decodeJwt, jwtVerify } from "jose";
 import {
   _resetIssuerCacheForTest,
   dispatchToAgent,
@@ -52,6 +52,8 @@ const ENDPOINT = "https://remote.example.com/a2a";
 interface RemotePost {
   authorization: string | null;
   message: Message;
+  /** Which agent at the endpoint the request addressed (A2A §8.3.2). */
+  tenant: string | undefined;
 }
 
 /** A `chat.postMessage` the gateway sent to the thread (e.g. a failure notice). */
@@ -89,11 +91,12 @@ async function readRpc(
   const rpc = (await request.clone().json()) as {
     id?: unknown;
     method?: string;
-    params?: { message?: unknown };
+    params?: { message?: unknown; tenant?: string };
   };
   posts.push({
     authorization: request.headers.get("authorization"),
-    message: Message.fromJSON(rpc.params?.message ?? {})
+    message: Message.fromJSON(rpc.params?.message ?? {}),
+    tenant: rpc.params?.tenant
   });
   return rpc;
 }
@@ -247,6 +250,7 @@ describe("dispatchToAgent (local Durable Object)", () => {
         name: "admin",
         kind: "admin",
         a2aEndpoint: "http://admin.local",
+        tenantId: "admin",
         workspaceId: 0
       },
       {
@@ -282,6 +286,7 @@ describe("dispatchToAgent (local Durable Object)", () => {
         name: "onboarding",
         kind: "onboarding",
         a2aEndpoint: "http://onboarding.local",
+        tenantId: "onboarding",
         workspaceId: 0
       },
       {
@@ -319,6 +324,7 @@ describe("dispatchToAgent (local Durable Object)", () => {
         name: "alpha",
         kind: "custom",
         a2aEndpoint: ENDPOINT,
+        tenantId: "main",
         workspaceId: 7
       },
       {
@@ -338,6 +344,7 @@ describe("dispatchToAgent (local Durable Object)", () => {
         name: "beta",
         kind: "custom",
         a2aEndpoint: ENDPOINT,
+        tenantId: "main",
         workspaceId: 7
       },
       {
@@ -435,6 +442,7 @@ describe("dispatchToAgent (local Durable Object)", () => {
         name: "remote-bad",
         kind: "custom",
         a2aEndpoint: ENDPOINT,
+        tenantId: "main",
         workspaceId: 7
       },
       {
@@ -462,6 +470,7 @@ describe("dispatchToAgent (local Durable Object)", () => {
         name: "remote-refuser",
         kind: "custom",
         a2aEndpoint: ENDPOINT,
+        tenantId: "main",
         workspaceId: 7
       },
       {
@@ -518,6 +527,79 @@ describe("dispatchToAgent (local Durable Object)", () => {
   });
 });
 
+/**
+ * The tenant: which agent at an endpoint a dispatch is for.
+ *
+ * One host serves several agents over one endpoint, so the URL alone does not
+ * identify one. Everything here is about the tenant reaching the remote intact
+ * and being bound to the token that carries it.
+ */
+describe("dispatchToAgent (tenant)", () => {
+  const dispatchAs = async (tenantId: string, posts: RemotePost[]) => {
+    await setPublicUrl("https://gateway.test");
+    await setAllowedRemoteAgentDomains(["example.com"]);
+    stubRemote(posts);
+    return dispatchToAgent(
+      {
+        name: "alpha",
+        kind: "custom",
+        a2aEndpoint: ENDPOINT,
+        tenantId,
+        workspaceId: 7
+      },
+      {
+        eventId: "Ev-tenant",
+        text: "hello",
+        channelId: "C1",
+        channelName: "general",
+        threadTs: "1.1",
+        messageTs: "1.1",
+        user: user("U1"),
+        metadata: { agentKind: "custom", workspaceId: 7 }
+      }
+    );
+  };
+
+  it("sends the registered tenant on the request", async () => {
+    // Spec §8.3.2: the client must send the tenant the selected interface
+    // declared. The remote refuses a request naming none.
+    const posts: RemotePost[] = [];
+    await dispatchAs("proactive", posts);
+
+    expect(posts.at(-1)?.tenant).toBe("proactive");
+  });
+
+  it("binds the same tenant into the gateway token", async () => {
+    // The body says which agent; the token says which agent the gateway
+    // authorized. If these could disagree, `tenant` would be an unauthenticated
+    // field and a token for one agent would work against any sibling — the
+    // remote compares them precisely because both share one `aud`.
+    const posts: RemotePost[] = [];
+    await dispatchAs("proactive", posts);
+
+    const token = posts.at(-1)?.authorization?.replace(/^Bearer /, "") ?? "";
+    const claims = decodeJwt(token);
+    expect(claims["https://looping.ai/tenant"]).toBe("proactive");
+    expect(claims.aud).toBe(ENDPOINT);
+  });
+
+  it("dispatches a custom agent over HTTP even when its tenant names a built-in", async () => {
+    // The escalation guard. `tenantId` is typed by an org admin at
+    // registration, so if it alone decided local-vs-remote, registering a
+    // remote agent as tenant `admin` would route the call into this gateway's
+    // own AdminAgent Durable Object — with the gateway's own tools and
+    // permissions. `kind` decides that, and `kind` is never admin-supplied.
+    const posts: RemotePost[] = [];
+    const result = await dispatchAs("admin", posts);
+
+    // It went out over HTTP: a local dispatch would have contacted nothing.
+    expect(posts.length).toBeGreaterThan(0);
+    expect(posts.at(-1)?.tenant).toBe("admin");
+    expect(posts.at(-1)?.authorization).toMatch(/^Bearer /);
+    expect(result.kind).toBe("accepted");
+  });
+});
+
 describe("cancelAgentTask", () => {
   it("is a no-op for local built-in agents (never contacts them)", async () => {
     const fetchSpy = vi.fn(async () => new Response("x", { status: 500 }));
@@ -528,6 +610,7 @@ describe("cancelAgentTask", () => {
         name: "admin",
         kind: "admin",
         a2aEndpoint: "http://admin.local",
+        tenantId: "admin",
         workspaceId: 0
       },
       "task-1"
@@ -543,7 +626,13 @@ describe("cancelAgentTask", () => {
     stubRemote(posts);
 
     const out = await cancelAgentTask(
-      { name: "alpha", kind: "custom", a2aEndpoint: ENDPOINT, workspaceId: 7 },
+      {
+        name: "alpha",
+        kind: "custom",
+        a2aEndpoint: ENDPOINT,
+        tenantId: "main",
+        workspaceId: 7
+      },
       "task-9"
     );
     expect(out.kind).toBe("canceled");
@@ -570,6 +659,7 @@ describe("timeoutAgentTask (remote continuation)", () => {
       name: "alpha",
       kind: "custom",
       a2aEndpoint: ENDPOINT,
+      tenantId: "main",
       notifyOn: "mention",
       workspaceId: 0
     });

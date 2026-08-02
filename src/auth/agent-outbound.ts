@@ -22,6 +22,14 @@ const ALG = "EdDSA";
 /** Namespaced claim carrying the signed gateway-agent caller identity. */
 export const IDENTITY_CLAIM = "https://looping.ai/identity";
 
+/**
+ * Namespaced claim naming which agent at the audience the token authorizes.
+ *
+ * Must match `TENANT_CLAIM` in `@loopingai/core`'s `a2a/verify.ts` — the remote
+ * reads this exact key and refuses a token that omits it.
+ */
+export const TENANT_CLAIM = "https://looping.ai/tenant";
+
 /** Token lifetime — short, since each dispatch mints a fresh one. */
 const TOKEN_TTL_SECONDS = 120;
 
@@ -57,6 +65,17 @@ interface SignGatewayTokenArgs {
   issuer: string;
   /** Stable gateway-agent identity embedded under {@link IDENTITY_CLAIM}. */
   identity: RemoteIdentity;
+  /**
+   * Which agent at `audience` this token authorizes, under {@link TENANT_CLAIM}.
+   *
+   * Load-bearing rather than informational. A host serves several agents over
+   * one endpoint, so they share an `aud` and the audience cannot tell them
+   * apart — this claim is the only thing that can. The remote compares it
+   * against the tenant the request body addressed and refuses a mismatch, which
+   * is what stops a token minted for one agent being replayed against a sibling
+   * by editing a field in the body.
+   */
+  tenant: string;
 }
 
 /** Parse + validate the configured private JWK (throws if misconfigured). */
@@ -85,7 +104,8 @@ function privateJwk(): JWK & { kid: string } {
 /**
  * Mint a short-lived gateway identity JWT for one remote dispatch. Signed with
  * EdDSA; carries `iss`/`aud`/`sub`/`iat`/`exp`/`jti` plus the gateway-agent
- * identity claim. The remote agent verifies it against the gateway's public JWKS.
+ * identity and tenant claims. The remote agent verifies it against the
+ * gateway's public JWKS.
  */
 export async function signGatewayToken(
   args: SignGatewayTokenArgs
@@ -95,6 +115,15 @@ export async function signGatewayToken(
   const jwksUrl = `${issuer}/.well-known/jwks.json`;
   const key = await importJWK(jwk, ALG);
 
+  // A tokenless tenant would be verified by the remote as "authorizes no
+  // tenant" and refused on every request, so fail here where the cause is
+  // visible instead of at the far end of an HTTP hop.
+  if (!args.tenant) {
+    throw new Error(
+      `refusing to sign a gateway token with no tenant for '${args.audience}'`
+    );
+  }
+
   return (
     new SignJWT({
       [IDENTITY_CLAIM]: {
@@ -102,7 +131,8 @@ export async function signGatewayToken(
         name: args.identity.name,
         kind: args.identity.kind,
         workspaceId: args.identity.workspaceId
-      }
+      },
+      [TENANT_CLAIM]: args.tenant
     })
       // jku (RFC 7515 §4.1.2): the URL of our public JWKS, embedded in the token so
       // remote agents can locate the verification key without separate configuration.

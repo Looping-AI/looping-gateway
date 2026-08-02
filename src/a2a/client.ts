@@ -30,10 +30,22 @@ import { sanitizeSlackText } from "@/util/slack-text";
 export interface A2ALocalTarget {
   card: AgentCard;
   fetchImpl: typeof fetch;
+  /**
+   * Which agent this is. Local dispatch resolves the Durable Object namespace
+   * before getting here, so nothing routes on it — it travels so the request on
+   * the wire is the same shape either path builds, and so a built-in that
+   * later moves out of process needs no change at the call site.
+   */
+  tenant: string;
 }
 export interface A2ARemoteTarget {
   endpoint: string;
   authToken?: string;
+  /**
+   * Which agent at `endpoint` to address — the remote refuses a request that
+   * names none, since one endpoint may serve several and none is the default.
+   */
+  tenant: string;
 }
 
 /**
@@ -129,7 +141,10 @@ export async function sendA2ALocal(
 ): Promise<A2AAccept> {
   const client = await buildLocalClient(target);
   return acceptOrProtocolError(
-    () => client.sendMessage(sendRequest(message, taskPushNotificationConfig)),
+    () =>
+      client.sendMessage(
+        sendRequest(message, taskPushNotificationConfig, target.tenant)
+      ),
     message
   );
 }
@@ -144,16 +159,18 @@ export async function sendA2ALocal(
  * finishes. The reply arrives later on the push-notification callback, so no
  * gateway request ever blocks on a model.
  *
- * `tenant` is empty because a gateway agent instance *is* its own tenant: local
- * built-ins are addressed by Durable Object instance, and each remote agent has
- * its own registered endpoint.
+ * `tenant` names which agent at the endpoint the turn is for. A host may serve
+ * several over one endpoint, so the endpoint alone does not identify one, and
+ * spec §8.3.2 requires the value the selected interface declared — which is
+ * what registration recorded on the agent row.
  */
 function sendRequest(
   message: Message,
-  taskPushNotificationConfig: TaskPushNotificationConfig
+  taskPushNotificationConfig: TaskPushNotificationConfig,
+  tenant: string
 ): SendMessageRequest {
   return {
-    tenant: "",
+    tenant,
     message,
     configuration: {
       acceptedOutputModes: ["text/plain"],
@@ -255,7 +272,10 @@ export async function sendA2ARemote(
 ): Promise<A2AAccept> {
   const client = await buildRemoteClient(target);
   return acceptOrProtocolError(
-    () => client.sendMessage(sendRequest(message, taskPushNotificationConfig)),
+    () =>
+      client.sendMessage(
+        sendRequest(message, taskPushNotificationConfig, target.tenant)
+      ),
     message
   );
 }
@@ -294,7 +314,7 @@ export async function cancelA2ARemote(
   const client = await buildRemoteClient(target);
   try {
     const task = await client.cancelTask({
-      tenant: "",
+      tenant: target.tenant,
       id: taskId,
       metadata: undefined
     });

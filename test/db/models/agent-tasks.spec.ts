@@ -20,6 +20,7 @@ beforeEach(async () => {
     name: "remoteagent",
     kind: "custom",
     a2aEndpoint: "https://agent.example.com/a2a",
+    tenantId: "main",
     notifyOn: "mention",
     workspaceId: 0
   });

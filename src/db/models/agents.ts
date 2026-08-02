@@ -17,6 +17,14 @@ export interface RegisterAgentInput {
   displayName?: string | null;
   /** Required: custom agents are remote and addressed by this HTTP endpoint. */
   a2aEndpoint: string;
+  /**
+   * Required (no default): which agent to address at that endpoint.
+   *
+   * One origin serves several agents over a single A2A endpoint, so the
+   * endpoint alone does not identify one. Non-empty for every kind — built-ins
+   * carry their own (`admin`, `onboarding`) rather than a placeholder.
+   */
+  tenantId: string;
   /** Required (no default): when the agent is woken — mention vs every message. */
   notifyOn: NotifyOn;
   workspaceId: number;
@@ -32,6 +40,7 @@ export interface UpdateAgentPatch {
   displayName?: string | null;
   iconUrl?: string | null;
   a2aEndpoint?: string;
+  tenantId?: string;
   enabled?: boolean;
   notifyOn?: NotifyOn;
   cardSigningJku?: string | null;
@@ -65,6 +74,7 @@ export async function registerAgent(
       displayName: sanitizeDisplayName(input.displayName ?? "") || null,
       iconUrl: input.iconUrl?.trim() || null,
       a2aEndpoint: input.a2aEndpoint,
+      tenantId: input.tenantId,
       notifyOn: input.notifyOn,
       workspaceId: input.workspaceId,
       cardSigningJku: input.cardSigningJku ?? null,
@@ -259,6 +269,7 @@ export async function updateAgent(
       ...(patch.a2aEndpoint !== undefined
         ? { a2aEndpoint: patch.a2aEndpoint }
         : {}),
+      ...(patch.tenantId !== undefined ? { tenantId: patch.tenantId } : {}),
       ...(patch.enabled !== undefined ? { enabled: patch.enabled } : {}),
       ...(patch.notifyOn !== undefined ? { notifyOn: patch.notifyOn } : {}),
       ...(patch.cardSigningJku !== undefined

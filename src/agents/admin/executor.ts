@@ -12,7 +12,11 @@ import { isCancelRequested } from "@/db/models/agent-tasks";
 import { archiveMessages } from "@/agents/shared/recall";
 import { recallTools } from "@/agents/shared/recall-tool";
 import { verifyRemoteAgentEndpoint } from "@/a2a/card-verify";
-import { getAllowedRemoteAgentDomains } from "@/db/models/workspace-configs";
+import { signGatewayToken } from "@/auth/agent-outbound";
+import {
+  getAllowedRemoteAgentDomains,
+  getPublicUrl
+} from "@/db/models/workspace-configs";
 import {
   HITL_APPROVE_OPTION_ID,
   parseHitlResponse,
@@ -141,9 +145,40 @@ export class AdminAgentExecutor implements AgentExecutor {
             ...buildAdminTools({
               ctx,
               wsId,
-              verifyEndpoint: async (endpoint) => {
+              verifyEndpoint: async (endpoint, tenantId) => {
                 const allowedDomains = await getAllowedRemoteAgentDomains();
-                return verifyRemoteAgentEndpoint(endpoint, allowedDomains);
+                // Registration reads the tenant's card over an *authenticated*
+                // call, so it needs the same issuer dispatch signs with. The
+                // admin agent only ever runs in response to a Slack event, and
+                // the fetch isolate records the public URL on the first one, so
+                // this is set by the time an admin can register anything.
+                const issuer = await getPublicUrl();
+                if (!issuer) {
+                  throw new Error(
+                    "Gateway public URL has not been discovered yet. " +
+                      "Ensure the worker has received at least one Slack event " +
+                      "before registering remote agents."
+                  );
+                }
+                return verifyRemoteAgentEndpoint({
+                  endpoint,
+                  tenantId,
+                  allowedDomains,
+                  authToken: (audience, tenant) =>
+                    signGatewayToken({
+                      audience,
+                      issuer,
+                      tenant,
+                      // Registration has no agent row yet, so the caller is the
+                      // admin agent doing the registering.
+                      identity: {
+                        key: `admin:${wsId}:admin`,
+                        name: "admin",
+                        kind: "admin",
+                        workspaceId: wsId
+                      }
+                    })
+                });
               },
               generateImage: (prompt) => generateAvatar(prompt),
               storeIcon: this.options.storeIcon,
