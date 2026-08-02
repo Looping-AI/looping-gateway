@@ -24,7 +24,7 @@ import {
   type A2AAccept,
   type CancelOutcome
 } from "@/a2a/client";
-import { originOf, validateRemoteEndpoint } from "@/a2a/endpoint";
+import { audienceFor, validateRemoteEndpoint } from "@/a2a/endpoint";
 import {
   getAllowedRemoteAgentDomains,
   getPublicUrl
@@ -362,7 +362,7 @@ export async function dispatchToAgent(
       );
     }
     const gatewayToken = await signGatewayToken({
-      audience: originOf(agent.a2aEndpoint),
+      audience: audienceFor(agent.a2aEndpoint),
       issuer,
       identity
     });
@@ -542,7 +542,7 @@ async function sendTaskContinuation(
       workspaceId: agent.workspaceId
     };
     const gatewayToken = await signGatewayToken({
-      audience: originOf(agent.a2aEndpoint),
+      audience: audienceFor(agent.a2aEndpoint),
       issuer,
       identity: buildRemoteIdentity(ref)
     });
@@ -706,7 +706,7 @@ export async function cancelAgentTask(
     );
   }
   const gatewayToken = await signGatewayToken({
-    audience: originOf(agent.a2aEndpoint),
+    audience: audienceFor(agent.a2aEndpoint),
     issuer,
     identity: buildRemoteIdentity(agent)
   });

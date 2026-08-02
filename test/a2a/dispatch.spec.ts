@@ -398,12 +398,12 @@ describe("dispatchToAgent (local Durable Object)", () => {
     const [{ payload: payloadA }, { payload: payloadB }] = await Promise.all([
       jwtVerify(tokenA, await importGatewayPublicKey(), {
         issuer: "https://gateway.test",
-        audience: "https://remote.example.com",
+        audience: ENDPOINT,
         algorithms: ["EdDSA"]
       }),
       jwtVerify(tokenB, await importGatewayPublicKey(), {
         issuer: "https://gateway.test",
-        audience: "https://remote.example.com",
+        audience: ENDPOINT,
         algorithms: ["EdDSA"]
       })
     ]);

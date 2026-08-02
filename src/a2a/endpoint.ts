@@ -188,7 +188,34 @@ export function validateRemoteEndpoint(
   return url;
 }
 
-/** The scheme+host origin of an endpoint, used as the JWT audience. */
+/** The scheme+host origin of an endpoint. */
 export function originOf(endpoint: string): string {
   return new URL(endpoint).origin;
+}
+
+/**
+ * The `aud` a dispatch token carries: the agent's **exact endpoint**.
+ *
+ * Not the origin, and that is a deliberate break with how this used to work. A
+ * Worker may now mount several agents on one host —
+ * `https://host/reactive/a2a`, `https://host/proactive/a2a` — and an origin-only
+ * audience cannot tell them apart: a token minted for one verifies at every
+ * other. It was never a data leak, since each agent keys its state by the
+ * verified caller identity regardless, but "which agent was this token issued
+ * for" was a question nothing could answer. The endpoint answers it, and a
+ * sibling agent now rejects a token that was not meant for it.
+ *
+ * Rebuilt as `origin + pathname` rather than passed through verbatim, so it
+ * matches exactly what the receiving agent computes from the request it got, and
+ * is unaffected by a query string or fragment on the registered URL.
+ *
+ * **This is a coordinated breaking change.** An agent verifying the old
+ * origin-only audience rejects these tokens, and an agent verifying its endpoint
+ * rejects the old ones — there is no version of this that works across the
+ * cutover, so the gateway and every registered agent deploy together.
+ * `@loopingai/core` ≥ 0.2.0 verifies the endpoint by default.
+ */
+export function audienceFor(endpoint: string): string {
+  const url = new URL(endpoint);
+  return `${url.origin}${url.pathname}`;
 }

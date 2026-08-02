@@ -5,6 +5,7 @@ import {
   getPublicJwks,
   signGatewayToken
 } from "@/auth/agent-outbound";
+import { audienceFor } from "@/a2a/endpoint";
 import { importGatewayPublicKey } from "../helpers/auth";
 
 const AUD = "https://agent.example.com";
@@ -109,6 +110,60 @@ describe("signGatewayToken", () => {
         algorithms: ["EdDSA"]
       })
     ).rejects.toThrow();
+  });
+
+  describe("the endpoint-scoped audience dispatch mints", () => {
+    /**
+     * Checked from the *agent's* side rather than by inspecting the claim, since
+     * what matters is which verifiers accept the token.
+     *
+     * This is the breaking half of the change: the token names one agent's exact
+     * endpoint, so a sibling on the same host rejects it — and so does anything
+     * still verifying the bare origin, which is why the gateway and its
+     * registered agents have to deploy together.
+     */
+    const ORIGIN = "https://agent.example.com";
+    const ENDPOINT = `${ORIGIN}/proactive/a2a`;
+
+    const verifyAs = async (audience: string) => {
+      const token = await signGatewayToken({
+        audience: audienceFor(ENDPOINT),
+        issuer: PUBLIC_URL,
+        identity: {
+          key: "custom:7:analytics",
+          name: "analytics",
+          kind: "custom",
+          workspaceId: 7
+        }
+      });
+      return jwtVerify(token, await importGatewayPublicKey(), {
+        issuer: PUBLIC_URL,
+        audience,
+        algorithms: ["EdDSA"]
+      });
+    };
+
+    it("is accepted by the agent at that endpoint", async () => {
+      await expect(verifyAs(ENDPOINT)).resolves.toBeDefined();
+    });
+
+    it("is rejected by a sibling agent on the same origin", async () => {
+      // The reason for the whole change: under an origin-only audience this
+      // verified, and one agent could spend another's token.
+      await expect(verifyAs(`${ORIGIN}/reactive/a2a`)).rejects.toThrow();
+    });
+
+    it("is rejected by anything verifying the bare origin", async () => {
+      // The breaking half, asserted rather than left implicit: an agent on
+      // @loopingai/core < 0.2.0 will refuse these tokens.
+      await expect(verifyAs(ORIGIN)).rejects.toThrow();
+    });
+
+    it("is rejected by an unrelated host", async () => {
+      await expect(
+        verifyAs("https://someone-else.example.com")
+      ).rejects.toThrow();
+    });
   });
 
   it("rejects a tampered signature", async () => {

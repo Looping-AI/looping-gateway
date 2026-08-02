@@ -45,7 +45,10 @@ export interface RemoteIdentity {
 }
 
 interface SignGatewayTokenArgs {
-  /** Intended recipient — the remote agent's endpoint origin. */
+  /**
+   * Intended recipient — the remote agent's **exact endpoint**, not its origin.
+   * See `audienceFor` in {@link file://../a2a/endpoint.ts}.
+   */
   audience: string;
   /**
    * This gateway's public origin — stored in D1 by the fetch isolate on first
