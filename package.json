@@ -31,20 +31,20 @@
     "prepare": "husky"
   },
   "dependencies": {
-    "@a2a-js/sdk": "^1.0.0",
-    "@chat-adapter/slack": "^4.35.0",
-    "agents": "^0.20.0",
-    "ai": "^7.0.37",
-    "chat": "^4.35.0",
+    "@a2a-js/sdk": "^1.0.1",
+    "@chat-adapter/slack": "^4.36.0",
+    "agents": "^0.20.1",
+    "ai": "^7.0.48",
+    "chat": "^4.36.0",
     "drizzle-orm": "^0.45.2",
-    "jose": "^6.2.4",
+    "jose": "^6.2.8",
     "slackify-markdown": "github:Looping-AI/slackify-markdown#5.0.0",
     "workers-ai-provider": "^4.0.0",
     "zod": "^4.4.3"
   },
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "^0.18.8",
-    "@types/node": "^26.1.1",
+    "@types/node": "^26.1.2",
     "@typescript-eslint/utils": "^8.65.0",
     "drizzle-kit": "^0.31.10",
     "eslint": "^10.8.0",
@@ -53,7 +53,7 @@
     "typescript": "^6.0.3",
     "typescript-eslint": "^8.65.0",
     "vitest": "^4.1.10",
-    "wrangler": "^4.114.0"
+    "wrangler": "^4.118.0"
   },
   "overrides": {
     "@esbuild-kit/core-utils": {
