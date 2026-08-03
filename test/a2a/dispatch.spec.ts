@@ -1,4 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { env } from "cloudflare:workers";
+import { runInDurableObject } from "cloudflare:test";
 import {
   AgentCard,
   Message,
@@ -321,6 +323,65 @@ describe("dispatchToAgent (local Durable Object)", () => {
         })
       );
     }
+  });
+
+  it("persists the accepted task in the agent's own storage", async () => {
+    // The task has to outlive the isolate that made it: a turn parked on a HITL
+    // prompt releases its liveness barrier immediately, so the Durable Object is
+    // evictable long before the human answers. Held in memory, the resumed turn
+    // arrives at a fresh isolate and fails with `TaskNotFound`.
+    const dispatch = (eventId: string) =>
+      dispatchToAgent(
+        {
+          name: "admin",
+          kind: "local",
+          a2aEndpoint: "http://admin.local",
+          tenantId: "admin",
+          workspaceId: 0
+        },
+        {
+          eventId,
+          text: "ping",
+          channelId: "C_PERSIST",
+          channelName: null,
+          threadTs: "1.1",
+          messageTs: "1.1",
+          user: user("U1"),
+          metadata: {
+            agentKind: "local",
+            tenant: "admin",
+            adminWorkspaceId: 91
+          }
+        }
+      );
+    const readStorage = <T>(prefix: string) => {
+      const stub = env.AdminAgent.get(env.AdminAgent.idFromName("admin:91"));
+      return runInDurableObject(stub, (agent, state) =>
+        state.storage.list<T>({ prefix })
+      );
+    };
+
+    const result = await dispatch("Ev-persist-1");
+    expect(result.kind).toBe("accepted");
+    const taskId = result.kind === "accepted" ? result.taskId : "";
+
+    await vi.waitFor(async () =>
+      expect([...(await readStorage("a2a:task:")).keys()]).toContain(
+        `a2a:task:${taskId}`
+      )
+    );
+
+    // The sweep is a side check, not per-message work: once an instance has run
+    // it, further turns on that same instance must not touch storage again.
+    const marker = await vi.waitFor(async () => {
+      const swept = await readStorage<number>("a2a:swept-at");
+      expect(swept.size).toBe(1);
+      return swept.get("a2a:swept-at");
+    });
+    await dispatch("Ev-persist-2");
+    expect(
+      (await readStorage<number>("a2a:swept-at")).get("a2a:swept-at")
+    ).toBe(marker);
   });
 
   it("namespaces remote identity and context per logical agent instance", async () => {

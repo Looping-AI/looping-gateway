@@ -33,3 +33,15 @@ export const AI_GATEWAY_ID = "default";
  * dropped over a weekend, bounded so parked rows don't linger indefinitely.
  */
 export const HITL_REQUEST_TTL_SECONDS = 7 * 24 * 60 * 60;
+
+/**
+ * How long a completed agent task is kept before it is swept, for both halves of
+ * the split: the `agent_tasks` correlation rows in D1 (remote agents) and the A2A
+ * Tasks a local agent persists in its own Durable Object storage. One constant
+ * because it is one policy — a task's retention should not depend on which side
+ * of the local/remote boundary the agent runs on.
+ *
+ * Comfortably longer than {@link HITL_REQUEST_TTL_SECONDS}: a prompt parked for
+ * the full 7 days must still find its task on the other side.
+ */
+export const TASK_RETENTION_SECONDS = 30 * 24 * 60 * 60;
