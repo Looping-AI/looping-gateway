@@ -43,7 +43,7 @@
     "zod": "^4.4.3"
   },
   "devDependencies": {
-    "@cloudflare/vitest-pool-workers": "^0.18.8",
+    "@cloudflare/vitest-pool-workers": "^0.19.1",
     "@types/node": "^26.1.1",
     "@typescript-eslint/utils": "^8.65.0",
     "drizzle-kit": "^0.31.10",
