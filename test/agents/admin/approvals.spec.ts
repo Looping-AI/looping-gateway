@@ -12,9 +12,10 @@ const admin = (wsId: number) => makeAuthCtx({ adminWorkspaces: [wsId] });
 async function registerCustom(name: string, wsId: number): Promise<void> {
   await registerAgent({
     name,
-    kind: "custom",
+    kind: "remote",
     displayName: name,
     a2aEndpoint: `https://example.com/${name}`,
+    tenantId: "main",
     notifyOn: "mention",
     workspaceId: wsId
   });

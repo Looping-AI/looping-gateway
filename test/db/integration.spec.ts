@@ -37,15 +37,16 @@ describe("agents — registry CRUD", () => {
     const ws = await createWorkspace({ name: "crud-agents-1" });
     const row = await registerAgent({
       name: "crud-agent-1",
-      kind: "custom",
+      kind: "remote",
       displayName: "Crud Agent 1",
       a2aEndpoint: "https://example.com/crud-1",
+      tenantId: "main",
       notifyOn: "mention",
       workspaceId: ws.id
     });
     expect(row).toMatchObject({
       name: "crud-agent-1",
-      kind: "custom",
+      kind: "remote",
       workspaceId: ws.id
     });
     expect(row.enabled).toBe(true);
@@ -53,12 +54,14 @@ describe("agents — registry CRUD", () => {
     const updated = await updateAgent("crud-agent-1", {
       displayName: "Renamed",
       enabled: false,
-      a2aEndpoint: "https://example.com/a2a"
+      a2aEndpoint: "https://example.com/a2a",
+      tenantId: "main"
     });
     expect(updated).toMatchObject({
       displayName: "Renamed",
       enabled: false,
-      a2aEndpoint: "https://example.com/a2a"
+      a2aEndpoint: "https://example.com/a2a",
+      tenantId: "main"
     });
 
     await unregisterAgent("crud-agent-1");
@@ -70,8 +73,9 @@ describe("agents — registry CRUD", () => {
     const wsB = await createWorkspace({ name: "crud-scope-b" });
     await registerAgent({
       name: "crud-agent-scoped",
-      kind: "custom",
+      kind: "remote",
       a2aEndpoint: "https://example.com/crud-scoped",
+      tenantId: "main",
       notifyOn: "mention",
       workspaceId: wsA.id
     });
@@ -85,8 +89,9 @@ describe("agents — registry CRUD", () => {
     const ws = await createWorkspace({ name: "crud-channels" });
     await registerAgent({
       name: "crud-agent-ch",
-      kind: "custom",
+      kind: "remote",
       a2aEndpoint: "https://example.com/crud-ch",
+      tenantId: "main",
       notifyOn: "mention",
       workspaceId: ws.id
     });

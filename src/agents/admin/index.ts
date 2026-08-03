@@ -64,7 +64,7 @@ export class AdminAgent extends A2AAgent {
     });
   }
 
-  protected builtinKind(): "admin" {
+  protected builtinTenant(): "admin" {
     return "admin";
   }
 

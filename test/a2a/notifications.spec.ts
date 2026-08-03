@@ -163,9 +163,10 @@ beforeEach(async () => {
   } as unknown as WorkflowInstance);
   await registerAgent({
     name: "remoteagent",
-    kind: "custom",
+    kind: "remote",
     displayName: "Remote",
     a2aEndpoint: "https://agent.example.com/a2a",
+    tenantId: "main",
     notifyOn: "mention",
     workspaceId: 0,
     cardSigningJku: JKU,
@@ -480,14 +481,62 @@ describe("handleRemoteAgentNotification", () => {
     expect((await getAgentTaskByToken(NTOK))?.status).toBe("pending");
   });
 
+  it("refuses to deliver a task belonging to a different built-in", async () => {
+    // The only thing standing between the two local Durable Objects. These
+    // callbacks carry no JWT — they never leave the isolate — so this check is
+    // the whole trust boundary on the local path, and the onboarding DO calling
+    // `deliverLocalAgentTask` with the admin's token has to be refused.
+    //
+    // It compares `tenantId` and not `kind`, for a reason this suite has to
+    // encode: both built-ins are `kind: "local"` now, so the old comparison
+    // would read `"local" !== "local"` — vacuously false, letting either agent
+    // complete the other's tasks while the guard still looked present.
+    const posts: SlackPost[] = [];
+    stubFetch(key, posts);
+    await registerAgent({
+      name: "adminvictim",
+      kind: "local",
+      displayName: "Admin Victim",
+      a2aEndpoint: "https://agent.local/a2a",
+      tenantId: "admin",
+      notifyOn: "mention",
+      workspaceId: 0
+    });
+    await createAgentTask({
+      token: "victim-token",
+      taskId: "victim-task",
+      agentName: "adminvictim",
+      channelId: "C-victim",
+      messageTs: "1700.1",
+      replyThreadTs: null,
+      eventId: "Ev-victim"
+    });
+
+    await expect(
+      deliverLocalAgentTask(
+        "victim-token",
+        snapshotOfTask(makeTask("impersonated reply"))!,
+        // The onboarding DO passing its own tenant; the task is the admin's.
+        "onboarding"
+      )
+    ).rejects.toThrow(/does not belong to the expected built-in agent/);
+
+    // Nothing reached Slack, and the task is still open for its real owner.
+    expect(posts).toHaveLength(0);
+    expect((await getAgentTaskByToken("victim-token"))?.status).not.toBe(
+      "completed"
+    );
+  });
+
   it("delivers a trusted local built-in Task without accepting it on the public callback", async () => {
     const posts: SlackPost[] = [];
     stubFetch(key, posts);
     await registerAgent({
       name: "adminlocal",
-      kind: "admin",
+      kind: "local",
       displayName: "Admin Local",
       a2aEndpoint: "https://agent.local/a2a",
+      tenantId: "admin",
       notifyOn: "mention",
       workspaceId: 0
     });
@@ -595,9 +644,10 @@ describe("handleRemoteAgentNotification", () => {
     stubFetch(key, posts);
     await registerAgent({
       name: "adminsanitize",
-      kind: "admin",
+      kind: "local",
       displayName: "Admin Sanitize",
       a2aEndpoint: "https://agent.local/a2a",
+      tenantId: "admin",
       notifyOn: "mention",
       workspaceId: 0
     });
@@ -628,9 +678,10 @@ describe("handleRemoteAgentNotification", () => {
     stubFetch(key, posts);
     await registerAgent({
       name: "adminpublic",
-      kind: "admin",
+      kind: "local",
       displayName: "Admin Public",
       a2aEndpoint: "https://agent.local/a2a",
+      tenantId: "admin",
       notifyOn: "mention",
       workspaceId: 0
     });
@@ -667,9 +718,10 @@ describe("handleRemoteAgentNotification", () => {
     stubFetch(key, posts);
     await registerAgent({
       name: "adminsender",
-      kind: "admin",
+      kind: "local",
       displayName: "Admin Sender",
       a2aEndpoint: "https://agent.local/a2a",
+      tenantId: "admin",
       notifyOn: "mention",
       workspaceId: 0
     });
@@ -725,9 +777,10 @@ describe("handleRemoteAgentNotification", () => {
     stubFetch(key, posts);
     await registerAgent({
       name: "admindelta",
-      kind: "admin",
+      kind: "local",
       displayName: "Admin Delta",
       a2aEndpoint: "https://agent.local/a2a",
+      tenantId: "admin",
       notifyOn: "mention",
       workspaceId: 0
     });
@@ -945,9 +998,10 @@ describe("LocalPushNotificationSender.whenSettled (accept-first liveness barrier
   ): Promise<LocalPushNotificationSender> {
     await registerAgent({
       name: agentName,
-      kind: "admin",
+      kind: "local",
       displayName: "Admin Bar",
       a2aEndpoint: "https://agent.local/a2a",
+      tenantId: "admin",
       notifyOn: "mention",
       workspaceId: 0
     });
@@ -1070,9 +1124,10 @@ describe("LocalPushNotificationSender.whenSettled (accept-first liveness barrier
     // The barrier must still resolve so ctx.waitUntil can never hang.
     await registerAgent({
       name: "mismatch",
-      kind: "onboarding",
+      kind: "local",
       displayName: "Mismatch",
       a2aEndpoint: "https://agent.local/a2a",
+      tenantId: "onboarding",
       notifyOn: "mention",
       workspaceId: 0
     });

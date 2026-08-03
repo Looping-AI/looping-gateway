@@ -236,6 +236,8 @@ describe("MessageWorkflow — local built-in agents", () => {
 
 describe("MessageWorkflow — remote custom agents", () => {
   const REMOTE_ENDPOINT = "https://remote.example.com/a2a";
+  /** Which agent at that endpoint — sent on every dispatch, and in the token. */
+  const REMOTE_TENANT = "main";
   const REMOTE_CHANNEL = "C_REMOTE";
   const AGENT_NAME = "remote-test";
 
@@ -378,7 +380,7 @@ describe("MessageWorkflow — remote custom agents", () => {
   async function tokenFor(eventId: string): Promise<string> {
     return buildDispatchId(eventId, {
       name: AGENT_NAME,
-      kind: "custom",
+      kind: "remote",
       workspaceId: 0
     });
   }
@@ -386,8 +388,8 @@ describe("MessageWorkflow — remote custom agents", () => {
   beforeEach(async () => {
     await env.DB.prepare(
       `INSERT OR IGNORE INTO agents
-         (name, kind, enabled, notify_on, a2a_endpoint, workspace_id)
-       VALUES ('${AGENT_NAME}', 'custom', 1, 'channel_messages', '${REMOTE_ENDPOINT}', 0)`
+         (name, kind, enabled, notify_on, a2a_endpoint, tenant_id, workspace_id)
+       VALUES ('${AGENT_NAME}', 'remote', 1, 'channel_messages', '${REMOTE_ENDPOINT}', '${REMOTE_TENANT}', 0)`
     ).run();
     await env.DB.prepare(
       `INSERT OR IGNORE INTO agent_channels (channel_id, agent_name, workspace_id)

@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import {
+  audienceFor,
   InvalidEndpointError,
   originOf,
   SHARED_INFRA_ROOTS,
@@ -168,6 +169,45 @@ describe("originOf", () => {
     );
     expect(originOf("https://agent.example.com:8443/path")).toBe(
       "https://agent.example.com:8443"
+    );
+  });
+});
+
+describe("audienceFor", () => {
+  it("is the exact endpoint, not its origin", () => {
+    // The break with the old behaviour. An origin-only audience cannot tell two
+    // agents on one host apart; this can.
+    expect(audienceFor("https://agent.example.com/proactive/a2a")).toBe(
+      "https://agent.example.com/proactive/a2a"
+    );
+  });
+
+  it("gives sibling mounts on one origin different audiences", () => {
+    // The whole point of the change — under `originOf` these were identical.
+    expect(audienceFor("https://host.example.com/reactive/a2a")).not.toBe(
+      audienceFor("https://host.example.com/proactive/a2a")
+    );
+  });
+
+  it("drops any query string or fragment on the registered endpoint", () => {
+    // The agent derives its expected audience from origin + request path, so
+    // anything after the path would make the two sides disagree.
+    expect(audienceFor("https://agent.example.com/a2a?trace=1#frag")).toBe(
+      "https://agent.example.com/a2a"
+    );
+  });
+
+  it("keeps the port, which is part of the origin", () => {
+    expect(audienceFor("https://agent.example.com:8443/a2a")).toBe(
+      "https://agent.example.com:8443/a2a"
+    );
+  });
+
+  it("normalizes a bare origin to its root path", () => {
+    // `new URL("https://h").pathname` is "/", which is also what an agent
+    // mounted at the root computes.
+    expect(audienceFor("https://agent.example.com")).toBe(
+      "https://agent.example.com/"
     );
   });
 });

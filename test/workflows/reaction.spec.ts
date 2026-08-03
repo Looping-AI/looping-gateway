@@ -80,9 +80,10 @@ async function seedPendingTask(
 ): Promise<void> {
   await registerAgent({
     name: token, // unique per task to avoid cross-test collisions
-    kind: "custom",
+    kind: "remote",
     displayName: "Remote",
     a2aEndpoint: "https://agent.example.com/a2a",
+    tenantId: "main",
     notifyOn: "mention",
     workspaceId: 0
   });

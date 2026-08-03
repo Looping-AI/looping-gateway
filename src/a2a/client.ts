@@ -12,6 +12,7 @@ import type {
   Task,
   TaskPushNotificationConfig
 } from "@a2a-js/sdk";
+import { buildAgentCard } from "@/a2a/card";
 import { isMessageResult } from "@/a2a/parts";
 import { classifyA2AError, isPermanentProtocolError } from "@/a2a/errors";
 import { sanitizeSlackText } from "@/util/slack-text";
@@ -30,10 +31,22 @@ import { sanitizeSlackText } from "@/util/slack-text";
 export interface A2ALocalTarget {
   card: AgentCard;
   fetchImpl: typeof fetch;
+  /**
+   * Which agent this is. Local dispatch resolves the Durable Object namespace
+   * before getting here, so nothing routes on it — it travels so the request on
+   * the wire is the same shape either path builds, and so a built-in that
+   * later moves out of process needs no change at the call site.
+   */
+  tenant: string;
 }
 export interface A2ARemoteTarget {
   endpoint: string;
   authToken?: string;
+  /**
+   * Which agent at `endpoint` to address — the remote refuses a request that
+   * names none, since one endpoint may serve several and none is the default.
+   */
+  tenant: string;
 }
 
 /**
@@ -97,7 +110,28 @@ async function buildLocalClient(target: A2ALocalTarget): Promise<Client> {
   return factory.createFromAgentCard(target.card);
 }
 
-/** Build a remote A2A client with auth header injection and accept timeout. */
+/**
+ * Build a remote A2A client that talks to the endpoint we already resolved.
+ *
+ * Built `createFromAgentCard` over a locally-synthesized card — the same shape
+ * {@link buildLocalClient} uses — rather than `createFromUrl`, which would
+ * re-download the agent's card on **every send** and POST to whatever that live
+ * document happens to advertise. Three things were wrong with that:
+ *
+ *  - The audience is computed from the stored endpoint while the request went to
+ *    the card's URL, so the two silently disagreed for any agent whose card did
+ *    not advertise the exact path an admin had typed. That is a 401 on every
+ *    dispatch, from a mismatch nothing surfaced.
+ *  - `validateRemoteEndpoint` ran against the stored value, not the URL actually
+ *    dialed, so the SSRF policy guarded a string we were no longer using.
+ *  - The card was re-fetched unverified, so the signing key pinned at
+ *    registration constrained registration and nothing else.
+ *
+ * `verifyRemoteAgentEndpoint` resolves the endpoint from the signed card once,
+ * at registration, and it is stored. Using it verbatim here makes the POST
+ * target, the stored row and the `aud` one value, and costs one fewer network
+ * round trip per turn.
+ */
 async function buildRemoteClient(target: A2ARemoteTarget): Promise<Client> {
   const options = ClientFactoryOptions.createFrom(
     ClientFactoryOptions.default,
@@ -110,7 +144,15 @@ async function buildRemoteClient(target: A2ARemoteTarget): Promise<Client> {
     }
   );
   const factory = new ClientFactory(options);
-  return factory.createFromUrl(target.endpoint);
+  return factory.createFromAgentCard(
+    buildAgentCard({
+      name: "Remote",
+      description: "remote agent at its registered endpoint",
+      url: target.endpoint,
+      tenant: target.tenant,
+      pushNotifications: true
+    })
+  );
 }
 
 /**
@@ -129,7 +171,10 @@ export async function sendA2ALocal(
 ): Promise<A2AAccept> {
   const client = await buildLocalClient(target);
   return acceptOrProtocolError(
-    () => client.sendMessage(sendRequest(message, taskPushNotificationConfig)),
+    () =>
+      client.sendMessage(
+        sendRequest(message, taskPushNotificationConfig, target.tenant)
+      ),
     message
   );
 }
@@ -144,16 +189,18 @@ export async function sendA2ALocal(
  * finishes. The reply arrives later on the push-notification callback, so no
  * gateway request ever blocks on a model.
  *
- * `tenant` is empty because a gateway agent instance *is* its own tenant: local
- * built-ins are addressed by Durable Object instance, and each remote agent has
- * its own registered endpoint.
+ * `tenant` names which agent at the endpoint the turn is for. A host may serve
+ * several over one endpoint, so the endpoint alone does not identify one, and
+ * spec §8.3.2 requires the value the selected interface declared — which is
+ * what registration recorded on the agent row.
  */
 function sendRequest(
   message: Message,
-  taskPushNotificationConfig: TaskPushNotificationConfig
+  taskPushNotificationConfig: TaskPushNotificationConfig,
+  tenant: string
 ): SendMessageRequest {
   return {
-    tenant: "",
+    tenant,
     message,
     configuration: {
       acceptedOutputModes: ["text/plain"],
@@ -255,7 +302,10 @@ export async function sendA2ARemote(
 ): Promise<A2AAccept> {
   const client = await buildRemoteClient(target);
   return acceptOrProtocolError(
-    () => client.sendMessage(sendRequest(message, taskPushNotificationConfig)),
+    () =>
+      client.sendMessage(
+        sendRequest(message, taskPushNotificationConfig, target.tenant)
+      ),
     message
   );
 }
@@ -294,7 +344,7 @@ export async function cancelA2ARemote(
   const client = await buildRemoteClient(target);
   try {
     const task = await client.cancelTask({
-      tenant: "",
+      tenant: target.tenant,
       id: taskId,
       metadata: undefined
     });

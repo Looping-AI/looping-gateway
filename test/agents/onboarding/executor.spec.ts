@@ -30,7 +30,7 @@ const onboardingRequest = () =>
   makeRequest({
     contextId: "D_ONB:thread-1",
     text: "how does Looping work?",
-    metadata: { user: caller, agentKind: "onboarding" }
+    metadata: { user: caller, agentKind: "local", tenant: "onboarding" }
   });
 
 afterEach(() => vi.restoreAllMocks());
@@ -131,7 +131,7 @@ describe("OnboardingAgentExecutor", () => {
       contextId: "D_ONB:no-user",
       userMessage: userMessage("hello", {
         messageId: "m_nouser",
-        metadata: { agentKind: "onboarding" } // no user field
+        metadata: { agentKind: "local", tenant: "onboarding" } // no user field
       })
     };
     const published: AgentExecutionEvent[] = [];

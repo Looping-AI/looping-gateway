@@ -1,0 +1,16 @@
+-- Flatten `kind` to where an agent runs: 'local' (in-process Durable Object) or
+-- 'remote' (over HTTP at a2a_endpoint).
+--
+-- It used to answer two questions at once — how the agent is reached, and which
+-- built-in it is. 0019 gave every row a `tenant_id` ('admin', 'onboarding', or
+-- the agent's own), so the second question has its own column and the values
+-- here collapse to the first.
+--
+-- 'custom' becomes 'remote' because 'custom' described provenance and never
+-- opposed 'local': an agent is not "custom or in-process", it runs in one place
+-- or the other.
+--
+-- A plain UPDATE, no table rebuild: drizzle's `enum` on a sqlite text column is
+-- a TypeScript-level type only and emits no CHECK (see 0019, where the column is
+-- a bare `kind text NOT NULL`).
+UPDATE `agents` SET `kind` = CASE WHEN `kind` = 'custom' THEN 'remote' ELSE 'local' END;

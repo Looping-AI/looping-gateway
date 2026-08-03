@@ -179,8 +179,9 @@ describe("dispatchMessage", () => {
     const plan: AgentPlan = {
       agent: {
         name: "blocked-agent",
-        kind: "custom",
+        kind: "remote",
         a2aEndpoint: "https://notapproved.example.com/a2a",
+        tenantId: "main",
         workspaceId: 1
       },
       workspaceId: 1,
@@ -276,8 +277,9 @@ describe("collectIfEventDrained (fan-out drain)", () => {
   beforeEach(async () => {
     await registerAgent({
       name: "wf-agent",
-      kind: "custom",
+      kind: "remote",
       a2aEndpoint: "https://a.example.com/a2a",
+      tenantId: "main",
       notifyOn: "channel_messages",
       workspaceId: 0
     });

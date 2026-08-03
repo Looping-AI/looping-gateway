@@ -1,12 +1,19 @@
 import {
   AGENT_CARD_PATH,
+  A2A_PROTOCOL_VERSION,
+  A2A_VERSION_HEADER,
   AgentCard,
   canonicalizeAgentCard,
   verifyAgentCardSignature as createCardVerifier,
   type AgentCardSignature
 } from "@a2a-js/sdk";
 import { base64url, type JWK } from "jose";
-import { originOf, validateRemoteEndpoint } from "./endpoint";
+import {
+  audienceFor,
+  originOf,
+  selectJsonRpcInterface,
+  validateRemoteEndpoint
+} from "./endpoint";
 
 /**
  * "A knows B is really B" — verify a remote agent's **signed AgentCard**
@@ -47,6 +54,11 @@ export interface VerifiedAgentCard {
   pin: CardSigningPin;
   /** Display name sourced from `AgentCard.name`. */
   displayName: string;
+  /**
+   * The JSONRPC endpoint the card advertises — resolved, not guessed. Stored on
+   * the agent row and used verbatim for both the POST target and the `aud`.
+   */
+  endpoint: string;
 }
 
 const FETCH_TIMEOUT_MS = 10_000;
@@ -83,6 +95,64 @@ function protectedHeaderOf(
   }
 }
 
+/**
+ * Read a response body as text, refusing to hold more than
+ * {@link MAX_CARD_LENGTH} of it.
+ *
+ * Streamed rather than `await res.text()`, which buffers the *whole* body before
+ * anything can measure it — so a hostile or broken endpoint could force a
+ * multi-hundred-megabyte allocation and take the isolate down before the size
+ * check it was supposedly subject to ever ran. Checking after buffering is not a
+ * size limit; it is a report on how much was already allocated.
+ *
+ * Reading incrementally caps the allocation at roughly the limit plus one chunk,
+ * since network chunks are transport-bounded (tens of KB), and cancelling the
+ * reader stops the transfer instead of politely draining a body we have already
+ * rejected.
+ *
+ * Bytes are concatenated before decoding, never decoded per chunk: a multi-byte
+ * UTF-8 sequence can straddle a chunk boundary, and decoding the halves
+ * separately corrupts it.
+ */
+async function readCappedText(
+  res: Response,
+  describe: string
+): Promise<string> {
+  const tooLarge = () =>
+    new AgentCardVerificationError(
+      `${describe} exceeds the ${MAX_CARD_LENGTH}-byte limit`
+    );
+
+  // An honest sender lets us refuse before transferring anything. Only an
+  // optimization — a lying or absent header changes nothing, since the
+  // streaming check below is what actually holds.
+  const declared = Number(res.headers.get("content-length"));
+  if (Number.isFinite(declared) && declared > MAX_CARD_LENGTH) throw tooLarge();
+
+  if (!res.body) return "";
+  const reader = res.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > MAX_CARD_LENGTH) {
+      await reader.cancel();
+      throw tooLarge();
+    }
+    chunks.push(value);
+  }
+
+  const buf = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    buf.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return new TextDecoder().decode(buf);
+}
+
 /** GET JSON with an abort timeout and a hard size cap (SSRF/DoS hardening). */
 async function fetchJsonCapped(url: string): Promise<unknown> {
   const controller = new AbortController();
@@ -98,10 +168,9 @@ async function fetchJsonCapped(url: string): Promise<unknown> {
         `fetch ${url} returned HTTP ${res.status}`
       );
     }
-    const text = await res.text();
-    if (text.length > MAX_CARD_LENGTH) {
-      throw new AgentCardVerificationError(`response from ${url} too large`);
-    }
+    // Inside the try, so the abort timeout bounds the body read too — a sender
+    // that trickles bytes forever is a hang, not just a slow response.
+    const text = await readCappedText(res, `response from ${url}`);
     return JSON.parse(text);
   } catch (err) {
     if (err instanceof AgentCardVerificationError) throw err;
@@ -221,19 +290,180 @@ export async function verifyAgentCardSignature(
 }
 
 /**
- * One-shot verifier used at agent registration: fetch the card from the
- * endpoint, verify its signature, and return the pin plus card-derived metadata
- * (displayName) to persist alongside the agent row. The agent's avatar is NOT
- * sourced from the card — `iconUrl` is a gateway-internal, admin-generated value.
+ * Fetch one tenant's AgentCard via `GetExtendedAgentCard` (A2A §3.1.11).
+ *
+ * The well-known path serves a **stub** describing the origin, because that URI
+ * is per-authority (RFC 8615) and a host may serve many agents. A tenant's own
+ * card — its name, skills and signature — is only reachable here, and the call
+ * is authenticated: the agent verifies our gateway JWT before answering, so the
+ * token has to name the tenant being asked about.
+ */
+async function fetchExtendedAgentCard(
+  endpoint: string,
+  tenantId: string,
+  authToken: string
+): Promise<AgentCard> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+  // The request *and* the body read share one try, so the abort timeout covers
+  // both. Clearing it after the fetch resolved would leave the read unbounded —
+  // headers arrive promptly and the body then trickles forever.
+  let text: string;
+  try {
+    const res = await fetch(endpoint, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${authToken}`,
+        [A2A_VERSION_HEADER]: A2A_PROTOCOL_VERSION
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "GetExtendedAgentCard",
+        params: { tenant: tenantId }
+      }),
+      signal: controller.signal
+    });
+    if (!res.ok) {
+      throw new AgentCardVerificationError(
+        `extended card request for tenant '${tenantId}' failed: HTTP ${res.status}`
+      );
+    }
+    text = await readCappedText(
+      res,
+      `the extended card for tenant '${tenantId}'`
+    );
+  } catch (err) {
+    if (err instanceof AgentCardVerificationError) throw err;
+    throw new AgentCardVerificationError(
+      `failed to fetch the extended card for tenant '${tenantId}': ${(err as Error).message}`
+    );
+  } finally {
+    clearTimeout(timer);
+  }
+
+  let body: { result?: unknown; error?: { message?: string } };
+  try {
+    body = JSON.parse(text) as typeof body;
+  } catch {
+    throw new AgentCardVerificationError(
+      `extended card for tenant '${tenantId}' is not valid JSON`
+    );
+  }
+  // JSON-RPC transports errors at HTTP 200, so this is the real failure path —
+  // an unknown tenant or a refused token arrives here, not above.
+  if (body.error) {
+    throw new AgentCardVerificationError(
+      `agent refused the extended card request for tenant '${tenantId}': ` +
+        `${body.error.message ?? "unknown error"}`
+    );
+  }
+  if (!body.result || typeof body.result !== "object") {
+    throw new AgentCardVerificationError(
+      `agent returned no card for tenant '${tenantId}'`
+    );
+  }
+  try {
+    return AgentCard.fromJSON(body.result);
+  } catch (err) {
+    throw new AgentCardVerificationError(
+      `invalid extended card for tenant '${tenantId}': ${(err as Error).message}`
+    );
+  }
+}
+
+export interface VerifyRemoteAgentArgs {
+  /**
+   * Any URL on the agent's host. Only its **origin** is used: the card lives at
+   * a well-known URI, which RFC 8615 defines per-authority, and the card is what
+   * names the real endpoint. So an admin can paste an origin, an endpoint or a
+   * card URL and all three work.
+   */
+  url: string;
+  /** Which agent at that host is being registered. */
+  tenantId: string;
+  allowedDomains?: string[];
+  /**
+   * Mint the gateway JWT authorizing the extended-card call. Injected rather
+   * than imported so these handlers stay offline-testable, the same seam
+   * `AdminToolDeps.verifyEndpoint` uses.
+   */
+  authToken: (audience: string, tenant: string) => Promise<string>;
+}
+
+/**
+ * One-shot verifier used at agent registration.
+ *
+ * Two cards, one key:
+ *
+ *  1. The **stub** at the well-known path establishes who this origin is, and
+ *     its signature resolves the `jku`/`kid` pinned Trust-On-First-Use. It also
+ *     names the real endpoint, which is why nothing here assumes a path.
+ *  2. The **tenant's** card, fetched through `GetExtendedAgentCard`, is what
+ *     the agent row is actually about — its `displayName` comes from here.
+ *
+ * The second is verified against the *same* pin: one origin, one signing key,
+ * so a tenant card signed by anything else is a different provider answering.
+ *
+ * Its declared tenant is checked too. Without that a typo'd tenant id would
+ * register cleanly — the stub verifies no matter which tenant was asked for —
+ * and only surface as a 401 on the first real dispatch, long after the admin
+ * who could fix it has moved on.
+ *
+ * The resolved endpoint is returned to be stored, and is the single value
+ * dispatch POSTs to and derives its `aud` from. Resolving it here rather than
+ * per-send is what stops the two from drifting: the audience is only correct if
+ * it names the URL the request actually goes to.
  */
 export async function verifyRemoteAgentEndpoint(
-  endpoint: string,
-  allowedDomains: string[] = []
+  args: VerifyRemoteAgentArgs
 ): Promise<VerifiedAgentCard> {
-  const card = await fetchAgentCard(endpoint, allowedDomains);
-  const pin = await verifyAgentCardSignature(card, { allowedDomains });
-  return {
-    pin,
-    displayName: card.name
-  };
+  const { url, tenantId } = args;
+  const allowedDomains = args.allowedDomains ?? [];
+
+  const stub = await fetchAgentCard(url, allowedDomains);
+  const pin = await verifyAgentCardSignature(stub, { allowedDomains });
+
+  // Where the agent says to call it, rather than where an admin guessed.
+  const endpoint = selectJsonRpcInterface(stub).url;
+
+  // The card decides where we POST, so it must not be able to point us at a
+  // host it never authenticated. We pinned *this* origin's signing key; an
+  // interface elsewhere would mean dispatching to somewhere the signature says
+  // nothing about, and re-pointing an approved agent at an internal address is
+  // exactly the SSRF shape `validateRemoteEndpoint` exists to stop.
+  if (originOf(endpoint) !== originOf(url)) {
+    throw new AgentCardVerificationError(
+      `agent card at ${originOf(url)} advertises its endpoint on a different ` +
+        `origin (${originOf(endpoint)}); one origin serves one signing identity`
+    );
+  }
+  // Belt and braces: the origin matched a card we fetched, but the resolved URL
+  // is what will be dialed, so it passes the same policy on its own terms.
+  validateRemoteEndpoint(endpoint, allowedDomains);
+
+  const token = await args.authToken(audienceFor(endpoint), tenantId);
+  const card = await fetchExtendedAgentCard(endpoint, tenantId, token);
+
+  const tenantPin = await verifyAgentCardSignature(card, { allowedDomains });
+  if (
+    tenantPin.cardSigningJku !== pin.cardSigningJku ||
+    tenantPin.cardSigningKid !== pin.cardSigningKid
+  ) {
+    throw new AgentCardVerificationError(
+      `the card for tenant '${tenantId}' is signed by a different key than the ` +
+        `origin's own card — one origin serves one signing identity`
+    );
+  }
+
+  const declared = selectJsonRpcInterface(card).tenant ?? "";
+  if (declared !== tenantId) {
+    throw new AgentCardVerificationError(
+      `the agent returned a card declaring tenant '${declared || "<none>"}' ` +
+        `for a request naming '${tenantId}'`
+    );
+  }
+
+  return { pin, displayName: card.name, endpoint };
 }

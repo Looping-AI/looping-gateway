@@ -77,7 +77,11 @@ export class OnboardingAgentExecutor implements AgentExecutor {
         // user is a guaranteed precondition (sender-less events are dropped by
         // the classifier), so treat it as required — the same contract the
         // admin agent applies to its workspace id.
-        if (metadata.agentKind !== "onboarding" || metadata.user == null) {
+        if (
+          metadata.agentKind !== "local" ||
+          metadata.tenant !== "onboarding" ||
+          metadata.user == null
+        ) {
           throw new Error(
             "[onboarding-executor] expected onboarding metadata with a user"
           );

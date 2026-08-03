@@ -105,6 +105,7 @@ export async function resolveMessage(
       name: t.agent.name,
       kind: t.agent.kind,
       a2aEndpoint: t.agent.a2aEndpoint,
+      tenantId: t.agent.tenantId,
       workspaceId: t.agent.workspaceId
     },
     workspaceId: t.workspaceId,
@@ -136,20 +137,31 @@ export async function dispatchMessage(
   p: MessageWorkflowParams,
   plan: AgentPlan
 ): Promise<DispatchResult> {
-  let metadata: DispatchMetadata; // per-kind extras only
-  if (plan.agent.kind === "admin") {
+  // Per-agent extras only. *Which* agent this is comes from `tenantId`, the same
+  // field the dispatcher routes on; `kind` only says whether it runs in-process.
+  let metadata: DispatchMetadata;
+  const local = plan.agent.kind === "local";
+  if (local && plan.agent.tenantId === "admin") {
     if (plan.workspaceId == null) {
       throw new Error("BUG: admin agent resolved without a workspaceId");
     }
-    metadata = { agentKind: "admin", adminWorkspaceId: plan.workspaceId };
-  } else if (plan.agent.kind === "onboarding") {
-    metadata = { agentKind: "onboarding" };
+    metadata = {
+      agentKind: "local",
+      tenant: "admin",
+      adminWorkspaceId: plan.workspaceId
+    };
+  } else if (local && plan.agent.tenantId === "onboarding") {
+    metadata = { agentKind: "local", tenant: "onboarding" };
   } else {
     const { workspaceId } = plan;
     if (workspaceId == null) {
-      throw new Error("BUG: custom agent resolved without a workspaceId");
+      throw new Error("BUG: remote agent resolved without a workspaceId");
     }
-    metadata = { agentKind: "custom", workspaceId };
+    metadata = {
+      agentKind: "remote",
+      tenant: plan.agent.tenantId,
+      workspaceId
+    };
   }
 
   try {

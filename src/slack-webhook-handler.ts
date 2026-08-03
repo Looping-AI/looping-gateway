@@ -630,9 +630,9 @@ export async function handleSlackEvent(
             });
             return;
           }
-          // One workflow instance per event handles every woken agent (local
-          // built-in and remote custom); it dispatches each by `agent.kind` and
-          // owns the single collect-reaction signal for the event.
+          // One workflow instance per event handles every woken agent, local or
+          // remote; it dispatches each by `agent.kind` and owns the single
+          // collect-reaction signal for the event.
           await Promise.allSettled([
             addStopReaction(base),
             triggerReactionWorkflow(env.REACTION_WORKFLOW, base),

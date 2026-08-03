@@ -74,8 +74,9 @@ function hitlTask(
 beforeEach(async () => {
   await registerAgent({
     name: "remoteagent",
-    kind: "custom",
+    kind: "remote",
     a2aEndpoint: "https://agent.example.com/a2a",
+    tenantId: "main",
     notifyOn: "mention",
     workspaceId: 0
   });

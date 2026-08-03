@@ -20,6 +20,8 @@ import {
 } from "../helpers/a2a";
 
 const ENDPOINT = "https://remote.example.com/a2a";
+/** Which agent at that endpoint — one endpoint may serve several. */
+const TENANT = "main";
 
 /** The push config the gateway hands a remote agent (v1.0 flattened shape). */
 const PUSH: TaskPushNotificationConfig = {
@@ -122,7 +124,7 @@ describe("sendA2ARemote — async remote accept", () => {
     stubRemote("task-1", calls);
 
     const result = await sendA2ARemote(
-      { endpoint: ENDPOINT, authToken: "tok-123" },
+      { endpoint: ENDPOINT, authToken: "tok-123", tenant: TENANT },
       userMessage("hi"),
       PUSH
     );
@@ -174,7 +176,7 @@ describe("sendA2ARemote — async remote accept", () => {
     void calls;
 
     const result = await sendA2ARemote(
-      { endpoint: ENDPOINT, authToken: "t" },
+      { endpoint: ENDPOINT, authToken: "t", tenant: TENANT },
       userMessage("hi"),
       { ...PUSH, token: "n" }
     );
@@ -243,7 +245,7 @@ describe("sendA2ARemote — A2A protocol refusals", () => {
     async (code) => {
       stubRemoteRpc((id) => rpcError(id, code));
       const out = await sendA2ARemote(
-        { endpoint: ENDPOINT, authToken: "t" },
+        { endpoint: ENDPOINT, authToken: "t", tenant: TENANT },
         userMessage("hi"),
         PUSH
       );
@@ -260,7 +262,7 @@ describe("sendA2ARemote — A2A protocol refusals", () => {
     stubRemoteRpc((id) => rpcError(id, -32603, "boom"));
     await expect(
       sendA2ARemote(
-        { endpoint: ENDPOINT, authToken: "t" },
+        { endpoint: ENDPOINT, authToken: "t", tenant: TENANT },
         userMessage("hi"),
         PUSH
       )
@@ -276,7 +278,7 @@ describe("sendA2ARemote — A2A protocol refusals", () => {
     );
     await expect(
       sendA2ARemote(
-        { endpoint: ENDPOINT, authToken: "t" },
+        { endpoint: ENDPOINT, authToken: "t", tenant: TENANT },
         userMessage("hi"),
         PUSH
       )
@@ -295,7 +297,7 @@ describe("cancelA2ARemote — A2A tasks/cancel", () => {
     stubRemoteRpc((id) => rpcResult(id, Task.toJSON(canceled)));
 
     const out = await cancelA2ARemote(
-      { endpoint: ENDPOINT, authToken: "t" },
+      { endpoint: ENDPOINT, authToken: "t", tenant: TENANT },
       "task-9"
     );
     expect(out.kind).toBe("canceled");
@@ -307,7 +309,7 @@ describe("cancelA2ARemote — A2A tasks/cancel", () => {
   it("maps -32002 to not_cancelable (already terminal)", async () => {
     stubRemoteRpc((id) => rpcError(id, -32002));
     const out = await cancelA2ARemote(
-      { endpoint: ENDPOINT, authToken: "t" },
+      { endpoint: ENDPOINT, authToken: "t", tenant: TENANT },
       "task-9"
     );
     expect(out).toEqual({ kind: "not_cancelable" });
@@ -316,7 +318,7 @@ describe("cancelA2ARemote — A2A tasks/cancel", () => {
   it("maps -32001 to not_found (idempotent no-op)", async () => {
     stubRemoteRpc((id) => rpcError(id, -32001));
     const out = await cancelA2ARemote(
-      { endpoint: ENDPOINT, authToken: "t" },
+      { endpoint: ENDPOINT, authToken: "t", tenant: TENANT },
       "task-9"
     );
     expect(out).toEqual({ kind: "not_found" });
@@ -325,7 +327,7 @@ describe("cancelA2ARemote — A2A tasks/cancel", () => {
   it("maps -32004 to unsupported (agent doesn't implement cancel)", async () => {
     stubRemoteRpc((id) => rpcError(id, -32004));
     const out = await cancelA2ARemote(
-      { endpoint: ENDPOINT, authToken: "t" },
+      { endpoint: ENDPOINT, authToken: "t", tenant: TENANT },
       "task-9"
     );
     expect(out).toEqual({ kind: "unsupported" });
@@ -334,7 +336,7 @@ describe("cancelA2ARemote — A2A tasks/cancel", () => {
   it("maps any other error code to error", async () => {
     stubRemoteRpc((id) => rpcError(id, -32603, "boom"));
     const out = await cancelA2ARemote(
-      { endpoint: ENDPOINT, authToken: "t" },
+      { endpoint: ENDPOINT, authToken: "t", tenant: TENANT },
       "task-9"
     );
     expect(out.kind).toBe("error");

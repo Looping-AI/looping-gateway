@@ -6,7 +6,7 @@ import {
   InMemoryTaskStore,
   type AgentExecutor
 } from "@a2a-js/sdk/server";
-import type { LocalAgentKind } from "@/db/models/agents";
+import type { BuiltinTenant } from "@/db/models/agents";
 import { LocalPushNotificationSender } from "@/a2a/notifications/local";
 import { serveA2A } from "@/a2a/serve";
 
@@ -28,7 +28,7 @@ export abstract class A2AAgent extends Agent<Env> {
 
   protected abstract card(): AgentCard;
   protected abstract executor(): AgentExecutor;
-  protected abstract builtinKind(): LocalAgentKind;
+  protected abstract builtinTenant(): BuiltinTenant;
 
   private getHandler(): DefaultRequestHandler {
     if (!this.handler) {
@@ -36,7 +36,7 @@ export abstract class A2AAgent extends Agent<Env> {
       const pushNotificationStore = new InMemoryPushNotificationStore();
       this.sender = new LocalPushNotificationSender(
         pushNotificationStore,
-        this.builtinKind()
+        this.builtinTenant()
       );
       this.handler = new DefaultRequestHandler(
         card,

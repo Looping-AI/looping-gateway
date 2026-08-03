@@ -21,7 +21,7 @@ export class OnboardingAgent extends A2AAgent {
     });
   }
 
-  protected builtinKind(): "onboarding" {
+  protected builtinTenant(): "onboarding" {
     return "onboarding";
   }
 

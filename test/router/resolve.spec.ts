@@ -24,13 +24,13 @@ beforeEach(async () => {
 
   // Custom agents: weather is mention-only, sales is a channel_messages co-worker.
   await env.DB.prepare(
-    "INSERT OR IGNORE INTO agents (name, kind, enabled, workspace_id, a2a_endpoint, notify_on) VALUES ('weather','custom',1,0,'https://example.com/weather','mention')"
+    "INSERT OR IGNORE INTO agents (name, kind, enabled, workspace_id, a2a_endpoint, tenant_id, notify_on) VALUES ('weather','remote',1,0,'https://example.com/weather','main','mention')"
   ).run();
   await env.DB.prepare(
-    "INSERT OR IGNORE INTO agents (name, kind, enabled, workspace_id, a2a_endpoint, notify_on) VALUES ('sales','custom',1,0,'https://example.com/sales','channel_messages')"
+    "INSERT OR IGNORE INTO agents (name, kind, enabled, workspace_id, a2a_endpoint, tenant_id, notify_on) VALUES ('sales','remote',1,0,'https://example.com/sales','main','channel_messages')"
   ).run();
   await env.DB.prepare(
-    "INSERT OR IGNORE INTO agents (name, kind, enabled, workspace_id, a2a_endpoint, notify_on) VALUES ('off','custom',0,0,'https://example.com/off','channel_messages')"
+    "INSERT OR IGNORE INTO agents (name, kind, enabled, workspace_id, a2a_endpoint, tenant_id, notify_on) VALUES ('off','remote',0,0,'https://example.com/off','main','channel_messages')"
   ).run();
 
   // C_WEATHER → weather (mention) only. C_MULTI → weather + sales.

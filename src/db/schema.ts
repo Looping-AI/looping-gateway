@@ -100,13 +100,30 @@ export const agents = sqliteTable(
   "agents",
   {
     name: text("name").primaryKey(),
-    kind: text("kind", { enum: ["admin", "onboarding", "custom"] }).notNull(),
+    // Where this agent runs, and nothing else. `local` is reached in-process
+    // through a Durable Object stub; `remote` over HTTP at `a2aEndpoint`.
+    // *Which* agent it is — including which built-in — is `tenantId`, on both
+    // paths. The gateway sets this itself; no admin chooses it, which is what
+    // keeps a registered agent from claiming to be in-process.
+    kind: text("kind", { enum: ["local", "remote"] }).notNull(),
     displayName: text("display_name"),
     // Optional gateway-hosted, admin-generated avatar URL (never from the AgentCard).
     iconUrl: text("icon_url"),
     // Always set: custom agents carry a real HTTP endpoint; built-ins use an
-    // `http://{name}.local` sentinel. Routing is by `kind`, not this value.
+    // `http://{name}.local` sentinel. Whether an agent is local is decided by
+    // `kind`, not by this value.
     a2aEndpoint: text("a2a_endpoint").notNull(),
+    // Which agent at that location. One origin serves many agents over a single
+    // A2A endpoint (spec §8.3.2), and the tenant is what picks between them —
+    // dispatch sends it on every request and the remote refuses a request
+    // without it.
+    //
+    // Required, and deliberately *without* a default: a default would make it
+    // optional at every insert forever and turn `''` into a second sentinel
+    // beside `http://{name}.local`. Built-ins carry a real tenant too
+    // (`admin`, `onboarding`) rather than an empty one, so the column means the
+    // same thing in every row — see `localNamespaceFor`, which routes on it.
+    tenantId: text("tenant_id").notNull(),
     // Pinned AgentCard signing identity for custom agents (Trust-On-First-Use).
     // Verified at registration; a later card signed by a different key is
     // rejected. Null for built-in local agents (admin/onboarding are unsigned).
@@ -127,7 +144,11 @@ export const agents = sqliteTable(
   },
   (t) => [
     index("idx_agents_workspace_id").on(t.workspaceId),
-    check("agents_name_lowercase", sql`${t.name} = lower(${t.name})`)
+    check("agents_name_lowercase", sql`${t.name} = lower(${t.name})`),
+    // "Required" enforced by the database, not by every insert remembering.
+    // `NOT NULL` alone would still accept `''`, which is the sentinel this
+    // column exists to avoid.
+    check("agents_tenant_id_nonempty", sql`${t.tenantId} <> ''`)
   ]
 );
 

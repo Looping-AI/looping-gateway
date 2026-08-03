@@ -71,7 +71,7 @@ export async function handleRemoteAgentNotification(
   // Built-in agents deliver in-process via the trusted local sender and never
   // hold a card signing key, so a token that maps to one here is illegitimate —
   // reject it explicitly rather than leaning on the missing-key check below.
-  if (agent.kind !== "custom") {
+  if (agent.kind !== "remote") {
     console.error("[remote-notifications] built-in agent token on callback", {
       agent: row.agentName,
       kind: agent.kind
