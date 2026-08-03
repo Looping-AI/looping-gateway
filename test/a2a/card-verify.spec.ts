@@ -5,6 +5,7 @@ import { buildAgentCard } from "@/a2a/card";
 import {
   AgentCardVerificationError,
   canonicalCardPayload,
+  fetchAgentCard,
   verifyAgentCardSignature,
   verifyRemoteAgentEndpoint
 } from "@/a2a/card-verify";
@@ -43,6 +44,94 @@ async function signCard(
 
 afterEach(() => {
   vi.unstubAllGlobals();
+});
+
+/**
+ * The size cap on anything this module downloads.
+ *
+ * A cap enforced *after* `await res.text()` is not a cap: the whole body is
+ * already resident by the time it is measured, so a hostile endpoint gets its
+ * allocation either way and the check only reports how much it took. These
+ * assert the transfer stops instead — which is why they count chunks pulled
+ * rather than just expecting a rejection. A drain-then-reject implementation
+ * passes a rejection test and fails these.
+ */
+describe("response size cap", () => {
+  const CAP = 256 * 1024;
+  const CHUNK = 16 * 1024;
+
+  /**
+   * A body that would be ~64 MB if fully drained, emitting 16 KB at a time and
+   * counting how many chunks the reader actually pulled.
+   */
+  function hugeBody(pulls: { count: number }, declareLength = false) {
+    const chunk = new Uint8Array(CHUNK).fill(0x20); // spaces: valid UTF-8
+    const total = 4096;
+    const stream = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (pulls.count >= total) {
+          controller.close();
+          return;
+        }
+        pulls.count += 1;
+        controller.enqueue(chunk);
+      }
+    });
+    return new Response(stream, {
+      headers: declareLength ? { "content-length": String(CHUNK * total) } : {}
+    });
+  }
+
+  it("stops pulling a card body once it passes the cap", async () => {
+    const pulls = { count: 0 };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => hugeBody(pulls))
+    );
+
+    await expect(
+      fetchAgentCard("https://agent.example.com/a2a", ["agent.example.com"])
+    ).rejects.toThrow(/exceeds the \d+-byte limit/);
+
+    // Roughly cap/chunk pulls, not the 4096 a full drain would take. The bound
+    // is generous — the point is that it is bounded by the cap at all.
+    expect(pulls.count).toBeLessThan(CAP / CHUNK + 4);
+  });
+
+  it("refuses without reading the body when content-length declares it", async () => {
+    // The cheap path for an honest sender: the header alone is disqualifying,
+    // so the implementation never reaches `res.body`.
+    const pulls = { count: 0 };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => hugeBody(pulls, true))
+    );
+
+    await expect(
+      fetchAgentCard("https://agent.example.com/a2a", ["agent.example.com"])
+    ).rejects.toThrow(/exceeds the \d+-byte limit/);
+
+    // At most the one chunk a ReadableStream pulls to prime its own queue when
+    // the Response is constructed — that happens before anything reads it, and
+    // is the fixture's doing rather than the code under test.
+    expect(pulls.count).toBeLessThanOrEqual(1);
+  });
+
+  it("still accepts a body that fits", async () => {
+    // The cap must not truncate or reject a legitimate card — including one
+    // whose multi-byte characters straddle a chunk boundary, which is why the
+    // reader concatenates bytes before decoding rather than decoding per chunk.
+    const card = { ...baseCard(), description: "é".repeat(20_000) };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => Response.json(card))
+    );
+
+    const fetched = await fetchAgentCard("https://agent.example.com/a2a", [
+      "agent.example.com"
+    ]);
+    expect(fetched.description).toBe("é".repeat(20_000));
+  });
 });
 
 describe("canonicalCardPayload", () => {

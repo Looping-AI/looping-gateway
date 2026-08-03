@@ -95,6 +95,64 @@ function protectedHeaderOf(
   }
 }
 
+/**
+ * Read a response body as text, refusing to hold more than
+ * {@link MAX_CARD_LENGTH} of it.
+ *
+ * Streamed rather than `await res.text()`, which buffers the *whole* body before
+ * anything can measure it — so a hostile or broken endpoint could force a
+ * multi-hundred-megabyte allocation and take the isolate down before the size
+ * check it was supposedly subject to ever ran. Checking after buffering is not a
+ * size limit; it is a report on how much was already allocated.
+ *
+ * Reading incrementally caps the allocation at roughly the limit plus one chunk,
+ * since network chunks are transport-bounded (tens of KB), and cancelling the
+ * reader stops the transfer instead of politely draining a body we have already
+ * rejected.
+ *
+ * Bytes are concatenated before decoding, never decoded per chunk: a multi-byte
+ * UTF-8 sequence can straddle a chunk boundary, and decoding the halves
+ * separately corrupts it.
+ */
+async function readCappedText(
+  res: Response,
+  describe: string
+): Promise<string> {
+  const tooLarge = () =>
+    new AgentCardVerificationError(
+      `${describe} exceeds the ${MAX_CARD_LENGTH}-byte limit`
+    );
+
+  // An honest sender lets us refuse before transferring anything. Only an
+  // optimization — a lying or absent header changes nothing, since the
+  // streaming check below is what actually holds.
+  const declared = Number(res.headers.get("content-length"));
+  if (Number.isFinite(declared) && declared > MAX_CARD_LENGTH) throw tooLarge();
+
+  if (!res.body) return "";
+  const reader = res.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > MAX_CARD_LENGTH) {
+      await reader.cancel();
+      throw tooLarge();
+    }
+    chunks.push(value);
+  }
+
+  const buf = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    buf.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return new TextDecoder().decode(buf);
+}
+
 /** GET JSON with an abort timeout and a hard size cap (SSRF/DoS hardening). */
 async function fetchJsonCapped(url: string): Promise<unknown> {
   const controller = new AbortController();
@@ -110,10 +168,9 @@ async function fetchJsonCapped(url: string): Promise<unknown> {
         `fetch ${url} returned HTTP ${res.status}`
       );
     }
-    const text = await res.text();
-    if (text.length > MAX_CARD_LENGTH) {
-      throw new AgentCardVerificationError(`response from ${url} too large`);
-    }
+    // Inside the try, so the abort timeout bounds the body read too — a sender
+    // that trickles bytes forever is a hang, not just a slow response.
+    const text = await readCappedText(res, `response from ${url}`);
     return JSON.parse(text);
   } catch (err) {
     if (err instanceof AgentCardVerificationError) throw err;
@@ -248,9 +305,12 @@ async function fetchExtendedAgentCard(
 ): Promise<AgentCard> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
-  let res: Response;
+  // The request *and* the body read share one try, so the abort timeout covers
+  // both. Clearing it after the fetch resolved would leave the read unbounded —
+  // headers arrive promptly and the body then trickles forever.
+  let text: string;
   try {
-    res = await fetch(endpoint, {
+    const res = await fetch(endpoint, {
       method: "POST",
       headers: {
         "content-type": "application/json",
@@ -265,24 +325,22 @@ async function fetchExtendedAgentCard(
       }),
       signal: controller.signal
     });
+    if (!res.ok) {
+      throw new AgentCardVerificationError(
+        `extended card request for tenant '${tenantId}' failed: HTTP ${res.status}`
+      );
+    }
+    text = await readCappedText(
+      res,
+      `the extended card for tenant '${tenantId}'`
+    );
   } catch (err) {
+    if (err instanceof AgentCardVerificationError) throw err;
     throw new AgentCardVerificationError(
       `failed to fetch the extended card for tenant '${tenantId}': ${(err as Error).message}`
     );
   } finally {
     clearTimeout(timer);
-  }
-
-  if (!res.ok) {
-    throw new AgentCardVerificationError(
-      `extended card request for tenant '${tenantId}' failed: HTTP ${res.status}`
-    );
-  }
-  const text = await res.text();
-  if (text.length > MAX_CARD_LENGTH) {
-    throw new AgentCardVerificationError(
-      `extended card for tenant '${tenantId}' too large`
-    );
   }
 
   let body: { result?: unknown; error?: { message?: string } };
