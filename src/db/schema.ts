@@ -69,8 +69,9 @@ export const slackChannels = sqliteTable(
 /**
  * Workspace admins — one row per (workspace, user). This join table IS the
  * source of `adminWorkspaces`; being a member of a workspace's admin channel
- * lands a row here. FK is declared for intent/tests; cascades are done
- * explicitly in code (D1 does not reliably enforce foreign_keys at runtime).
+ * lands a row here. D1 enforces foreign keys at runtime and these are declared
+ * `ON DELETE no action`, so cascades are done explicitly in code — a parent
+ * delete is rejected outright while children still reference it.
  */
 export const workspaceAdmins = sqliteTable(
   "workspace_admins",
