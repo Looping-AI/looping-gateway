@@ -629,7 +629,11 @@ describe("dispatchToAgent (tenant)", () => {
 
     const token = posts.at(-1)?.authorization?.replace(/^Bearer /, "") ?? "";
     const claims = decodeJwt(token);
-    expect(claims["https://looping.ai/tenant"]).toBe("proactive");
+    // Spelled out rather than imported from `TENANT_CLAIM` on purpose: this is
+    // the wire contract with `@loopingai/core`, which reads this exact key and
+    // refuses a token without it. Asserting through the constant would follow
+    // the constant, so a rename here would pass while every remote 401s.
+    expect(claims["https://loopingai.org/tenant"]).toBe("proactive");
     expect(claims.aud).toBe(ENDPOINT);
   });
 
