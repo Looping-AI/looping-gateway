@@ -50,6 +50,8 @@ const user = (slackUserId: string): UserAuthContext => ({
 const ENDPOINT = "https://remote.example.com/a2a";
 
 interface RemotePost {
+  /** Where the request actually went — the POST target, not what was stored. */
+  url: string;
   authorization: string | null;
   message: Message;
   /** Which agent at the endpoint the request addressed (A2A §8.3.2). */
@@ -94,6 +96,7 @@ async function readRpc(
     params?: { message?: unknown; tenant?: string };
   };
   posts.push({
+    url: request.url,
     authorization: request.headers.get("authorization"),
     message: Message.fromJSON(rpc.params?.message ?? {}),
     tenant: rpc.params?.tenant
@@ -101,7 +104,12 @@ async function readRpc(
   return rpc;
 }
 
-function stubRemote(posts: RemotePost[], notices?: SlackNotice[]) {
+function stubRemote(
+  posts: RemotePost[],
+  notices?: SlackNotice[],
+  /** Card fetches the remote received — expected to stay empty at dispatch. */
+  gets?: string[]
+) {
   const card = buildAgentCard({
     name: "Remote",
     description: "remote dispatch test agent",
@@ -116,6 +124,7 @@ function stubRemote(posts: RemotePost[], notices?: SlackNotice[]) {
       if (request.url.includes("chat.postMessage")) {
         return captureSlackNotice(request, notices);
       }
+      if (method === "GET") gets?.push(request.url);
       if (method === "POST") {
         const rpc = await readRpc(request, posts);
         // `CancelTask` answers with the Task itself; `SendMessage` answers with
@@ -581,6 +590,88 @@ describe("dispatchToAgent (tenant)", () => {
     const claims = decodeJwt(token);
     expect(claims["https://looping.ai/tenant"]).toBe("proactive");
     expect(claims.aud).toBe(ENDPOINT);
+  });
+
+  it("posts to the registered endpoint and audiences that same URL", async () => {
+    // The two halves of one fact, asserted together on purpose.
+    //
+    // These used to come from different places: the request went wherever the
+    // agent's live card advertised, while `aud` was computed from the string an
+    // admin typed at registration. They agreed only when those coincided, so an
+    // agent on any path but the guessed one got a correctly-addressed request
+    // carrying an audience naming somewhere else — a 401 on every dispatch,
+    // from a mismatch neither side could see. Registration resolves the
+    // endpoint from the card once; both now read that single stored value.
+    //
+    // `/api/v2/agent` rather than `/a2a` because a convention that is only ever
+    // exercised at its default value is not a convention that has been tested.
+    const custom = "https://remote.example.com/api/v2/agent";
+    const posts: RemotePost[] = [];
+    await setPublicUrl("https://gateway.test");
+    await setAllowedRemoteAgentDomains(["example.com"]);
+    stubRemote(posts);
+
+    await dispatchToAgent(
+      {
+        name: "alpha",
+        kind: "custom",
+        a2aEndpoint: custom,
+        tenantId: "reactive",
+        workspaceId: 7
+      },
+      {
+        eventId: "Ev-path",
+        text: "hello",
+        channelId: "C1",
+        channelName: "general",
+        threadTs: "1.1",
+        messageTs: "1.1",
+        user: user("U1"),
+        metadata: { agentKind: "custom", workspaceId: 7 }
+      }
+    );
+
+    const sent = posts.at(-1);
+    expect(sent?.url).toBe(custom);
+    const claims = decodeJwt(
+      sent?.authorization?.replace(/^Bearer /, "") ?? ""
+    );
+    expect(claims.aud).toBe(custom);
+  });
+
+  it("does not re-download the agent card on every send", async () => {
+    // The card is fetched and verified once, at registration, and the endpoint
+    // it named is stored. Re-resolving per dispatch would re-read an unverified
+    // document, which is what let the POST target drift away from the audience
+    // — and it cost a round trip on every turn.
+    const gets: string[] = [];
+    const posts: RemotePost[] = [];
+    await setPublicUrl("https://gateway.test");
+    await setAllowedRemoteAgentDomains(["example.com"]);
+    stubRemote(posts, undefined, gets);
+
+    await dispatchToAgent(
+      {
+        name: "alpha",
+        kind: "custom",
+        a2aEndpoint: ENDPOINT,
+        tenantId: "reactive",
+        workspaceId: 7
+      },
+      {
+        eventId: "Ev-nofetch",
+        text: "hello",
+        channelId: "C1",
+        channelName: "general",
+        threadTs: "1.1",
+        messageTs: "1.1",
+        user: user("U1"),
+        metadata: { agentKind: "custom", workspaceId: 7 }
+      }
+    );
+
+    expect(posts.length).toBe(1);
+    expect(gets).toEqual([]);
   });
 
   it("dispatches a custom agent over HTTP even when its tenant names a built-in", async () => {

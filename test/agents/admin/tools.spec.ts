@@ -42,12 +42,13 @@ function deps(wsId: number, c: UserAuthContext | null): AdminToolDeps {
     ctx: c,
     wsId,
     // Offline stub: pretend every endpoint serves a validly-signed card.
-    verifyEndpoint: async (endpoint) => ({
+    verifyEndpoint: async (url) => ({
       pin: {
-        cardSigningJku: `${new URL(endpoint).origin}/.well-known/jwks.json`,
+        cardSigningJku: `${new URL(url).origin}/.well-known/jwks.json`,
         cardSigningKid: "test-kid"
       },
-      displayName: "Stubbed Agent"
+      displayName: "Stubbed Agent",
+      endpoint: url
     })
   };
 }
@@ -329,12 +330,13 @@ describe("admin tools — card-signing verification + pin (TOFU)", () => {
 
   it("persists the verified signing pin on register", async () => {
     const wsId = await freshWsId("tools-ws-pin");
-    const d = depsWith(wsId, ctx({ adminWorkspaces: [wsId] }), async () => ({
+    const d = depsWith(wsId, ctx({ adminWorkspaces: [wsId] }), async (url) => ({
       pin: {
         cardSigningJku: "https://signed.example.com/.well-known/jwks.json",
         cardSigningKid: "pin-kid-1"
       },
-      displayName: "Pinned Agent"
+      displayName: "Pinned Agent",
+      endpoint: url
     }));
     const reg = await agentsCreate(d, {
       name: "pinned-agent",
@@ -372,12 +374,13 @@ describe("admin tools — card-signing verification + pin (TOFU)", () => {
     const original = depsWith(
       wsId,
       ctx({ adminWorkspaces: [wsId] }),
-      async () => ({
+      async (url) => ({
         pin: {
           cardSigningJku: "https://a.example.com/.well-known/jwks.json",
           cardSigningKid: "key-A"
         },
-        displayName: "Agent A"
+        displayName: "Agent A",
+        endpoint: url
       })
     );
     await agentsCreate(original, {
@@ -391,12 +394,13 @@ describe("admin tools — card-signing verification + pin (TOFU)", () => {
     const repointed = depsWith(
       wsId,
       ctx({ adminWorkspaces: [wsId] }),
-      async () => ({
+      async (url) => ({
         pin: {
           cardSigningJku: "https://b.example.com/.well-known/jwks.json",
           cardSigningKid: "key-B"
         },
-        displayName: "Agent B"
+        displayName: "Agent B",
+        endpoint: url
       })
     );
     const res = await agentsUpdate(repointed, {
@@ -419,9 +423,10 @@ describe("admin tools — card-signing verification + pin (TOFU)", () => {
       cardSigningJku: "https://same.example.com/.well-known/jwks.json",
       cardSigningKid: "key-same"
     };
-    const d = depsWith(wsId, ctx({ adminWorkspaces: [wsId] }), async () => ({
+    const d = depsWith(wsId, ctx({ adminWorkspaces: [wsId] }), async (url) => ({
       pin,
-      displayName: "Same Agent"
+      displayName: "Same Agent",
+      endpoint: url
     }));
     await agentsCreate(d, {
       name: "tofu-ok-agent",
@@ -451,12 +456,13 @@ describe("admin tools — derive displayName from card (iconUrl is never card-so
 
   it("uses card name as displayName and leaves iconUrl unset at register", async () => {
     const wsId = await freshWsId("tools-ws-derive-a");
-    const d = depsWith(wsId, ctx({ adminWorkspaces: [wsId] }), async () => ({
+    const d = depsWith(wsId, ctx({ adminWorkspaces: [wsId] }), async (url) => ({
       pin: {
         cardSigningJku: "https://derive.example.com/.well-known/jwks.json",
         cardSigningKid: "k1"
       },
-      displayName: "From Card"
+      displayName: "From Card",
+      endpoint: url
     }));
     await agentsCreate(d, {
       name: "derive-agent",
@@ -472,12 +478,13 @@ describe("admin tools — derive displayName from card (iconUrl is never card-so
 
   it("explicit displayName at register overrides the card name", async () => {
     const wsId = await freshWsId("tools-ws-derive-b");
-    const d = depsWith(wsId, ctx({ adminWorkspaces: [wsId] }), async () => ({
+    const d = depsWith(wsId, ctx({ adminWorkspaces: [wsId] }), async (url) => ({
       pin: {
         cardSigningJku: "https://derive2.example.com/.well-known/jwks.json",
         cardSigningKid: "k2"
       },
-      displayName: "From Card"
+      displayName: "From Card",
+      endpoint: url
     }));
     await agentsCreate(d, {
       name: "derive-override-agent",
@@ -492,12 +499,13 @@ describe("admin tools — derive displayName from card (iconUrl is never card-so
 
   it("rejects an admin-supplied displayName with a channel-wide mention", async () => {
     const wsId = await freshWsId("tools-ws-derive-broadcast");
-    const d = depsWith(wsId, ctx({ adminWorkspaces: [wsId] }), async () => ({
+    const d = depsWith(wsId, ctx({ adminWorkspaces: [wsId] }), async (url) => ({
       pin: {
         cardSigningJku: "https://bcast.example.com/.well-known/jwks.json",
         cardSigningKid: "kb"
       },
-      displayName: "From Card"
+      displayName: "From Card",
+      endpoint: url
     }));
     const created = (await agentsCreate(d, {
       name: "broadcast-name-agent",
@@ -531,9 +539,10 @@ describe("admin tools — derive displayName from card (iconUrl is never card-so
       cardSigningJku: "https://rederive.example.com/.well-known/jwks.json",
       cardSigningKid: "k3"
     };
-    const d = depsWith(wsId, ctx({ adminWorkspaces: [wsId] }), async () => ({
+    const d = depsWith(wsId, ctx({ adminWorkspaces: [wsId] }), async (url) => ({
       pin,
-      displayName: "New Card Name"
+      displayName: "New Card Name",
+      endpoint: url
     }));
     await agentsCreate(d, {
       name: "rederive-agent",
@@ -580,9 +589,10 @@ describe("admin tools — derive displayName from card (iconUrl is never card-so
       cardSigningJku: "https://override2.example.com/.well-known/jwks.json",
       cardSigningKid: "k4"
     };
-    const d = depsWith(wsId, ctx({ adminWorkspaces: [wsId] }), async () => ({
+    const d = depsWith(wsId, ctx({ adminWorkspaces: [wsId] }), async (url) => ({
       pin,
-      displayName: "Card Name"
+      displayName: "Card Name",
+      endpoint: url
     }));
     await agentsCreate(d, {
       name: "override2-agent",

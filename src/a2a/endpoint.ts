@@ -1,3 +1,9 @@
+import { A2A_PROTOCOL_VERSION, type AgentCard } from "@a2a-js/sdk";
+import type { AgentInterface } from "@a2a-js/sdk";
+
+/** The only transport this gateway speaks. Compared case-insensitively. */
+const JSONRPC_BINDING = "JSONRPC";
+
 /**
  * SSRF-safe validation for remote (custom) A2A endpoints. The gateway dials
  * these URLs from inside Cloudflare, so an unvalidated endpoint is a
@@ -194,28 +200,64 @@ export function originOf(endpoint: string): string {
 }
 
 /**
- * The `aud` a dispatch token carries: the agent's **exact endpoint**.
+ * The `aud` a dispatch token carries: the agent's **exact endpoint**, which is
+ * the URL its own card advertises as its JSONRPC interface.
  *
- * Not the origin, and that is a deliberate break with how this used to work. A
- * Worker may now mount several agents on one host —
- * `https://host/reactive/a2a`, `https://host/proactive/a2a` — and an origin-only
- * audience cannot tell them apart: a token minted for one verifies at every
- * other. It was never a data leak, since each agent keys its state by the
- * verified caller identity regardless, but "which agent was this token issued
- * for" was a question nothing could answer. The endpoint answers it, and a
- * sibling agent now rejects a token that was not meant for it.
+ * Not the origin. It proves a token was minted for *this service* rather than
+ * anything else the host serves — a webhook, an admin API — so a token cannot be
+ * replayed sideways at a neighbour that happens to trust the same gateway. It
+ * says nothing about *which agent* on it: every tenant of a deployment shares one
+ * endpoint and so one audience, and `TENANT_CLAIM` is what separates those.
  *
- * Rebuilt as `origin + pathname` rather than passed through verbatim, so it
- * matches exactly what the receiving agent computes from the request it got, and
- * is unaffected by a query string or fragment on the registered URL.
+ * The value is never guessed. `verifyRemoteAgentEndpoint` resolves it from the
+ * card at registration and stores it, so no path convention exists to be wrong
+ * about — an agent serving on `/api/v2/agent` works exactly as one on `/a2a`.
+ * That matters because the receiving side derives its expected audience from the
+ * same place: `@loopingai/core` builds a card interface as `${origin}${rpcPath}`
+ * and verifies that same string, so both ends agree by construction for any path
+ * an agent chooses.
  *
- * **This is a coordinated breaking change.** An agent verifying the old
- * origin-only audience rejects these tokens, and an agent verifying its endpoint
- * rejects the old ones — there is no version of this that works across the
- * cutover, so the gateway and every registered agent deploy together.
- * `@loopingai/core` ≥ 0.2.0 verifies the endpoint by default.
+ * Rebuilt as `origin + pathname` rather than passed through verbatim, so a query
+ * string or fragment on the stored URL cannot change it.
  */
 export function audienceFor(endpoint: string): string {
   const url = new URL(endpoint);
   return `${url.origin}${url.pathname}`;
+}
+
+/**
+ * The card's JSONRPC interface — where to POST, and what the audience is built
+ * from.
+ *
+ * `supportedInterfaces` is an ordered *preference* list that may advertise gRPC
+ * or HTTP+JSON ahead of JSONRPC (A2A §8.3.1), and this gateway speaks only
+ * JSONRPC, so taking `supportedInterfaces[0]` reads the wrong entry against any
+ * agent that prefers another transport. Matching on `protocolBinding` is what
+ * the SDK's own client does when it selects a transport.
+ *
+ * The version check keeps a v0.3-only agent from registering cleanly and then
+ * failing on its first dispatch: the SDK would route it through the legacy
+ * transport, which this gateway does not enable.
+ */
+export function selectJsonRpcInterface(card: AgentCard): AgentInterface {
+  const selected = (card.supportedInterfaces ?? []).find(
+    // Open-form string in the proto, and the SDK matches it case-insensitively.
+    (i) => i.protocolBinding?.toUpperCase() === JSONRPC_BINDING
+  );
+  if (!selected) {
+    const advertised =
+      (card.supportedInterfaces ?? [])
+        .map((i) => i.protocolBinding)
+        .join(", ") || "none";
+    throw new InvalidEndpointError(
+      `agent card advertises no ${JSONRPC_BINDING} interface (has: ${advertised})`
+    );
+  }
+  if (selected.protocolVersion !== A2A_PROTOCOL_VERSION) {
+    throw new InvalidEndpointError(
+      `agent card advertises A2A ${selected.protocolVersion} on its ` +
+        `${JSONRPC_BINDING} interface; this gateway speaks ${A2A_PROTOCOL_VERSION}`
+    );
+  }
+  return selected;
 }

@@ -12,6 +12,7 @@ import type {
   Task,
   TaskPushNotificationConfig
 } from "@a2a-js/sdk";
+import { buildAgentCard } from "@/a2a/card";
 import { isMessageResult } from "@/a2a/parts";
 import { classifyA2AError, isPermanentProtocolError } from "@/a2a/errors";
 import { sanitizeSlackText } from "@/util/slack-text";
@@ -109,7 +110,28 @@ async function buildLocalClient(target: A2ALocalTarget): Promise<Client> {
   return factory.createFromAgentCard(target.card);
 }
 
-/** Build a remote A2A client with auth header injection and accept timeout. */
+/**
+ * Build a remote A2A client that talks to the endpoint we already resolved.
+ *
+ * Built `createFromAgentCard` over a locally-synthesized card — the same shape
+ * {@link buildLocalClient} uses — rather than `createFromUrl`, which would
+ * re-download the agent's card on **every send** and POST to whatever that live
+ * document happens to advertise. Three things were wrong with that:
+ *
+ *  - The audience is computed from the stored endpoint while the request went to
+ *    the card's URL, so the two silently disagreed for any agent whose card did
+ *    not advertise the exact path an admin had typed. That is a 401 on every
+ *    dispatch, from a mismatch nothing surfaced.
+ *  - `validateRemoteEndpoint` ran against the stored value, not the URL actually
+ *    dialed, so the SSRF policy guarded a string we were no longer using.
+ *  - The card was re-fetched unverified, so the signing key pinned at
+ *    registration constrained registration and nothing else.
+ *
+ * `verifyRemoteAgentEndpoint` resolves the endpoint from the signed card once,
+ * at registration, and it is stored. Using it verbatim here makes the POST
+ * target, the stored row and the `aud` one value, and costs one fewer network
+ * round trip per turn.
+ */
 async function buildRemoteClient(target: A2ARemoteTarget): Promise<Client> {
   const options = ClientFactoryOptions.createFrom(
     ClientFactoryOptions.default,
@@ -122,7 +144,15 @@ async function buildRemoteClient(target: A2ARemoteTarget): Promise<Client> {
     }
   );
   const factory = new ClientFactory(options);
-  return factory.createFromUrl(target.endpoint);
+  return factory.createFromAgentCard(
+    buildAgentCard({
+      name: "Remote",
+      description: "remote agent at its registered endpoint",
+      url: target.endpoint,
+      tenant: target.tenant,
+      pushNotifications: true
+    })
+  );
 }
 
 /**

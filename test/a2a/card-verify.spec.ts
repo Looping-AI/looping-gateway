@@ -149,17 +149,34 @@ describe("verifyRemoteAgentEndpoint", () => {
   const ENDPOINT = "https://agent.example.com/a2a";
   const DOMAINS = ["agent.example.com"];
 
-  const tenantCard = (tenant: string, name = "Reactive"): AgentCard => ({
+  /** A card advertising one JSONRPC interface, at whatever URL/tenant given. */
+  const cardAt = (
+    url: string,
+    opts: { tenant?: string; name?: string } = {}
+  ): AgentCard => ({
     ...baseCard(),
-    name,
-    supportedInterfaces: [{ ...baseCard().supportedInterfaces[0], tenant }]
+    name: opts.name ?? "Reactive",
+    supportedInterfaces: [
+      {
+        ...baseCard().supportedInterfaces[0],
+        url,
+        tenant: opts.tenant ?? ""
+      }
+    ]
   });
+
+  const tenantCard = (tenant: string, name = "Reactive"): AgentCard =>
+    cardAt(ENDPOINT, { tenant, name });
 
   /** Serve a stub card at the well-known path and a tenant card over JSON-RPC. */
   function stubHost(opts: {
     stub: AgentCard;
     extended: AgentCard | { error: string };
-    seen?: { authorization: string | null; tenant?: string }[];
+    seen?: {
+      url: string;
+      authorization: string | null;
+      tenant?: string;
+    }[];
   }) {
     vi.stubGlobal(
       "fetch",
@@ -174,6 +191,7 @@ describe("verifyRemoteAgentEndpoint", () => {
         }
         const body = (await request.json()) as { params?: { tenant?: string } };
         opts.seen?.push({
+          url: request.url,
           authorization: request.headers.get("authorization"),
           tenant: body.params?.tenant
         });
@@ -188,9 +206,14 @@ describe("verifyRemoteAgentEndpoint", () => {
 
   let stubbedKeys: unknown[] = [];
 
-  const verify = (tenantId: string) =>
+  /**
+   * Registration input is *any* URL on the host — here the bare origin, which is
+   * what an admin who was told only "the agent lives at agent.example.com" has.
+   * Nothing about a path is supplied.
+   */
+  const verify = (tenantId: string, url = "https://agent.example.com") =>
     verifyRemoteAgentEndpoint({
-      endpoint: ENDPOINT,
+      url,
       tenantId,
       allowedDomains: DOMAINS,
       authToken: async () => "gw-token"
@@ -217,7 +240,11 @@ describe("verifyRemoteAgentEndpoint", () => {
   it("authenticates the extended-card call and names the tenant in it", async () => {
     const key = await makeKey("k1");
     stubbedKeys = [key.publicJwk];
-    const seen: { authorization: string | null; tenant?: string }[] = [];
+    const seen: {
+      url: string;
+      authorization: string | null;
+      tenant?: string;
+    }[] = [];
     stubHost({
       stub: await signCard(baseCard(), key),
       extended: await signCard(tenantCard("reactive"), key),
@@ -228,6 +255,136 @@ describe("verifyRemoteAgentEndpoint", () => {
 
     expect(seen.at(-1)?.authorization).toBe("Bearer gw-token");
     expect(seen.at(-1)?.tenant).toBe("reactive");
+  });
+
+  it("resolves an endpoint on a path nobody supplied", async () => {
+    // The whole point. The admin gives a host and a tenant; the agent's card
+    // says where it listens. `/a2a` is a default some agents happen to use, not
+    // something this gateway may assume — a custom agent picks its own path and
+    // both the POST target and the `aud` have to follow it.
+    const key = await makeKey("k1");
+    stubbedKeys = [key.publicJwk];
+    const custom = "https://agent.example.com/api/v2/agent";
+    const seen: {
+      url: string;
+      authorization: string | null;
+      tenant?: string;
+    }[] = [];
+    stubHost({
+      stub: await signCard(cardAt(custom), key),
+      extended: await signCard(cardAt(custom, { tenant: "reactive" }), key),
+      seen
+    });
+
+    const verified = await verify("reactive");
+
+    expect(verified.endpoint).toBe(custom);
+    // …and the extended-card call already went there, not to a guessed path.
+    expect(seen.at(-1)?.url).toBe(custom);
+  });
+
+  it("picks the JSONRPC interface rather than the first one", async () => {
+    // `supportedInterfaces` is an ordered *preference* list and may advertise a
+    // transport this gateway does not speak first. Indexing [0] would take the
+    // gRPC address and try to POST JSON-RPC at it.
+    const key = await makeKey("k1");
+    stubbedKeys = [key.publicJwk];
+    const jsonRpc = "https://agent.example.com/rpc";
+    const multi = (tenant: string): AgentCard => ({
+      ...baseCard(),
+      supportedInterfaces: [
+        {
+          ...baseCard().supportedInterfaces[0],
+          url: "https://agent.example.com/grpc",
+          protocolBinding: "GRPC",
+          tenant
+        },
+        { ...baseCard().supportedInterfaces[0], url: jsonRpc, tenant }
+      ]
+    });
+    stubHost({
+      stub: await signCard(multi(""), key),
+      extended: await signCard(multi("reactive"), key)
+    });
+
+    const verified = await verify("reactive");
+
+    expect(verified.endpoint).toBe(jsonRpc);
+  });
+
+  it("rejects a card with no JSONRPC interface at all", async () => {
+    const key = await makeKey("k1");
+    stubbedKeys = [key.publicJwk];
+    const grpcOnly: AgentCard = {
+      ...baseCard(),
+      supportedInterfaces: [
+        {
+          ...baseCard().supportedInterfaces[0],
+          url: "https://agent.example.com/grpc",
+          protocolBinding: "GRPC"
+        }
+      ]
+    };
+    stubHost({
+      stub: await signCard(grpcOnly, key),
+      extended: await signCard(tenantCard("reactive"), key)
+    });
+
+    await expect(verify("reactive")).rejects.toThrow(/no JSONRPC interface/);
+  });
+
+  it("rejects an interface advertising a protocol version we do not speak", async () => {
+    // Caught at registration rather than as a confusing transport failure on
+    // the first dispatch.
+    const key = await makeKey("k1");
+    stubbedKeys = [key.publicJwk];
+    const legacy: AgentCard = {
+      ...baseCard(),
+      supportedInterfaces: [
+        { ...baseCard().supportedInterfaces[0], protocolVersion: "0.3" }
+      ]
+    };
+    stubHost({
+      stub: await signCard(legacy, key),
+      extended: await signCard(tenantCard("reactive"), key)
+    });
+
+    await expect(verify("reactive")).rejects.toThrow(/A2A 0\.3/);
+  });
+
+  it("rejects a card pointing its endpoint at another origin", async () => {
+    // The card decides where we POST, so it must not be able to send us
+    // somewhere its signature says nothing about. We pinned *this* origin's
+    // key; honouring a cross-origin interface would let an approved agent
+    // redirect the gateway's dispatches at a host it never authenticated.
+    const key = await makeKey("k1");
+    stubbedKeys = [key.publicJwk];
+    stubHost({
+      stub: await signCard(cardAt("https://elsewhere.example.com/a2a"), key),
+      extended: await signCard(tenantCard("reactive"), key)
+    });
+
+    await expect(verify("reactive")).rejects.toThrow(/different origin/);
+  });
+
+  it("accepts any URL on the host, ignoring the path it was given", async () => {
+    // An admin pastes whatever the agent's developer sent them. All three forms
+    // name the same host, so all three resolve to the same endpoint.
+    const key = await makeKey("k1");
+    stubbedKeys = [key.publicJwk];
+    const real = "https://agent.example.com/rpc";
+    stubHost({
+      stub: await signCard(cardAt(real), key),
+      extended: await signCard(cardAt(real, { tenant: "reactive" }), key)
+    });
+
+    for (const input of [
+      "https://agent.example.com",
+      "https://agent.example.com/a2a",
+      "https://agent.example.com/.well-known/agent-card.json"
+    ]) {
+      expect((await verify("reactive", input)).endpoint).toBe(real);
+    }
   });
 
   it("rejects a card declaring a tenant other than the one asked for", async () => {

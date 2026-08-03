@@ -8,7 +8,12 @@ import {
   type AgentCardSignature
 } from "@a2a-js/sdk";
 import { base64url, type JWK } from "jose";
-import { audienceFor, originOf, validateRemoteEndpoint } from "./endpoint";
+import {
+  audienceFor,
+  originOf,
+  selectJsonRpcInterface,
+  validateRemoteEndpoint
+} from "./endpoint";
 
 /**
  * "A knows B is really B" — verify a remote agent's **signed AgentCard**
@@ -49,6 +54,11 @@ export interface VerifiedAgentCard {
   pin: CardSigningPin;
   /** Display name sourced from `AgentCard.name`. */
   displayName: string;
+  /**
+   * The JSONRPC endpoint the card advertises — resolved, not guessed. Stored on
+   * the agent row and used verbatim for both the POST target and the `aud`.
+   */
+  endpoint: string;
 }
 
 const FETCH_TIMEOUT_MS = 10_000;
@@ -306,8 +316,14 @@ async function fetchExtendedAgentCard(
 }
 
 export interface VerifyRemoteAgentArgs {
-  endpoint: string;
-  /** Which agent at `endpoint` is being registered. */
+  /**
+   * Any URL on the agent's host. Only its **origin** is used: the card lives at
+   * a well-known URI, which RFC 8615 defines per-authority, and the card is what
+   * names the real endpoint. So an admin can paste an origin, an endpoint or a
+   * card URL and all three work.
+   */
+  url: string;
+  /** Which agent at that host is being registered. */
   tenantId: string;
   allowedDomains?: string[];
   /**
@@ -324,7 +340,8 @@ export interface VerifyRemoteAgentArgs {
  * Two cards, one key:
  *
  *  1. The **stub** at the well-known path establishes who this origin is, and
- *     its signature resolves the `jku`/`kid` pinned Trust-On-First-Use.
+ *     its signature resolves the `jku`/`kid` pinned Trust-On-First-Use. It also
+ *     names the real endpoint, which is why nothing here assumes a path.
  *  2. The **tenant's** card, fetched through `GetExtendedAgentCard`, is what
  *     the agent row is actually about — its `displayName` comes from here.
  *
@@ -335,15 +352,38 @@ export interface VerifyRemoteAgentArgs {
  * register cleanly — the stub verifies no matter which tenant was asked for —
  * and only surface as a 401 on the first real dispatch, long after the admin
  * who could fix it has moved on.
+ *
+ * The resolved endpoint is returned to be stored, and is the single value
+ * dispatch POSTs to and derives its `aud` from. Resolving it here rather than
+ * per-send is what stops the two from drifting: the audience is only correct if
+ * it names the URL the request actually goes to.
  */
 export async function verifyRemoteAgentEndpoint(
   args: VerifyRemoteAgentArgs
 ): Promise<VerifiedAgentCard> {
-  const { endpoint, tenantId } = args;
+  const { url, tenantId } = args;
   const allowedDomains = args.allowedDomains ?? [];
 
-  const stub = await fetchAgentCard(endpoint, allowedDomains);
+  const stub = await fetchAgentCard(url, allowedDomains);
   const pin = await verifyAgentCardSignature(stub, { allowedDomains });
+
+  // Where the agent says to call it, rather than where an admin guessed.
+  const endpoint = selectJsonRpcInterface(stub).url;
+
+  // The card decides where we POST, so it must not be able to point us at a
+  // host it never authenticated. We pinned *this* origin's signing key; an
+  // interface elsewhere would mean dispatching to somewhere the signature says
+  // nothing about, and re-pointing an approved agent at an internal address is
+  // exactly the SSRF shape `validateRemoteEndpoint` exists to stop.
+  if (originOf(endpoint) !== originOf(url)) {
+    throw new AgentCardVerificationError(
+      `agent card at ${originOf(url)} advertises its endpoint on a different ` +
+        `origin (${originOf(endpoint)}); one origin serves one signing identity`
+    );
+  }
+  // Belt and braces: the origin matched a card we fetched, but the resolved URL
+  // is what will be dialed, so it passes the same policy on its own terms.
+  validateRemoteEndpoint(endpoint, allowedDomains);
 
   const token = await args.authToken(audienceFor(endpoint), tenantId);
   const card = await fetchExtendedAgentCard(endpoint, tenantId, token);
@@ -359,7 +399,7 @@ export async function verifyRemoteAgentEndpoint(
     );
   }
 
-  const declared = card.supportedInterfaces?.[0]?.tenant ?? "";
+  const declared = selectJsonRpcInterface(card).tenant ?? "";
   if (declared !== tenantId) {
     throw new AgentCardVerificationError(
       `the agent returned a card declaring tenant '${declared || "<none>"}' ` +
@@ -367,5 +407,5 @@ export async function verifyRemoteAgentEndpoint(
     );
   }
 
-  return { pin, displayName: card.name };
+  return { pin, displayName: card.name, endpoint };
 }

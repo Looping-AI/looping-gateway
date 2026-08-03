@@ -369,7 +369,11 @@ export async function agentsCreate(
     displayName: args.displayName ?? verified.displayName,
     // No icon at registration — a custom agent's avatar is gateway-hosted and set
     // later by the admin via `agents_regenerate_avatar` (never from the card).
-    a2aEndpoint: args.a2aEndpoint,
+    //
+    // The *resolved* endpoint, not what was typed: only the origin of the input
+    // was used, and the agent's own card named the path. Storing the input would
+    // put a guess where dispatch and the `aud` both read from.
+    a2aEndpoint: verified.endpoint,
     tenantId: args.tenantId.trim(),
     notifyOn: args.notifyOn,
     workspaceId: deps.wsId,
@@ -410,14 +414,23 @@ export async function agentsUpdate(
   // actually exist there. Skipping it would let a typo register cleanly and
   // fail on the next dispatch instead.
   let verified: VerifiedAgentCard | undefined;
-  const endpoint = args.a2aEndpoint ?? target.a2aEndpoint;
   const tenantId = args.tenantId?.trim() ?? target.tenantId;
-  if (endpoint !== target.a2aEndpoint || tenantId !== target.tenantId) {
+  // Re-verify whenever an endpoint was *supplied*, rather than when it differs
+  // from the stored one. The stored value is resolved from the agent's card and
+  // the argument is a raw URL whose path is ignored, so comparing them compares
+  // two different things — passing the origin of an already-registered agent
+  // would read as a change, and passing the resolved endpoint verbatim would
+  // read as no change even if the card has since moved.
+  if (args.a2aEndpoint !== undefined || tenantId !== target.tenantId) {
     if (!tenantId) {
       return { error: `A tenant id is required for "${args.name}".` };
     }
     try {
-      verified = await deps.verifyEndpoint(endpoint, tenantId);
+      // With no new URL, re-resolve against the origin already registered.
+      verified = await deps.verifyEndpoint(
+        args.a2aEndpoint ?? target.a2aEndpoint,
+        tenantId
+      );
     } catch (err) {
       return {
         error: `Endpoint verification failed: ${(err as Error).message}`
@@ -440,7 +453,10 @@ export async function agentsUpdate(
     displayName:
       args.displayName !== undefined ? args.displayName : verified?.displayName,
     enabled: args.enabled,
-    a2aEndpoint: args.a2aEndpoint,
+    // Only ever the endpoint re-verification resolved from the card. When
+    // nothing was re-verified there is nothing to write, and writing the raw
+    // argument would store a path the agent never advertised.
+    a2aEndpoint: verified?.endpoint,
     tenantId: args.tenantId?.trim(),
     notifyOn: args.notifyOn,
     ...(verified
@@ -835,7 +851,12 @@ export function buildAdminTools(deps: AdminToolDeps): ToolSet {
         displayName: z.string().optional(),
         a2aEndpoint: z
           .string()
-          .describe("Remote A2A endpoint URL for the custom agent (required)"),
+          .describe(
+            "Any URL on the agent's host (required) — an origin, an endpoint, " +
+              "or a card URL all work. Only the host is used: the agent's own " +
+              "published card names the real endpoint, so paste whatever the " +
+              "agent's developer gave you without worrying about the path."
+          ),
         tenantId: z
           .string()
           .min(1)
@@ -867,7 +888,13 @@ export function buildAdminTools(deps: AdminToolDeps): ToolSet {
           .describe(
             "Set false to disable — disabled agents receive no messages and won't be routed to"
           ),
-        a2aEndpoint: z.string().optional(),
+        a2aEndpoint: z
+          .string()
+          .optional()
+          .describe(
+            "Re-point the agent at a host. Any URL on it; the path is ignored " +
+              "and the card is re-read, so supplying this always re-verifies."
+          ),
         tenantId: z
           .string()
           .min(1)

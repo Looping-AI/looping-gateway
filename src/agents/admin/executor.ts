@@ -145,7 +145,7 @@ export class AdminAgentExecutor implements AgentExecutor {
             ...buildAdminTools({
               ctx,
               wsId,
-              verifyEndpoint: async (endpoint, tenantId) => {
+              verifyEndpoint: async (url, tenantId) => {
                 const allowedDomains = await getAllowedRemoteAgentDomains();
                 // Registration reads the tenant's card over an *authenticated*
                 // call, so it needs the same issuer dispatch signs with. The
@@ -161,7 +161,7 @@ export class AdminAgentExecutor implements AgentExecutor {
                   );
                 }
                 return verifyRemoteAgentEndpoint({
-                  endpoint,
+                  url,
                   tenantId,
                   allowedDomains,
                   authToken: (audience, tenant) =>
