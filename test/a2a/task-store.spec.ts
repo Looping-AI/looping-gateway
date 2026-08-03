@@ -23,6 +23,36 @@ function withStorage<T>(
 const completed = (id: string) =>
   makeTask({ id, state: TaskState.TASK_STATE_COMPLETED });
 
+/**
+ * Wrap storage to record how the sweep drives it. The runtime caps a batch
+ * `delete` at 128 keys and warns against an unbounded `list`, but neither is
+ * enforced by the local test runtime — so the limits have to be asserted on the
+ * calls themselves rather than waited on as a thrown error.
+ */
+function recordingStorage(storage: DurableObjectStorage) {
+  const deleteBatches: number[] = [];
+  const listLimits: (number | undefined)[] = [];
+  const proxy = new Proxy(storage, {
+    get(target, prop, receiver) {
+      if (prop === "delete") {
+        return (keys: string | string[], options?: DurableObjectPutOptions) => {
+          if (Array.isArray(keys)) deleteBatches.push(keys.length);
+          return target.delete(keys as string[], options);
+        };
+      }
+      if (prop === "list") {
+        return (options?: DurableObjectListOptions) => {
+          listLimits.push(options?.limit);
+          return target.list(options);
+        };
+      }
+      const value = Reflect.get(target, prop, receiver);
+      return typeof value === "function" ? value.bind(target) : value;
+    }
+  });
+  return { storage: proxy, deleteBatches, listLimits };
+}
+
 afterEach(() => vi.useRealTimers());
 
 describe("DurableTaskStore", () => {
@@ -91,6 +121,57 @@ describe("DurableTaskStore", () => {
       expect(await store.load("task-old-1")).toBeUndefined();
       expect(await store.load("task-old-2")).toBeUndefined();
       expect(await store.load("task-recent")).toBeDefined();
+    });
+  });
+
+  it("sweeps a keyspace larger than one page", async () => {
+    // A batch delete takes at most 128 keys, so a month's backlog does not fit
+    // in one call — `rnd-lead` alone logged 100 tasks in three weeks. Stale and
+    // fresh ids interleave in sort order, so every page holds a mix and the
+    // filter has to run per page rather than once over the whole listing.
+    await withStorage(async (storage) => {
+      const store = new DurableTaskStore(storage);
+      const id = (n: number) => `task-${String(n).padStart(3, "0")}`;
+      vi.useFakeTimers();
+
+      vi.setSystemTime(new Date("2026-01-01T00:00:00Z"));
+      for (let n = 0; n < 400; n += 2) await store.save(completed(id(n)));
+      vi.setSystemTime(new Date("2026-01-29T00:00:00Z"));
+      for (let n = 1; n < 200; n += 2) await store.save(completed(id(n)));
+      vi.setSystemTime(new Date("2026-02-05T00:00:00Z"));
+
+      expect(await store.sweep()).toBe(200);
+      expect(await store.load(id(0))).toBeUndefined();
+      expect(await store.load(id(398))).toBeUndefined();
+      expect(await store.load(id(1))).toBeDefined();
+      expect(await store.load(id(199))).toBeDefined();
+      // Nothing left to do on a second pass over the same keyspace.
+      expect(await store.sweep()).toBe(0);
+    });
+  });
+
+  it("stays inside the runtime's batch-delete and listing limits", async () => {
+    // The production ceilings the paging exists for: `delete` takes at most 128
+    // keys per call, and an unbounded `list` pulls every task body into memory
+    // at once. Neither is enforced locally, so a sweep that violated them would
+    // pass every other test here and only fail once deployed.
+    await withStorage(async (raw) => {
+      const { storage, deleteBatches, listLimits } = recordingStorage(raw);
+      const store = new DurableTaskStore(storage);
+      vi.useFakeTimers();
+
+      vi.setSystemTime(new Date("2026-01-01T00:00:00Z"));
+      for (let n = 0; n < 400; n++) {
+        await store.save(completed(`task-${String(n).padStart(3, "0")}`));
+      }
+      deleteBatches.length = 0;
+      listLimits.length = 0;
+      vi.setSystemTime(new Date("2026-02-05T00:00:00Z"));
+
+      expect(await store.sweep()).toBe(400);
+      expect(deleteBatches.length).toBeGreaterThan(1);
+      expect(Math.max(...deleteBatches)).toBeLessThanOrEqual(128);
+      expect(listLimits.every((limit) => limit !== undefined)).toBe(true);
     });
   });
 

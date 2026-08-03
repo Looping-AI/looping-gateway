@@ -8,6 +8,13 @@ const TASK_PREFIX = "a2a:task:";
 const taskKey = (taskId: string): string => `${TASK_PREFIX}${taskId}`;
 
 /**
+ * Keys per sweep page. Pinned to the documented ceiling on a batch
+ * `DurableObjectStorage.delete` ("supports up to 128 keys at a time") so a
+ * page's worth of stale keys is always one legal delete.
+ */
+const SWEEP_PAGE_SIZE = 128;
+
+/**
  * One persisted task. `savedAt` is the gateway's own write timestamp rather than
  * the Task's `status.timestamp`, which the protocol makes optional — a task that
  * arrived without one would otherwise never become sweepable.
@@ -80,16 +87,47 @@ export class DurableTaskStore implements TaskStore {
    * Retention matches the `agent_tasks` sweep for remote agents
    * ({@link TASK_RETENTION_SECONDS}) — the local/remote split is an
    * implementation detail, not a reason for a task to live longer on one side.
+   *
+   * Walks the keyspace a page at a time rather than listing it whole. An
+   * unbounded `list` would pull every task *body* into the object's memory at
+   * once — the values here are whole serialized Tasks, not bare keys — and the
+   * resulting delete could exceed the 128-key cap on a batch `delete`, which is
+   * reachable: a single agent logged 100 tasks in three weeks. Paging by that
+   * same 128 makes the per-page delete correct by construction.
+   *
+   * `startAfter` advances past every key seen, deleted or not, so removing
+   * entries mid-walk cannot make the cursor skip any.
    */
   async sweep(olderThanSeconds = TASK_RETENTION_SECONDS): Promise<number> {
     const cutoff = Date.now() - olderThanSeconds * 1000;
-    const entries = await this.storage.list<StoredTask>({
-      prefix: TASK_PREFIX
-    });
-    const stale = [...entries]
-      .filter(([, entry]) => entry.savedAt < cutoff)
-      .map(([key]) => key);
-    if (stale.length > 0) await this.storage.delete(stale);
-    return stale.length;
+    let deleted = 0;
+    let startAfter: string | undefined;
+
+    for (;;) {
+      const page = await this.storage.list<StoredTask>({
+        prefix: TASK_PREFIX,
+        startAfter,
+        limit: SWEEP_PAGE_SIZE,
+        // The sweep only ever removes entries already past retention, and a task
+        // written while it runs is stamped `now` — so it can never be in the
+        // stale set. Nothing here needs the input gate held across its awaits,
+        // and holding it would stall the turn this is riding along with.
+        allowConcurrency: true
+      });
+      if (page.size === 0) break;
+
+      const stale: string[] = [];
+      for (const [key, entry] of page) {
+        startAfter = key;
+        if (entry.savedAt < cutoff) stale.push(key);
+      }
+      if (stale.length > 0) {
+        await this.storage.delete(stale, { allowConcurrency: true });
+        deleted += stale.length;
+      }
+
+      if (page.size < SWEEP_PAGE_SIZE) break;
+    }
+    return deleted;
   }
 }
