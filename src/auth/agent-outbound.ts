@@ -20,7 +20,7 @@ import { env } from "cloudflare:workers";
 const ALG = "EdDSA";
 
 /** Namespaced claim carrying the signed gateway-agent caller identity. */
-export const IDENTITY_CLAIM = "https://looping.ai/identity";
+export const IDENTITY_CLAIM = "https://loopingai.org/identity";
 
 /**
  * Namespaced claim naming which agent at the audience the token authorizes.
@@ -28,7 +28,7 @@ export const IDENTITY_CLAIM = "https://looping.ai/identity";
  * Must match `TENANT_CLAIM` in `@loopingai/core`'s `a2a/verify.ts` — the remote
  * reads this exact key and refuses a token that omits it.
  */
-export const TENANT_CLAIM = "https://looping.ai/tenant";
+export const TENANT_CLAIM = "https://loopingai.org/tenant";
 
 /** Token lifetime — short, since each dispatch mints a fresh one. */
 const TOKEN_TTL_SECONDS = 120;
