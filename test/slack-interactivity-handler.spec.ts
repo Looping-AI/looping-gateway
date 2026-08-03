@@ -191,7 +191,7 @@ beforeEach(async () => {
   await setAllowedRemoteAgentDomains(["remote.example.com"]);
   await registerAgent({
     name: "remoteagent",
-    kind: "custom",
+    kind: "remote",
     a2aEndpoint: ENDPOINT,
     tenantId: "main",
     notifyOn: "mention",

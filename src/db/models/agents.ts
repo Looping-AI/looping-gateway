@@ -6,9 +6,17 @@ import { getAdminDisplayName, getAdminIconUrl } from "./workspace-configs";
 import { sanitizeDisplayName } from "@/util/display-name";
 
 export type AgentRow = typeof schema.agents.$inferSelect;
+/** Where an agent runs: `local` in-process, `remote` over HTTP. */
 export type AgentKind = AgentRow["kind"];
-/** The agent kinds hosted in-repo as Durable Objects (reached in-process). */
-export type LocalAgentKind = Extract<AgentKind, "admin" | "onboarding">;
+/**
+ * The tenants hosted in-repo as Durable Objects.
+ *
+ * Declared rather than derived from {@link AgentKind}, which no longer names
+ * individual built-ins, and deliberately a closed union: it is what makes the
+ * local callback guard and `A2AAgent.builtinTenant()` compiler-checked. Widening
+ * this to `string` would turn both into unchecked comparisons.
+ */
+export type BuiltinTenant = "admin" | "onboarding";
 export type NotifyOn = AgentRow["notifyOn"];
 
 export interface RegisterAgentInput {
@@ -139,7 +147,7 @@ export async function agentRenderIdentity(
     displayName: agent.displayName ?? agent.name,
     iconUrl: agent.iconUrl ?? null
   };
-  if (agent.kind !== "admin") return row;
+  if (agent.tenantId !== "admin") return row;
 
   // The admin only ever posts in its own workspace's admin channel, which is what
   // put it on this turn in the first place (see router/resolve.ts).

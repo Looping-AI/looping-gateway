@@ -125,7 +125,8 @@ export class AdminAgentExecutor implements AgentExecutor {
         // workspace id and the Slack user are guaranteed preconditions (the
         // classifier drops sender-less events), so treat them as required.
         if (
-          metadata.agentKind !== "admin" ||
+          metadata.agentKind !== "local" ||
+          metadata.tenant !== "admin" ||
           metadata.adminWorkspaceId == null ||
           metadata.user == null
         ) {

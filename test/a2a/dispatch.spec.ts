@@ -12,7 +12,8 @@ import {
   dispatchToAgent,
   cancelAgentTask,
   timeoutAgentTask,
-  buildDispatchId
+  buildDispatchId,
+  buildAgentInstanceKey
 } from "@/agents/dispatch";
 import { slackTsToIso } from "@/agents/shared/messages";
 import type { UserAuthContext } from "@/auth";
@@ -257,7 +258,7 @@ describe("dispatchToAgent (local Durable Object)", () => {
     const result = await dispatchToAgent(
       {
         name: "admin",
-        kind: "admin",
+        kind: "local",
         a2aEndpoint: "http://admin.local",
         tenantId: "admin",
         workspaceId: 0
@@ -270,7 +271,7 @@ describe("dispatchToAgent (local Durable Object)", () => {
         threadTs: "1.1",
         messageTs: "1.1",
         user: user("U1"),
-        metadata: { agentKind: "admin", adminWorkspaceId: 0 }
+        metadata: { agentKind: "local", tenant: "admin", adminWorkspaceId: 0 }
       }
     );
     expect(result.kind).toBe("accepted");
@@ -279,7 +280,7 @@ describe("dispatchToAgent (local Durable Object)", () => {
       expect(result.token).toBe(
         await buildDispatchId("Ev-admin", {
           name: "admin",
-          kind: "admin",
+          kind: "local",
           workspaceId: 0
         })
       );
@@ -293,7 +294,7 @@ describe("dispatchToAgent (local Durable Object)", () => {
     const result = await dispatchToAgent(
       {
         name: "onboarding",
-        kind: "onboarding",
+        kind: "local",
         a2aEndpoint: "http://onboarding.local",
         tenantId: "onboarding",
         workspaceId: 0
@@ -306,7 +307,7 @@ describe("dispatchToAgent (local Durable Object)", () => {
         threadTs: "1.1",
         messageTs: "1.1",
         user: user("U_onb"),
-        metadata: { agentKind: "onboarding" }
+        metadata: { agentKind: "local", tenant: "onboarding" }
       }
     );
     expect(result.kind).toBe("accepted");
@@ -315,7 +316,7 @@ describe("dispatchToAgent (local Durable Object)", () => {
       expect(result.token).toBe(
         await buildDispatchId("Ev-onb", {
           name: "onboarding",
-          kind: "onboarding",
+          kind: "local",
           workspaceId: 0
         })
       );
@@ -331,7 +332,7 @@ describe("dispatchToAgent (local Durable Object)", () => {
     await dispatchToAgent(
       {
         name: "alpha",
-        kind: "custom",
+        kind: "remote",
         a2aEndpoint: ENDPOINT,
         tenantId: "main",
         workspaceId: 7
@@ -344,14 +345,18 @@ describe("dispatchToAgent (local Durable Object)", () => {
         threadTs: "171813.100",
         messageTs: "171813.100",
         user: user("U1"),
-        metadata: { agentKind: "custom", workspaceId: 7 }
+        metadata: {
+          agentKind: "remote",
+          tenant: "main",
+          workspaceId: 7
+        }
       }
     );
 
     await dispatchToAgent(
       {
         name: "beta",
-        kind: "custom",
+        kind: "remote",
         a2aEndpoint: ENDPOINT,
         tenantId: "main",
         workspaceId: 7
@@ -364,7 +369,11 @@ describe("dispatchToAgent (local Durable Object)", () => {
         threadTs: "171813.100",
         messageTs: "171813.200",
         user: { ...user("U2"), displayName: "Grace" },
-        metadata: { agentKind: "custom", workspaceId: 7 }
+        metadata: {
+          agentKind: "remote",
+          tenant: "main",
+          workspaceId: 7
+        }
       }
     );
 
@@ -373,10 +382,10 @@ describe("dispatchToAgent (local Durable Object)", () => {
     expect(posts[1].authorization?.startsWith("Bearer ")).toBe(true);
     expect(posts[0].message.contextId).not.toBe(posts[1].message.contextId);
     expect(posts[0].message.contextId).toContain(
-      encodeURIComponent("custom:7:alpha")
+      encodeURIComponent("remote:7:alpha")
     );
     expect(posts[1].message.contextId).toContain(
-      encodeURIComponent("custom:7:beta")
+      encodeURIComponent("remote:7:beta")
     );
     // messageId is the deterministic dispatch id — a compact 19-char base36 hash
     // of {eventId}:{instanceKey}, so a retried dispatch is dedupable by the remote
@@ -388,14 +397,14 @@ describe("dispatchToAgent (local Durable Object)", () => {
     expect(
       await buildDispatchId("Ev-alpha", {
         name: "alpha",
-        kind: "custom",
+        kind: "remote",
         workspaceId: 7
       })
     ).toBe(posts[0].message.messageId);
     // No structured provenance on the wire — who/where/when is inlined into the
     // turn text by the Gateway. Metadata carries only routing extras.
     expect(posts[0].message.metadata).toMatchObject({
-      agentKind: "custom",
+      agentKind: "remote",
       workspaceId: 7
     });
     expect(posts[0].message.metadata).not.toHaveProperty("provenance");
@@ -424,18 +433,18 @@ describe("dispatchToAgent (local Durable Object)", () => {
       })
     ]);
 
-    expect(payloadA.sub).toBe("custom:7:alpha");
-    expect(payloadB.sub).toBe("custom:7:beta");
+    expect(payloadA.sub).toBe("remote:7:alpha");
+    expect(payloadB.sub).toBe("remote:7:beta");
     expect(payloadA[IDENTITY_CLAIM]).toMatchObject({
-      key: "custom:7:alpha",
+      key: "remote:7:alpha",
       name: "alpha",
-      kind: "custom",
+      kind: "remote",
       workspaceId: 7
     });
     expect(payloadB[IDENTITY_CLAIM]).toMatchObject({
-      key: "custom:7:beta",
+      key: "remote:7:beta",
       name: "beta",
-      kind: "custom",
+      kind: "remote",
       workspaceId: 7
     });
   });
@@ -449,7 +458,7 @@ describe("dispatchToAgent (local Durable Object)", () => {
     const result = await dispatchToAgent(
       {
         name: "remote-bad",
-        kind: "custom",
+        kind: "remote",
         a2aEndpoint: ENDPOINT,
         tenantId: "main",
         workspaceId: 7
@@ -462,7 +471,11 @@ describe("dispatchToAgent (local Durable Object)", () => {
         threadTs: "171813.100",
         messageTs: "171813.100",
         user: user("U1"),
-        metadata: { agentKind: "custom", workspaceId: 7 }
+        metadata: {
+          agentKind: "remote",
+          tenant: "main",
+          workspaceId: 7
+        }
       }
     );
 
@@ -477,7 +490,7 @@ describe("dispatchToAgent (local Durable Object)", () => {
     dispatchToAgent(
       {
         name: "remote-refuser",
-        kind: "custom",
+        kind: "remote",
         a2aEndpoint: ENDPOINT,
         tenantId: "main",
         workspaceId: 7
@@ -490,7 +503,11 @@ describe("dispatchToAgent (local Durable Object)", () => {
         threadTs: "171813.100",
         messageTs: "171813.100",
         user: user("U1"),
-        metadata: { agentKind: "custom", workspaceId: 7 }
+        metadata: {
+          agentKind: "remote",
+          tenant: "main",
+          workspaceId: 7
+        }
       }
     );
 
@@ -536,6 +553,26 @@ describe("dispatchToAgent (local Durable Object)", () => {
   });
 });
 
+describe("buildAgentInstanceKey", () => {
+  it("is `{kind}:{workspaceId}:{name}`", () => {
+    // Pinned deliberately, because this string is durable state on the *other*
+    // side of the wire: it travels as `identity.key` and a remote agent names
+    // its Durable Object from it. Any change to the format re-keys every remote
+    // agent and their per-caller memory starts empty.
+    //
+    // It changed exactly once, when `kind` went from `custom` to `remote`,
+    // which was affordable only because every agent was being re-registered for
+    // the tenant and endpoint changes in the same release. This assertion is
+    // here so the next such change is a decision rather than a discovery.
+    expect(
+      buildAgentInstanceKey({ kind: "remote", workspaceId: 7, name: "alpha" })
+    ).toBe("remote:7:alpha");
+    expect(
+      buildAgentInstanceKey({ kind: "local", workspaceId: 0, name: "admin" })
+    ).toBe("local:0:admin");
+  });
+});
+
 /**
  * The tenant: which agent at an endpoint a dispatch is for.
  *
@@ -551,7 +588,7 @@ describe("dispatchToAgent (tenant)", () => {
     return dispatchToAgent(
       {
         name: "alpha",
-        kind: "custom",
+        kind: "remote",
         a2aEndpoint: ENDPOINT,
         tenantId,
         workspaceId: 7
@@ -564,7 +601,11 @@ describe("dispatchToAgent (tenant)", () => {
         threadTs: "1.1",
         messageTs: "1.1",
         user: user("U1"),
-        metadata: { agentKind: "custom", workspaceId: 7 }
+        metadata: {
+          agentKind: "remote",
+          tenant: "main",
+          workspaceId: 7
+        }
       }
     );
   };
@@ -614,7 +655,7 @@ describe("dispatchToAgent (tenant)", () => {
     await dispatchToAgent(
       {
         name: "alpha",
-        kind: "custom",
+        kind: "remote",
         a2aEndpoint: custom,
         tenantId: "reactive",
         workspaceId: 7
@@ -627,7 +668,11 @@ describe("dispatchToAgent (tenant)", () => {
         threadTs: "1.1",
         messageTs: "1.1",
         user: user("U1"),
-        metadata: { agentKind: "custom", workspaceId: 7 }
+        metadata: {
+          agentKind: "remote",
+          tenant: "main",
+          workspaceId: 7
+        }
       }
     );
 
@@ -653,7 +698,7 @@ describe("dispatchToAgent (tenant)", () => {
     await dispatchToAgent(
       {
         name: "alpha",
-        kind: "custom",
+        kind: "remote",
         a2aEndpoint: ENDPOINT,
         tenantId: "reactive",
         workspaceId: 7
@@ -666,7 +711,11 @@ describe("dispatchToAgent (tenant)", () => {
         threadTs: "1.1",
         messageTs: "1.1",
         user: user("U1"),
-        metadata: { agentKind: "custom", workspaceId: 7 }
+        metadata: {
+          agentKind: "remote",
+          tenant: "main",
+          workspaceId: 7
+        }
       }
     );
 
@@ -699,7 +748,7 @@ describe("cancelAgentTask", () => {
     const out = await cancelAgentTask(
       {
         name: "admin",
-        kind: "admin",
+        kind: "local",
         a2aEndpoint: "http://admin.local",
         tenantId: "admin",
         workspaceId: 0
@@ -719,7 +768,7 @@ describe("cancelAgentTask", () => {
     const out = await cancelAgentTask(
       {
         name: "alpha",
-        kind: "custom",
+        kind: "remote",
         a2aEndpoint: ENDPOINT,
         tenantId: "main",
         workspaceId: 7
@@ -748,7 +797,7 @@ describe("timeoutAgentTask (remote continuation)", () => {
   async function setupParkedRow(): Promise<HitlRequestRow> {
     await registerAgent({
       name: "alpha",
-      kind: "custom",
+      kind: "remote",
       a2aEndpoint: ENDPOINT,
       tenantId: "main",
       notifyOn: "mention",
@@ -812,8 +861,13 @@ describe("timeoutAgentTask (remote continuation)", () => {
       textPart("(No response was received within the allotted time.)"),
       dataPart({ type: HITL_TIMEOUT_TYPE, requestId: REQUEST_ID })
     ]);
-    // Only routing extras on the wire — no caller/permission context.
-    expect(msg.metadata).toEqual({ agentKind: "custom", workspaceId: 0 });
+    // Only routing extras on the wire — no caller/permission context. Both
+    // facts travel: where the agent runs, and which agent it is.
+    expect(msg.metadata).toEqual({
+      agentKind: "remote",
+      tenant: "main",
+      workspaceId: 0
+    });
 
     // Accepted → the row is un-parked (awaiting-input → pending) so the resumed
     // turn's terminal callback is honored on the same agent_tasks row.

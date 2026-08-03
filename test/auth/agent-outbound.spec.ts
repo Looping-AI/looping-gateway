@@ -42,7 +42,7 @@ describe("signGatewayToken", () => {
       identity: {
         key: "custom:7:analytics",
         name: "analytics",
-        kind: "custom",
+        kind: "remote",
         workspaceId: 7
       }
     });
@@ -68,7 +68,7 @@ describe("signGatewayToken", () => {
     expect(identity).toMatchObject({
       key: "custom:7:analytics",
       name: "analytics",
-      kind: "custom",
+      kind: "remote",
       workspaceId: 7
     });
   });
@@ -81,7 +81,7 @@ describe("signGatewayToken", () => {
       identity: {
         key: "custom:0:shared-endpoint",
         name: "shared-endpoint",
-        kind: "custom",
+        kind: "remote",
         workspaceId: 0
       }
     });
@@ -104,7 +104,7 @@ describe("signGatewayToken", () => {
       identity: {
         key: "custom:0:demo",
         name: "demo",
-        kind: "custom",
+        kind: "remote",
         workspaceId: 0
       }
     });
@@ -138,7 +138,7 @@ describe("signGatewayToken", () => {
         identity: {
           key: "custom:7:analytics",
           name: "analytics",
-          kind: "custom",
+          kind: "remote",
           workspaceId: 7
         }
       });
@@ -180,7 +180,7 @@ describe("signGatewayToken", () => {
       identity: {
         key: "custom:0:demo",
         name: "demo",
-        kind: "custom",
+        kind: "remote",
         workspaceId: 0
       }
     });
@@ -206,7 +206,7 @@ describe("signGatewayToken", () => {
       identity: {
         key: "custom:0:demo",
         name: "demo",
-        kind: "custom",
+        kind: "remote",
         workspaceId: 0
       }
     });

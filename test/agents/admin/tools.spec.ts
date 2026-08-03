@@ -72,7 +72,7 @@ describe("admin tools — agents_create / agents_read", () => {
     expect(read.agents).toHaveLength(1);
     expect(read.agents[0]).toMatchObject({
       name: "tool-agent-a",
-      kind: "custom",
+      kind: "remote",
       workspaceId: wsId
     });
   });

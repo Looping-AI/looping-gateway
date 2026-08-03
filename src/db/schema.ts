@@ -100,7 +100,12 @@ export const agents = sqliteTable(
   "agents",
   {
     name: text("name").primaryKey(),
-    kind: text("kind", { enum: ["admin", "onboarding", "custom"] }).notNull(),
+    // Where this agent runs, and nothing else. `local` is reached in-process
+    // through a Durable Object stub; `remote` over HTTP at `a2aEndpoint`.
+    // *Which* agent it is — including which built-in — is `tenantId`, on both
+    // paths. The gateway sets this itself; no admin chooses it, which is what
+    // keeps a registered agent from claiming to be in-process.
+    kind: text("kind", { enum: ["local", "remote"] }).notNull(),
     displayName: text("display_name"),
     // Optional gateway-hosted, admin-generated avatar URL (never from the AgentCard).
     iconUrl: text("icon_url"),

@@ -60,7 +60,7 @@ const canceledTask: unknown = Task.toJSON(
 beforeEach(async () => {
   await registerAgent({
     name: "remoteagent",
-    kind: "custom",
+    kind: "remote",
     a2aEndpoint: ENDPOINT,
     tenantId: "main",
     notifyOn: "mention",

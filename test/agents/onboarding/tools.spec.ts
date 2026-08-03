@@ -34,7 +34,7 @@ describe("onboarding tools — directory_read agents", () => {
     const other = await freshWsId("onb-other");
     await registerAgent({
       name: "onb-mine-agent",
-      kind: "custom",
+      kind: "remote",
       a2aEndpoint: "https://example.com/onb-mine",
       tenantId: "main",
       notifyOn: "mention",
@@ -42,7 +42,7 @@ describe("onboarding tools — directory_read agents", () => {
     });
     await registerAgent({
       name: "onb-other-agent",
-      kind: "custom",
+      kind: "remote",
       a2aEndpoint: "https://example.com/onb-other",
       tenantId: "main",
       notifyOn: "mention",
@@ -65,7 +65,7 @@ describe("onboarding tools — directory_read agents", () => {
     const wsId = await freshWsId("onb-disabled");
     await registerAgent({
       name: "onb-disabled-agent",
-      kind: "custom",
+      kind: "remote",
       a2aEndpoint: "https://example.com/onb-disabled",
       tenantId: "main",
       notifyOn: "mention",

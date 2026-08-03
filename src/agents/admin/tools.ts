@@ -171,7 +171,7 @@ async function requireWritableAgent(
   if (!a || a.workspaceId !== deps.wsId) {
     return { error: `No agent "${name}" in workspace ${deps.wsId}.` };
   }
-  if (a.kind !== "custom") {
+  if (a.kind !== "remote") {
     return { error: `"${name}" is a built-in agent and cannot be modified.` };
   }
   return a;
@@ -365,7 +365,7 @@ export async function agentsCreate(
   }
   const row = await registerAgent({
     name: args.name,
-    kind: "custom",
+    kind: "remote",
     displayName: args.displayName ?? verified.displayName,
     // No icon at registration — a custom agent's avatar is gateway-hosted and set
     // later by the admin via `agents_regenerate_avatar` (never from the card).

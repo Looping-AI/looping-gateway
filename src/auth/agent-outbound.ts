@@ -41,12 +41,12 @@ const TOKEN_TTL_SECONDS = 120;
 export interface RemoteIdentity {
   /**
    * Canonical instance key used for `sub` and remote state partitioning.
-   * Example: `custom:7:analytics`.
+   * Example: `remote:7:analytics`.
    */
   key: string;
   /** Registry name of the logical agent instance. */
   name: string;
-  /** Dispatch kind of the caller (today always `"custom"` for remote agents). */
+  /** Where the caller runs — `"remote"` on every dispatch that reaches a remote. */
   kind: string;
   /** Workspace the registered agent belongs to. */
   workspaceId: number;

@@ -36,7 +36,12 @@ const adminRequest = () =>
   makeRequest({
     contextId: "C_ADMIN:thread-1",
     text: "list agents",
-    metadata: { user: caller, agentKind: "admin", adminWorkspaceId: 0 }
+    metadata: {
+      user: caller,
+      agentKind: "local",
+      tenant: "admin",
+      adminWorkspaceId: 0
+    }
   });
 
 afterEach(() => vi.restoreAllMocks());
@@ -170,7 +175,8 @@ describe("AdminAgentExecutor — HITL approval resume", () => {
       contextId: "C_ADMIN:thread-1",
       metadata: {
         user: { ...caller, adminWorkspaces: [wsId] },
-        agentKind: "admin",
+        agentKind: "local",
+        tenant: "admin",
         adminWorkspaceId: wsId
       }
     });
@@ -199,7 +205,7 @@ describe("AdminAgentExecutor — HITL approval resume", () => {
     const wsId = await freshWsId("resume-approve");
     await registerAgent({
       name: "resume-del",
-      kind: "custom",
+      kind: "remote",
       displayName: "Resume Del",
       a2aEndpoint: "https://example.com/resume-del",
       tenantId: "main",
@@ -239,7 +245,7 @@ describe("AdminAgentExecutor — HITL approval resume", () => {
     const wsId = await freshWsId("resume-reject");
     await registerAgent({
       name: "resume-keep",
-      kind: "custom",
+      kind: "remote",
       displayName: "Resume Keep",
       a2aEndpoint: "https://example.com/resume-keep",
       tenantId: "main",

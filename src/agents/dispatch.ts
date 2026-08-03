@@ -42,15 +42,20 @@ export interface DispatchAgentRef {
 }
 
 /**
- * The per-kind routing extras carried alongside the caller. The universal
+ * The per-agent routing extras carried alongside the caller. The universal
  * `user` lives on {@link DispatchPayload}; this union holds only the fields that
- * differ by agent kind. `agentKind` is the discriminant the executor narrows on
- * (it reads deserialized JSON and has no access to {@link DispatchAgentRef}).
+ * differ between agents. The executor narrows on these (it reads deserialized
+ * JSON and has no access to {@link DispatchAgentRef}).
+ *
+ * Both facts travel, mirroring the registry: `agentKind` is *where* the agent
+ * runs, `tenant` is *which* agent it is. Carrying only the tenant would not
+ * narrow — the remote arm's tenant is an open string, so it overlaps the
+ * built-in literals and TypeScript could not tell the members apart.
  */
 export type DispatchMetadata =
-  | { agentKind: "admin"; adminWorkspaceId: number }
-  | { agentKind: "onboarding" }
-  | { agentKind: "custom"; workspaceId: number };
+  | { agentKind: "local"; tenant: "admin"; adminWorkspaceId: number }
+  | { agentKind: "local"; tenant: "onboarding" }
+  | { agentKind: "remote"; tenant: string; workspaceId: number };
 
 /**
  * What rides on the A2A `message.metadata` and what the executor reads back.
@@ -118,7 +123,7 @@ function base36Id(bytes: Uint8Array, length: number): string {
 }
 
 /**
- * Deterministic per-dispatch id: `SHA-256({eventId}:{kind}:{workspaceId}:{name})`
+ * Deterministic per-dispatch id: `SHA-256({eventId}:{instanceKey})`
  * truncated to 96 bits and base36-encoded → a compact 19-char alphanumeric token
  * (e.g. `k3n7p2q9x4m8r5t6w1a`). Used verbatim as the A2A `messageId` (a conformant
  * remote dedupes on it) and the push `token` (so a retried dispatch reuses one
@@ -140,6 +145,12 @@ export async function buildDispatchId(
 /**
  * Stable remote caller key derived from the registered agent row. The endpoint
  * is intentionally excluded so multiple logical agents can safely share it.
+ *
+ * A remote agent names its Durable Object from this, so the string is durable
+ * state on the *other* side of the wire: changing its shape re-keys every remote
+ * agent and their per-caller memory starts empty. `kind` moving from `custom` to
+ * `remote` did exactly that, once, deliberately — see `dispatch.spec.ts`, which
+ * pins the format so a later edit has to be a decision rather than an accident.
  */
 export function buildAgentInstanceKey(
   agent: Pick<DispatchAgentRef, "kind" | "workspaceId" | "name">
@@ -177,7 +188,7 @@ export function buildRemoteContextId(
 
 /**
  * The Durable Object namespace for a built-in local agent, or `undefined` for
- * custom agents (reached over HTTP at their `a2aEndpoint`).
+ * remote agents (reached over HTTP at their `a2aEndpoint`).
  *
  * Two decisions, deliberately kept on two different fields:
  *
@@ -189,10 +200,10 @@ export function buildRemoteContextId(
  *    a table rather than a new arm of this `switch`.
  *
  * The `kind` guard has to come first and has to stay on `kind`. Routing
- * local-vs-remote off `tenantId` alone would let a **custom remote agent
- * registered with `tenantId: "admin"` be dispatched into this gateway's own
- * AdminAgent** — privilege escalation through a field an org admin types.
- * `dispatch.spec.ts` asserts that directly.
+ * local-vs-remote off `tenantId` alone would let a **remote agent registered
+ * with `tenantId: "admin"` be dispatched into this gateway's own AdminAgent** —
+ * privilege escalation through a field an org admin types. `dispatch.spec.ts`
+ * asserts that directly.
  *
  * Direct `env` access keeps the binding types intact — renaming a binding fails
  * to compile here rather than string-indexing `env` and casting the type away.
@@ -200,7 +211,7 @@ export function buildRemoteContextId(
 function localNamespaceFor(
   agent: Pick<AgentRow, "kind" | "tenantId">
 ): DurableObjectNamespace | undefined {
-  if (agent.kind === "custom") return undefined;
+  if (agent.kind === "remote") return undefined;
   switch (agent.tenantId) {
     case "admin":
       return env.AdminAgent;
@@ -215,19 +226,23 @@ function localNamespaceFor(
  * Durable Object instance name for a local agent. The admin agent runs **one
  * instance per workspace** (`admin:0` = org, `admin:1`, …) and the onboarding
  * concierge runs **one instance per user** (`onboarding:{slackUserId}`), so each
- * has its own SQLite — isolated Sessions + memory. Other kinds use a single
- * instance keyed by name.
+ * has its own SQLite — isolated Sessions + memory.
+ *
+ * Keyed on the tenant, the same field `localNamespaceFor` picks the class with,
+ * so one value chooses both. The strings it produces are unchanged, which is why
+ * built-ins keep their existing Durable Objects across the `kind` rename.
  */
 export function instanceNameFor(metadata: AgentTurnMetadata): string {
-  switch (metadata.agentKind) {
+  if (metadata.agentKind !== "local") {
+    throw new Error("unreachable: instanceNameFor called for a remote agent");
+  }
+  switch (metadata.tenant) {
     case "admin":
       return `admin:${metadata.adminWorkspaceId}`;
     case "onboarding":
       return `onboarding:${metadata.user.slackUserId}`;
     default:
-      throw new Error(
-        `unreachable: unhandled agentKind '${metadata.agentKind}'`
-      );
+      throw new Error("unreachable: no local agent for that tenant");
   }
 }
 
@@ -580,7 +595,13 @@ async function sendTaskContinuation(
       contextId: row.contextId,
       referenceTaskIds: [row.taskId],
       parts: input.parts,
-      metadata: { agentKind: "custom", workspaceId: agent.workspaceId }
+      // Typed explicitly: `buildMessage` takes an open metadata bag, so nothing
+      // would have caught this drifting from `DispatchMetadata` otherwise.
+      metadata: {
+        agentKind: "remote",
+        tenant: agent.tenantId,
+        workspaceId: agent.workspaceId
+      } satisfies DispatchMetadata
     });
     const accept = await sendA2ARemote(
       {
@@ -607,7 +628,7 @@ async function sendTaskContinuation(
   // reconstructed from the caller/channel — the same keys the message workflow
   // used (admin: the channel's workspace; onboarding: the DM's user).
   let metadata: AgentTurnMetadata;
-  if (agent.kind === "admin") {
+  if (agent.tenantId === "admin") {
     const workspace = await getWorkspaceByAdminChannel(row.channelId);
     if (!workspace) {
       console.error("[hitl] continuation: admin channel has no workspace", {
@@ -618,11 +639,16 @@ async function sendTaskContinuation(
     }
     metadata = {
       user: input.caller,
-      agentKind: "admin",
+      agentKind: "local",
+      tenant: "admin",
       adminWorkspaceId: workspace.id
     };
   } else {
-    metadata = { user: input.caller, agentKind: "onboarding" };
+    metadata = {
+      user: input.caller,
+      agentKind: "local",
+      tenant: "onboarding"
+    };
   }
 
   const message = buildMessage({

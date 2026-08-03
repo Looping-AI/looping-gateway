@@ -58,7 +58,7 @@ export async function runGatedAction(
       if (
         !agent ||
         agent.workspaceId !== action.wsId ||
-        agent.kind !== "custom"
+        agent.kind !== "remote"
       ) {
         return {
           ok: false,

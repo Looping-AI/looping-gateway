@@ -8,7 +8,7 @@ import type {
   PushNotificationStore,
   ServerCallContext
 } from "@a2a-js/sdk/server";
-import { getAgent, type LocalAgentKind } from "@/db/models/agents";
+import { getAgent, type BuiltinTenant } from "@/db/models/agents";
 import {
   getAgentTaskByToken,
   recordAgentTaskError
@@ -66,13 +66,23 @@ export function localPushNotificationConfig(
 
 /**
  * Deliver a task snapshot emitted by an in-repo built-in agent without crossing
- * the public HTTP/JWT trust boundary. The registry kind check prevents one local
- * Durable Object from impersonating another agent's pending task.
+ * the public HTTP/JWT trust boundary.
+ *
+ * The tenant check is the trust boundary this path *does* have: it prevents one
+ * local Durable Object from completing another agent's pending task. Nothing
+ * else stands in the way — these callbacks carry no JWT, precisely because they
+ * never leave the isolate.
+ *
+ * It compares `tenantId` rather than `kind` for a reason worth stating: `kind`
+ * is `local` for every built-in, so comparing it here would be `local !== local`
+ * — vacuously false, and the guard would be gone while still looking present.
+ * `tenantId` is the field that distinguishes admin from onboarding.
+ * `local.spec.ts` asserts the rejection directly.
  */
 export async function deliverLocalAgentTask(
   token: string,
   snapshot: TaskSnapshot,
-  expectedKind: LocalAgentKind
+  expectedTenant: BuiltinTenant
 ): Promise<void> {
   const row = await getAgentTaskByToken(token);
   if (!row) {
@@ -86,7 +96,7 @@ export async function deliverLocalAgentTask(
   if (row.status === "completed") return;
 
   const agent = await getAgent(row.agentName);
-  if (!agent || agent.kind !== expectedKind) {
+  if (!agent || agent.tenantId !== expectedTenant) {
     throw new Error(
       "local task does not belong to the expected built-in agent"
     );
@@ -123,7 +133,7 @@ export class LocalPushNotificationSender implements PushNotificationSender {
 
   constructor(
     private readonly pushNotificationStore: PushNotificationStore,
-    private readonly agentKind: LocalAgentKind
+    private readonly tenant: BuiltinTenant
   ) {}
 
   send(
@@ -178,7 +188,7 @@ export class LocalPushNotificationSender implements PushNotificationSender {
     });
     const timer = setTimeout(() => {
       console.warn("[local-notifications] whenSettled timed out", {
-        agentKind: this.agentKind,
+        tenant: this.tenant,
         taskId
       });
       this.resolveSettled(taskId);
@@ -251,12 +261,12 @@ export class LocalPushNotificationSender implements PushNotificationSender {
   ): Promise<void> {
     for (let attempt = 1; attempt <= DELIVERY_MAX_ATTEMPTS; attempt++) {
       try {
-        await deliverLocalAgentTask(token, snapshot, this.agentKind);
+        await deliverLocalAgentTask(token, snapshot, this.tenant);
         return;
       } catch (err) {
         if (err instanceof TaskDeliveryValidationError) {
           console.error("[local-notifications] malformed task snapshot", {
-            agentKind: this.agentKind,
+            tenant: this.tenant,
             taskId: snapshot.taskId,
             err: err.message
           });
@@ -265,7 +275,7 @@ export class LocalPushNotificationSender implements PushNotificationSender {
         }
         const lastAttempt = attempt === DELIVERY_MAX_ATTEMPTS;
         console.error("[local-notifications] task delivery failed", {
-          agentKind: this.agentKind,
+          tenant: this.tenant,
           taskId: snapshot.taskId,
           attempt,
           lastAttempt,
