@@ -1,8 +1,7 @@
 import { and, eq, lt, ne, sql } from "drizzle-orm";
 import { getDb } from "../client";
 import * as schema from "../schema";
-
-const ONE_MONTH_SECONDS = 30 * 24 * 60 * 60;
+import { TASK_RETENTION_SECONDS } from "@/config";
 
 export type AgentTaskRow = typeof schema.agentTasks.$inferSelect;
 
@@ -333,11 +332,13 @@ export async function deleteAgentTask(token: string): Promise<void> {
 }
 
 /**
- * Delete rows older than `olderThanSeconds` (default 30 days). Called by the
- * nightly maintenance workflow to keep the table from growing unbounded.
+ * Delete rows older than `olderThanSeconds` (default
+ * {@link TASK_RETENTION_SECONDS}). Called by the nightly maintenance workflow to
+ * keep the table from growing unbounded. The local-agent equivalent is
+ * `DurableTaskStore.sweep`, on the same retention.
  */
 export async function sweepStaleAgentTasks(
-  olderThanSeconds = ONE_MONTH_SECONDS
+  olderThanSeconds = TASK_RETENTION_SECONDS
 ): Promise<number> {
   const db = getDb();
   const cutoff = sql`(unixepoch() - ${olderThanSeconds})`;
