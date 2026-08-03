@@ -294,15 +294,27 @@ export async function updateAgent(
 }
 
 /**
- * Delete an agent and its channel attachments. D1 does not reliably enforce
- * foreign keys at runtime, so the agent_channels cascade is explicit.
+ * Delete an agent and everything that references it. `agents.name` is the FK
+ * parent of `agent_channels`, `agent_tasks` and `hitl_requests`, all declared
+ * `ON DELETE no action` — and D1 *does* enforce foreign keys, so every child
+ * has to go first or the parent delete is rejected outright.
+ *
+ * One `batch` so it is all-or-nothing: run as separate statements, a rejected
+ * parent delete leaves the agent registered but stripped of its channels —
+ * present in the registry and unreachable from Slack.
  */
 export async function unregisterAgent(name: string): Promise<void> {
   const db = getDb();
-  await db
-    .delete(schema.agentChannels)
-    .where(eq(schema.agentChannels.agentName, name));
-  await db.delete(schema.agents).where(eq(schema.agents.name, name));
+  await db.batch([
+    db
+      .delete(schema.agentChannels)
+      .where(eq(schema.agentChannels.agentName, name)),
+    db.delete(schema.agentTasks).where(eq(schema.agentTasks.agentName, name)),
+    db
+      .delete(schema.hitlRequests)
+      .where(eq(schema.hitlRequests.agentName, name)),
+    db.delete(schema.agents).where(eq(schema.agents.name, name))
+  ]);
 }
 
 /** Detach an agent from a channel. */

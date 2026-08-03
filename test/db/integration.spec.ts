@@ -14,6 +14,8 @@ import {
   getWorkspace,
   ORG_WORKSPACE_ID
 } from "@/db/models/workspaces";
+import { createAgentTask, getAgentTaskByToken } from "@/db/models/agent-tasks";
+import { createHitlRequest, getHitlRequest } from "@/db/models/hitl-requests";
 
 describe("workspaces — createWorkspace", () => {
   it("allocates an id above the org sentinel and persists the row", async () => {
@@ -119,5 +121,56 @@ describe("agents — registry CRUD", () => {
     });
     await unregisterAgent("crud-agent-ch");
     expect(await getAgentChannels("crud-agent-ch")).toEqual([]);
+  });
+
+  it("unregister cascades past dispatch history and open prompts", async () => {
+    // An agent that has actually been used owns rows in every table keyed on
+    // its name. Those FKs are enforced, so a cascade that stops at
+    // agent_channels cannot delete the agent at all — it strips the channels,
+    // then the parent delete is rejected and the agent lives on, unreachable.
+    const ws = await createWorkspace({ name: "crud-cascade" });
+    await registerAgent({
+      name: "crud-agent-used",
+      kind: "remote",
+      a2aEndpoint: "https://example.com/crud-used",
+      tenantId: "main",
+      notifyOn: "mention",
+      workspaceId: ws.id
+    });
+    await attachAgentChannel({
+      agentName: "crud-agent-used",
+      channelId: "C_USED",
+      workspaceId: ws.id
+    });
+    await createAgentTask({
+      token: "tok-cascade",
+      taskId: "task-cascade",
+      agentName: "crud-agent-used",
+      channelId: "C_USED",
+      messageTs: "1700.1",
+      replyThreadTs: null,
+      eventId: "Ev_CASCADE"
+    });
+    await createHitlRequest({
+      requestId: "req-cascade",
+      token: "tok-cascade",
+      taskId: "task-cascade",
+      contextId: "C_USED:1700.1",
+      agentName: "crud-agent-used",
+      channelId: "C_USED",
+      threadTs: null,
+      requestKind: "approval",
+      promptText: "Approve?",
+      optionsJson: null,
+      allowFreeform: false,
+      deadlineAt: Math.floor(Date.now() / 1000) + 3600
+    });
+
+    await unregisterAgent("crud-agent-used");
+
+    expect(await getAgent("crud-agent-used")).toBeNull();
+    expect(await getAgentChannels("crud-agent-used")).toEqual([]);
+    expect(await getAgentTaskByToken("tok-cascade")).toBeNull();
+    expect(await getHitlRequest("req-cascade")).toBeNull();
   });
 });
