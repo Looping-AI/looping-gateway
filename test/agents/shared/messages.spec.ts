@@ -260,6 +260,39 @@ describe("assistantSessionMessage", () => {
     expect(output.length).toBeLessThan(big.length);
   });
 
+  it("truncates a long string output without JSON-encoding it", () => {
+    // A string output is already the readable form. Encoding it first would store
+    // the quoted, escaped shape — a stray leading `"` — and report the encoded
+    // length rather than the string's own.
+    const big = "x".repeat(MAX_TOOL_RECORD_CHARS * 2);
+    const m = assistantSessionMessage("ok", [
+      { toolCallId: "tc1", toolName: "recall", input: {}, output: big }
+    ]);
+    const output = (m.parts[0] as { output: string }).output;
+    expect(output.startsWith('"')).toBe(false);
+    expect(output).toContain(`[truncated, ${big.length} chars total]`);
+  });
+
+  it("never truncates a string output mid-escape", () => {
+    // Sized so the JSON encoding would put the `\` of a `\n` escape exactly on
+    // the cut, leaving a dangling backslash in the stored transcript.
+    const big = "x".repeat(MAX_TOOL_RECORD_CHARS - 2) + "\n" + "y".repeat(100);
+    const m = assistantSessionMessage("ok", [
+      { toolCallId: "tc1", toolName: "recall", input: {}, output: big }
+    ]);
+    const output = (m.parts[0] as { output: string }).output;
+    const body = output.slice(0, MAX_TOOL_RECORD_CHARS);
+    expect(body).toBe(big.slice(0, MAX_TOOL_RECORD_CHARS));
+    expect(body.endsWith("\\")).toBe(false);
+  });
+
+  it("keeps a small string output verbatim", () => {
+    const m = assistantSessionMessage("ok", [
+      { toolCallId: "tc1", toolName: "recall", input: {}, output: "all good" }
+    ]);
+    expect((m.parts[0] as { output: unknown }).output).toBe("all good");
+  });
+
   it("keeps a small output structured", () => {
     const m = assistantSessionMessage("ok", [
       {

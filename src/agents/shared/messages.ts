@@ -196,9 +196,28 @@ export interface ToolRecord {
  */
 export const MAX_TOOL_RECORD_CHARS = 1500;
 
-/** Serialize-and-cap one recorded value, keeping small values structured. */
+/** Cap a plain string — the readable form, so it is measured and cut as itself. */
+function capText(text: string): string {
+  return text.length <= MAX_TOOL_RECORD_CHARS
+    ? text
+    : `${text.slice(0, MAX_TOOL_RECORD_CHARS)}… [truncated, ${text.length} chars total]`;
+}
+
+/**
+ * Cap one recorded value, keeping small values structured.
+ *
+ * A string is capped as a string. Measuring it by its JSON encoding instead would
+ * charge it for quotes and escapes it does not have, prefix the stored value with
+ * a stray `"`, and — because an escape is two characters — could cut between the
+ * `\` and its escaped character, leaving a dangling backslash in the transcript.
+ *
+ * Anything else is measured by its serialization, and a value over the ceiling is
+ * replaced by a clearly-marked preview: past the cut it is prose for the model to
+ * read, not JSON for anything to parse.
+ */
 function cap(value: unknown): unknown {
   if (value === undefined) return undefined;
+  if (typeof value === "string") return capText(value);
   let json: string;
   try {
     json = JSON.stringify(value) ?? String(value);
@@ -207,13 +226,6 @@ function cap(value: unknown): unknown {
   }
   if (json.length <= MAX_TOOL_RECORD_CHARS) return value;
   return `${json.slice(0, MAX_TOOL_RECORD_CHARS)}… [truncated, ${json.length} chars total]`;
-}
-
-/** Cap a plain string the same way, for `errorText`. */
-function capText(text: string): string {
-  return text.length <= MAX_TOOL_RECORD_CHARS
-    ? text
-    : `${text.slice(0, MAX_TOOL_RECORD_CHARS)}… [truncated, ${text.length} chars total]`;
 }
 
 /**
