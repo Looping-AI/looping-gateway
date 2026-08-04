@@ -1,3 +1,4 @@
+import { A2A_JWS_ALG } from "@loopingai/a2a-protocol";
 import {
   AGENT_CARD_PATH,
   A2A_PROTOCOL_VERSION,
@@ -63,7 +64,6 @@ export interface VerifiedAgentCard {
 
 const FETCH_TIMEOUT_MS = 10_000;
 const MAX_CARD_LENGTH = 256 * 1024;
-const ALG = "EdDSA";
 
 /**
  * The exact byte string an AgentCard signature is computed over: the card's
@@ -256,10 +256,12 @@ export async function verifyAgentCardSignature(
 
   // The SDK verifier accepts whatever `alg` the protected header names, so the
   // algorithm restriction is enforced by only ever handing it EdDSA entries.
-  const eddsa = signatures.filter((sig) => protectedHeaderOf(sig)?.alg === ALG);
+  const eddsa = signatures.filter(
+    (sig) => protectedHeaderOf(sig)?.alg === A2A_JWS_ALG
+  );
   if (eddsa.length === 0) {
     throw new AgentCardVerificationError(
-      `AgentCard has no ${ALG} signature to verify`
+      `AgentCard has no ${A2A_JWS_ALG} signature to verify`
     );
   }
 

@@ -1,5 +1,11 @@
 import { SignJWT, importJWK, type JWK } from "jose";
 import { env } from "cloudflare:workers";
+import {
+  A2A_JWS_ALG,
+  gatewayTokenClaims,
+  jwksUrl,
+  type RemoteIdentity
+} from "@loopingai/a2a-protocol";
 
 /**
  * Gateway outbound identity for remote (custom) A2A agents.
@@ -16,19 +22,26 @@ import { env } from "cloudflare:workers";
  * `GATEWAY_JWT_PRIVATE_KEY` secret; its `kid` identifies the key for rotation.
  */
 
-/** JWS / JWT algorithm for the gateway identity. */
-const ALG = "EdDSA";
-
-/** Namespaced claim carrying the signed gateway-agent caller identity. */
-export const IDENTITY_CLAIM = "https://loopingai.org/identity";
-
 /**
- * Namespaced claim naming which agent at the audience the token authorizes.
+ * The claim names and the algorithm come from `@loopingai/a2a-protocol`.
  *
- * Must match `TENANT_CLAIM` in `@loopingai/core`'s `a2a/verify.ts` — the remote
- * reads this exact key and refuses a token that omits it.
+ * They used to be declared here and again in `@loopingai/core`, each with a
+ * comment saying it must match the other, because the gateway deliberately does
+ * **not** import core — core is the agent runtime, and a gateway is not an
+ * agent. That comment was the whole mechanism, and it failed: one side moved to
+ * the `loopingai.org` namespace while the other still minted
+ * `https://looping.ai/tenant`, the remote read an empty tenant, and every
+ * request 401'd with both builds green.
+ *
+ * The protocol package is the shared artifact that rule permits — zero
+ * dependencies, no crypto, no agent runtime, so depending on it commits this
+ * gateway to nothing. The rule itself is unchanged and still absolute: **the
+ * gateway must never import `@loopingai/core`.**
+ *
+ * Re-exported so this module stays the place the rest of the gateway imports
+ * them from.
  */
-export const TENANT_CLAIM = "https://loopingai.org/tenant";
+export { IDENTITY_CLAIM, TENANT_CLAIM } from "@loopingai/a2a-protocol";
 
 /** Token lifetime — short, since each dispatch mints a fresh one. */
 const TOKEN_TTL_SECONDS = 120;
@@ -37,20 +50,15 @@ const TOKEN_TTL_SECONDS = 120;
  * Stable identity of the logical gateway-agent instance making a remote call.
  * Derived from the registered agent row, not from the endpoint URL, so two
  * distinct agents can safely share one remote service.
+ *
+ * From the protocol package, where it is the **minted** half of the pair: every
+ * field required, because an issuer knows all of them. The remote parses the
+ * same claim into a `GatewayIdentity` with every field optional, since a
+ * signature proves a payload was not altered and never that it was well-formed.
+ * That asymmetry is asserted at the type level over there, so this staying
+ * assignable to what the remote accepts is checked rather than assumed.
  */
-export interface RemoteIdentity {
-  /**
-   * Canonical instance key used for `sub` and remote state partitioning.
-   * Example: `remote:7:analytics`.
-   */
-  key: string;
-  /** Registry name of the logical agent instance. */
-  name: string;
-  /** Where the caller runs — `"remote"` on every dispatch that reaches a remote. */
-  kind: string;
-  /** Workspace the registered agent belongs to. */
-  workspaceId: number;
-}
+export type { RemoteIdentity };
 
 interface SignGatewayTokenArgs {
   /**
@@ -112,8 +120,7 @@ export async function signGatewayToken(
 ): Promise<string> {
   const jwk = privateJwk();
   const { issuer } = args;
-  const jwksUrl = `${issuer}/.well-known/jwks.json`;
-  const key = await importJWK(jwk, ALG);
+  const key = await importJWK(jwk, A2A_JWS_ALG);
 
   // A tokenless tenant would be verified by the remote as "authorizes no
   // tenant" and refused on every request, so fail here where the cause is
@@ -125,18 +132,18 @@ export async function signGatewayToken(
   }
 
   return (
-    new SignJWT({
-      [IDENTITY_CLAIM]: {
-        key: args.identity.key,
-        name: args.identity.name,
-        kind: args.identity.kind,
-        workspaceId: args.identity.workspaceId
-      },
-      [TENANT_CLAIM]: args.tenant
-    })
+    // The claim keys are spelled by the package that owns them rather than
+    // here, so the shape the remote parses and the shape this builds cannot
+    // drift apart field by field.
+    new SignJWT(gatewayTokenClaims(args.identity, args.tenant))
       // jku (RFC 7515 §4.1.2): the URL of our public JWKS, embedded in the token so
       // remote agents can locate the verification key without separate configuration.
-      .setProtectedHeader({ alg: ALG, kid: jwk.kid, typ: "JWT", jku: jwksUrl })
+      .setProtectedHeader({
+        alg: A2A_JWS_ALG,
+        kid: jwk.kid,
+        typ: "JWT",
+        jku: jwksUrl(issuer)
+      })
       .setIssuer(issuer)
       .setSubject(args.identity.key)
       .setAudience(args.audience)
@@ -157,5 +164,5 @@ export function getPublicJwks(): { keys: JWK[] } {
   // Strip the private scalar; publish only the public point.
   const { d: _d, ...pub } = jwk;
   void _d;
-  return { keys: [{ ...pub, use: "sig", alg: ALG }] };
+  return { keys: [{ ...pub, use: "sig", alg: A2A_JWS_ALG }] };
 }

@@ -157,13 +157,13 @@ ARCHITECTURE.md   # Agent design, routing, and future A2A layer
 
 ---
 
-## Remote Agent Template
+## Building an agent for this gateway
 
-Looking to build a remote agent that connects to this gateway? Use the dedicated template repo:
+Use **[Looping-AI/looping-starter](https://github.com/Looping-AI/looping-starter)** — a working, deployable agent on Cloudflare Workers.
 
-→ **[Looping-AI/remote-agent](https://github.com/Looping-AI/remote-agent)**
+It ships the whole zero-trust A2A edge (gateway-JWT verification, AgentCard signing, JSON-RPC routing, the push-notification callback) via [`@loopingai/core`](https://github.com/Looping-AI/looping-core), so what you write is your agent's identity, its capabilities, and its config. `npm run agent:new <tenant>` scaffolds one.
 
-It includes a ready-to-deploy Cloudflare Worker with JWT verification, AgentCard signing, and JSON-RPC routing — everything you need to register a new agent with this gateway.
+Register it with this gateway using its **endpoint** and its **tenant id** — several agents share one endpoint and are told apart by the tenant claim in the token this gateway mints. See [`test/auth/wire-contract.spec.ts`](test/auth/wire-contract.spec.ts) for the exact contract the two sides share.
 
 ---
 
