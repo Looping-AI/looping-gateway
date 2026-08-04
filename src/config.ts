@@ -8,6 +8,20 @@ export const CHAT_MODEL_ID = "@cf/zai-org/glm-5.2";
 export const CHAT_FALLBACK_MODEL_ID = "@cf/zai-org/glm-4.7-flash";
 
 /**
+ * Reasoning budget asked of both chat models. GLM reasons by default, but with
+ * no budget attached the depth is the provider's — and left to itself it has
+ * answered registry questions straight from the conversation instead of calling
+ * the tool that would have checked. `medium` is the middle of the three levels
+ * the provider accepts: enough deliberation to decide a tool call is needed,
+ * without paying `high` on every Slack turn. `null` would disable thinking.
+ *
+ * Applied as a model *setting* rather than a per-call `providerOptions`, so it
+ * covers the tool loop and the Sessions compaction summarizer alike — both run
+ * on the same model instance.
+ */
+export const CHAT_REASONING_EFFORT = "medium";
+
+/**
  * Workers AI text-to-image model for admin avatar generation. FLUX.2 [klein] 9B —
  * a first-party `@cf/` catalog model that returns a base64-encoded JPEG in `{ image }`,
  * which we decode to bytes before storing.

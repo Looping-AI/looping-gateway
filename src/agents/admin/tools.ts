@@ -130,6 +130,7 @@ function shape(a: AgentRow, channels: string[]): ToolResult {
     enabled: a.enabled,
     notifyOn: a.notifyOn,
     a2aEndpoint: a.a2aEndpoint,
+    tenantId: a.tenantId,
     workspaceId: a.workspaceId,
     channels
   };
