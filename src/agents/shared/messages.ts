@@ -1,11 +1,21 @@
-import type { ModelMessage } from "ai";
-import type { SessionMessage } from "agents/experimental/memory/session";
+import type { ModelMessage, UIMessage } from "ai";
+import { convertToModelMessages } from "ai";
+import type {
+  SessionMessage,
+  SessionMessagePart
+} from "agents/experimental/memory/session";
 
 /**
- * Glue between A2A text and the Agents SDK Sessions store. We persist only the
- * user turn and the assistant's final text — intra-turn tool steps stay inside
- * the single `generateText` call, so history is plain text messages and the
- * conversion to AI-SDK `ModelMessage`s is trivial. Shared by every in-repo agent.
+ * Glue between A2A text and the Agents SDK Sessions store.
+ *
+ * A user turn is plain text. An assistant turn is its final text **plus the tool
+ * calls it actually made** — see {@link assistantSessionMessage} for why that
+ * second half exists and {@link toModelMessages} for how it is replayed.
+ *
+ * `SessionMessagePart` is structurally the AI SDK's `UIMessagePart` (it declares
+ * `toolCallId` / `toolName` / `input` / `output` / `state`), so the two shapes are
+ * the same shape and the SDK's own converter can do the replay. Shared by every
+ * in-repo agent.
  */
 
 /**
@@ -164,12 +174,101 @@ export function userSessionMessage(text: string): SessionMessage {
   };
 }
 
-export function assistantSessionMessage(text: string): SessionMessage {
+/**
+ * One tool call a turn actually made, as it is recorded in history. `errorText`
+ * is set *instead of* `output` when the call itself failed (a schema rejection,
+ * or a throw from the handler) — note that most in-repo tools report refusals as
+ * an ordinary `{ error: … }` output rather than failing, and those are `output`s.
+ */
+export interface ToolRecord {
+  toolCallId: string;
+  toolName: string;
+  input: unknown;
+  output?: unknown;
+  errorText?: string;
+}
+
+/**
+ * Per-value ceiling on a recorded call's input/output. History is replayed on
+ * every subsequent turn and counted toward compaction, so one broad read must not
+ * be able to crowd out the conversation on its own. Truncation is explicit in the
+ * value so the model can tell "large result" from "small result".
+ */
+export const MAX_TOOL_RECORD_CHARS = 1500;
+
+/** Serialize-and-cap one recorded value, keeping small values structured. */
+function cap(value: unknown): unknown {
+  if (value === undefined) return undefined;
+  let json: string;
+  try {
+    json = JSON.stringify(value) ?? String(value);
+  } catch {
+    json = String(value);
+  }
+  if (json.length <= MAX_TOOL_RECORD_CHARS) return value;
+  return `${json.slice(0, MAX_TOOL_RECORD_CHARS)}… [truncated, ${json.length} chars total]`;
+}
+
+/** Cap a plain string the same way, for `errorText`. */
+function capText(text: string): string {
+  return text.length <= MAX_TOOL_RECORD_CHARS
+    ? text
+    : `${text.slice(0, MAX_TOOL_RECORD_CHARS)}… [truncated, ${text.length} chars total]`;
+}
+
+/**
+ * One recorded call as a message part.
+ *
+ * Cast at the boundary because `SessionMessagePart` is the Session's deliberately
+ * *minimal* shape; the full contract is the AI SDK's `ToolUIPart`, which is what
+ * {@link toModelMessages} hands back to the converter, and only that one declares
+ * `errorText`.
+ *
+ * The part carries its own `input` **and** `output`, so a call and its result can
+ * never be separated — including by a compaction boundary landing between them.
+ */
+function toolPart(record: ToolRecord): SessionMessagePart {
+  const call = {
+    type: `tool-${record.toolName}`,
+    toolCallId: record.toolCallId,
+    input: cap(record.input)
+  };
+  const part =
+    record.errorText === undefined
+      ? { ...call, state: "output-available", output: cap(record.output) }
+      : {
+          ...call,
+          state: "output-error",
+          errorText: capText(record.errorText)
+        };
+  return part as SessionMessagePart;
+}
+
+/**
+ * The assistant's turn: what it did, then what it said.
+ *
+ * `actions` are the tool calls the turn really made. Persisting them is what stops
+ * a fabricated claim compounding: with only the final text in history, a turn that
+ * announced "Done ✅" while calling nothing was indistinguishable from one that did
+ * the work, and every later turn read the claim back as fact. Now the transcript
+ * either contains the call or visibly does not.
+ *
+ * The `step-start` separator flushes the converter's block so the replayed
+ * transcript is chronological — results land *before* the reply that describes
+ * them, rather than after it.
+ */
+export function assistantSessionMessage(
+  text: string,
+  actions: ToolRecord[] = []
+): SessionMessage {
+  const parts: SessionMessagePart[] = actions.map(toolPart);
+  if (parts.length > 0) parts.push({ type: "step-start" });
+  parts.push({ type: "text", text });
   return {
     id: crypto.randomUUID(),
     role: "assistant",
     createdAt: new Date(),
-    parts: [{ type: "text", text }]
+    parts
   };
 }
 
@@ -181,12 +280,27 @@ export function sessionText(m: SessionMessage): string {
     .join("");
 }
 
-/** Convert stored history to AI-SDK model messages (user/assistant text only). */
-export function toModelMessages(history: SessionMessage[]): ModelMessage[] {
-  return history
+/**
+ * Replay stored history as AI-SDK model messages.
+ *
+ * Delegates to the SDK's own `convertToModelMessages` rather than joining text by
+ * hand: a stored assistant turn is a `UIMessage`, and expanding its tool parts
+ * into the `assistant[tool-call]` → `tool[tool-result]` pair every provider
+ * expects is exactly what that function is for.
+ *
+ * Only `user` and `assistant` survive the filter — any other role makes the
+ * converter throw, and nothing here writes one. Unrecognized *parts* are ignored
+ * by the converter, so a future part type cannot break an existing session.
+ */
+export async function toModelMessages(
+  history: SessionMessage[]
+): Promise<ModelMessage[]> {
+  const messages = history
     .filter((m) => m.role === "user" || m.role === "assistant")
     .map((m) => ({
       role: m.role as "user" | "assistant",
-      content: sessionText(m)
+      // Same shape, narrower declaration — see {@link toolPart}.
+      parts: m.parts as UIMessage["parts"]
     }));
+  return convertToModelMessages(messages, { ignoreIncompleteToolCalls: true });
 }

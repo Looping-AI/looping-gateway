@@ -120,6 +120,12 @@ export class AdminAgentExecutor implements AgentExecutor {
       // prefixes "⚠️ *Agent …* (failed):" — the apology belongs in one place.
       unexpectedReply:
         "Couldn't handle that admin request. Check the error logs for details.",
+      // This agent changes real state, so "said it did" and "did it" must not be
+      // the same outcome. The turn has to end in a `final_reply` call rather than
+      // in prose, and the calls it actually made are persisted with the reply so a
+      // later turn can see what happened instead of re-confirming a claim.
+      requireFinalReply: true,
+      recordToolCalls: true,
       prepare: async (_text, metadata, turn) => {
         // Validate the deserialized wire metadata at this boundary. Both the
         // workspace id and the Slack user are guaranteed preconditions (the

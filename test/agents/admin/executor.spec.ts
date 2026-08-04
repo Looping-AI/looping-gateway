@@ -15,6 +15,7 @@ import { getAgent, registerAgent } from "@/db/models/agents";
 import {
   FakeSession,
   fakeRecallEnv,
+  finalReplyResult,
   okResult,
   toolCallResult,
   makeRequest,
@@ -50,7 +51,7 @@ describe("AdminAgentExecutor", () => {
   it("runs the loop and completes an A2A task with the model's reply", async () => {
     const session = new FakeSession();
     const model = new MockLanguageModelV3({
-      doGenerate: async () => okResult("Here are your agents.") as never
+      doGenerate: async () => finalReplyResult("Here are your agents.") as never
     });
     const exec = new AdminAgentExecutor(sqlHost, {
       model,
@@ -97,7 +98,7 @@ describe("AdminAgentExecutor", () => {
     const model = new MockLanguageModelV3({
       doGenerate: async (options) => {
         capturedToolNames = (options.tools ?? []).map((t) => t.name);
-        return okResult("done") as never;
+        return finalReplyResult("done") as never;
       }
     });
     const exec = new AdminAgentExecutor(sqlHost, {
@@ -122,7 +123,7 @@ describe("AdminAgentExecutor", () => {
           ? toolCallResult("recall", {
               query: "what did we decide last month?"
             })
-          : okResult("Found it in past context.")) as never
+          : finalReplyResult("Found it in past context.")) as never
     });
     const exec = new AdminAgentExecutor(sqlHost, {
       model,
@@ -216,7 +217,7 @@ describe("AdminAgentExecutor — HITL approval resume", () => {
       "req-1": { kind: "unregister_agent", name: "resume-del", wsId }
     });
     const model = new MockLanguageModelV3({
-      doGenerate: async () => okResult("Done — I deleted it.") as never
+      doGenerate: async () => finalReplyResult("Done — I deleted it.") as never
     });
     const exec = new AdminAgentExecutor(sqlHost, {
       model,
@@ -256,7 +257,8 @@ describe("AdminAgentExecutor — HITL approval resume", () => {
       "req-2": { kind: "unregister_agent", name: "resume-keep", wsId }
     });
     const model = new MockLanguageModelV3({
-      doGenerate: async () => okResult("Okay, I won't delete it.") as never
+      doGenerate: async () =>
+        finalReplyResult("Okay, I won't delete it.") as never
     });
     const exec = new AdminAgentExecutor(sqlHost, {
       model,
@@ -283,7 +285,7 @@ describe("AdminAgentExecutor — HITL approval resume", () => {
     const store = fakeStore(); // empty — an ask_user answer has no stored action
     const session = new FakeSession();
     const model = new MockLanguageModelV3({
-      doGenerate: async () => okResult("Great, using staging.") as never
+      doGenerate: async () => finalReplyResult("Great, using staging.") as never
     });
     const exec = new AdminAgentExecutor(sqlHost, {
       model,
