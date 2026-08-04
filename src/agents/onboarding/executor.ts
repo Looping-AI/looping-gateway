@@ -3,6 +3,7 @@ import type {
   ExecutionEventBus,
   RequestContext
 } from "@a2a-js/sdk/server";
+import { COMPACT_AFTER_TOKENS, COMPACT_TAIL_TOKENS } from "@/config";
 import { createModelPair, type ModelOverrides } from "@/agents/model";
 import {
   buildAgentSession,
@@ -16,8 +17,6 @@ import { archiveMessages } from "@/agents/shared/recall";
 import { recallTools } from "@/agents/shared/recall-tool";
 import { onboardingSoul } from "./prompt";
 import { buildOnboardingTools } from "./tools";
-
-const COMPACT_AFTER_TOKENS = 60_000;
 
 /** Test seams — production uses the defaults (real model + Sessions store). */
 export interface OnboardingExecutorOptions extends ModelOverrides {
@@ -54,6 +53,7 @@ export class OnboardingAgentExecutor implements AgentExecutor {
               "Durable facts about this user — their name, role, and what they're trying to set up. Keep it concise.",
             memoryMaxTokens: 1000,
             compactAfterTokens: COMPACT_AFTER_TOKENS,
+            compactTailTokens: COMPACT_TAIL_TOKENS,
             onArchive: (msgs) => archiveMessages(namespace, msgs)
           });
     }

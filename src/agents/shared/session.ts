@@ -39,6 +39,12 @@ export interface AgentSessionOptions {
   /** History token threshold that triggers compaction. */
   compactAfterTokens: number;
   /**
+   * Token budget for the recent tail compaction leaves verbatim. Must stay well
+   * below {@link compactAfterTokens} or there is no middle left to summarize —
+   * see `COMPACT_TAIL_TOKENS` for why the two are one decision.
+   */
+  compactTailTokens: number;
+  /**
    * Archive the raw messages displaced by each compaction (episodic recall).
    * Best-effort: a throw here must never abort compaction.
    */
@@ -89,7 +95,9 @@ export function buildAgentSession(
 ): Session {
   const compact = archivingCompaction(
     createCompactFunction({
-      summarize: (prompt) => generateText({ model, prompt }).then((r) => r.text)
+      summarize: (prompt) =>
+        generateText({ model, prompt }).then((r) => r.text),
+      tailTokenBudget: opts.compactTailTokens
     }),
     opts.onArchive
   );

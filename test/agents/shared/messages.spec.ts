@@ -10,6 +10,7 @@ import {
   slackTsToIso,
   sessionText,
   toModelMessages,
+  MAX_TOOL_RECORD_CHARS,
   type TurnContext
 } from "@/agents/shared/messages";
 
@@ -198,6 +199,123 @@ describe("assistantSessionMessage", () => {
     const b = assistantSessionMessage("x");
     expect(a.id).not.toBe(b.id);
   });
+
+  it("has no tool parts when the turn called nothing", () => {
+    // The absence is the evidence: a turn that claimed to act while calling
+    // nothing must be visibly distinguishable from one that acted.
+    const m = assistantSessionMessage("Done! ✅");
+    expect(m.parts).toHaveLength(1);
+    expect(m.parts.every((p) => p.type === "text")).toBe(true);
+  });
+
+  it("records a call's input and output on one part, before the reply", () => {
+    const m = assistantSessionMessage("Updated the endpoint.", [
+      {
+        toolCallId: "tc1",
+        toolName: "agents_update",
+        input: { name: "arc-player" },
+        output: { ok: true }
+      }
+    ]);
+    // Call and result live on the same part, so no boundary can separate them.
+    expect(m.parts[0]).toMatchObject({
+      type: "tool-agents_update",
+      toolCallId: "tc1",
+      state: "output-available",
+      input: { name: "arc-player" },
+      output: { ok: true }
+    });
+    // `step-start` flushes the converter's block so results precede the reply.
+    expect(m.parts[1]).toMatchObject({ type: "step-start" });
+    expect(m.parts[2]).toMatchObject({
+      type: "text",
+      text: "Updated the endpoint."
+    });
+  });
+
+  it("records a failed call as an error state", () => {
+    const m = assistantSessionMessage("That didn't work.", [
+      {
+        toolCallId: "tc1",
+        toolName: "agents_update",
+        input: { name: "nope" },
+        errorText: "no such agent"
+      }
+    ]);
+    expect(m.parts[0]).toMatchObject({
+      type: "tool-agents_update",
+      state: "output-error",
+      errorText: "no such agent"
+    });
+  });
+
+  it("truncates an oversized output rather than letting it crowd out history", () => {
+    const big = "x".repeat(MAX_TOOL_RECORD_CHARS * 2);
+    const m = assistantSessionMessage("Here you go.", [
+      { toolCallId: "tc1", toolName: "agents_read", input: {}, output: big }
+    ]);
+    const output = (m.parts[0] as { output: string }).output;
+    expect(typeof output).toBe("string");
+    expect(output).toContain("[truncated,");
+    expect(output.length).toBeLessThan(big.length);
+  });
+
+  it("truncates a long string output without JSON-encoding it", () => {
+    // A string output is already the readable form. Encoding it first would store
+    // the quoted, escaped shape — a stray leading `"` — and report the encoded
+    // length rather than the string's own.
+    const big = "x".repeat(MAX_TOOL_RECORD_CHARS * 2);
+    const m = assistantSessionMessage("ok", [
+      { toolCallId: "tc1", toolName: "recall", input: {}, output: big }
+    ]);
+    const output = (m.parts[0] as { output: string }).output;
+    expect(output.startsWith('"')).toBe(false);
+    expect(output).toContain(`[truncated, ${big.length} chars total]`);
+  });
+
+  it("never truncates a string output mid-escape", () => {
+    // Sized so the JSON encoding would put the `\` of a `\n` escape exactly on
+    // the cut, leaving a dangling backslash in the stored transcript.
+    const big = "x".repeat(MAX_TOOL_RECORD_CHARS - 2) + "\n" + "y".repeat(100);
+    const m = assistantSessionMessage("ok", [
+      { toolCallId: "tc1", toolName: "recall", input: {}, output: big }
+    ]);
+    const output = (m.parts[0] as { output: string }).output;
+    const body = output.slice(0, MAX_TOOL_RECORD_CHARS);
+    expect(body).toBe(big.slice(0, MAX_TOOL_RECORD_CHARS));
+    expect(body.endsWith("\\")).toBe(false);
+  });
+
+  it("keeps a small string output verbatim", () => {
+    const m = assistantSessionMessage("ok", [
+      { toolCallId: "tc1", toolName: "recall", input: {}, output: "all good" }
+    ]);
+    expect((m.parts[0] as { output: unknown }).output).toBe("all good");
+  });
+
+  it("keeps a small output structured", () => {
+    const m = assistantSessionMessage("ok", [
+      {
+        toolCallId: "tc1",
+        toolName: "agents_read",
+        input: {},
+        output: { a: 1 }
+      }
+    ]);
+    expect((m.parts[0] as { output: unknown }).output).toEqual({ a: 1 });
+  });
+
+  it("leaves sessionText as the reply alone, so recall never sees tool JSON", () => {
+    const m = assistantSessionMessage("the reply", [
+      {
+        toolCallId: "tc1",
+        toolName: "agents_read",
+        input: {},
+        output: { secret: "noise" }
+      }
+    ]);
+    expect(sessionText(m)).toBe("the reply");
+  });
 });
 
 describe("sessionText", () => {
@@ -253,7 +371,7 @@ describe("sessionText", () => {
 });
 
 describe("toModelMessages", () => {
-  it("maps history to role/content pairs", () => {
+  it("maps history to role/content pairs", async () => {
     const history: SessionMessage[] = [
       { id: "1", role: "user", parts: [{ type: "text", text: "hi" }] },
       {
@@ -262,23 +380,23 @@ describe("toModelMessages", () => {
         parts: [{ type: "text", text: "hello" }]
       }
     ];
-    expect(toModelMessages(history)).toEqual([
-      { role: "user", content: "hi" },
-      { role: "assistant", content: "hello" }
+    expect(await toModelMessages(history)).toEqual([
+      { role: "user", content: [{ type: "text", text: "hi" }] },
+      { role: "assistant", content: [{ type: "text", text: "hello" }] }
     ]);
   });
 
-  it("filters out non-user/assistant roles", () => {
+  it("filters out non-user/assistant roles", async () => {
     const history = [
       { id: "s", role: "system", parts: [{ type: "text", text: "ignore" }] },
       { id: "u", role: "user", parts: [{ type: "text", text: "keep" }] }
     ] as unknown as SessionMessage[];
-    const out = toModelMessages(history);
+    const out = await toModelMessages(history);
     expect(out).toHaveLength(1);
     expect(out[0].role).toBe("user");
   });
 
-  it("uses sessionText to join multi-part content", () => {
+  it("keeps multi-part content in order", async () => {
     const history: SessionMessage[] = [
       {
         id: "1",
@@ -289,10 +407,64 @@ describe("toModelMessages", () => {
         ]
       }
     ];
-    expect(toModelMessages(history)[0].content).toBe("part1part2");
+    expect((await toModelMessages(history))[0].content).toEqual([
+      { type: "text", text: "part1" },
+      { type: "text", text: "part2" }
+    ]);
   });
 
-  it("returns an empty array for empty history", () => {
-    expect(toModelMessages([])).toEqual([]);
+  it("returns an empty array for empty history", async () => {
+    expect(await toModelMessages([])).toEqual([]);
+  });
+
+  it("replays a recorded call as the assistant/tool pair, then the reply", async () => {
+    // The whole point of pillar 2: a later turn's prompt carries proof of what
+    // the earlier turn actually did, not just what it said about it.
+    const history = [
+      { id: "u", role: "user", parts: [{ type: "text", text: "update it" }] },
+      assistantSessionMessage("Updated the endpoint.", [
+        {
+          toolCallId: "tc1",
+          toolName: "agents_update",
+          input: { name: "arc-player" },
+          output: { ok: true }
+        }
+      ])
+    ] as SessionMessage[];
+
+    const out = await toModelMessages(history);
+
+    expect(out.map((m) => m.role)).toEqual([
+      "user",
+      "assistant",
+      "tool",
+      "assistant"
+    ]);
+    expect(out[1].content).toMatchObject([
+      { type: "tool-call", toolCallId: "tc1", toolName: "agents_update" }
+    ]);
+    expect(out[2].content).toMatchObject([
+      { type: "tool-result", toolCallId: "tc1", toolName: "agents_update" }
+    ]);
+    expect(out[3].content).toEqual([
+      { type: "text", text: "Updated the endpoint." }
+    ]);
+  });
+
+  it("replays a failed call so a later turn can see the attempt failed", async () => {
+    const history = [
+      assistantSessionMessage("That didn't work.", [
+        {
+          toolCallId: "tc1",
+          toolName: "agents_update",
+          input: { name: "nope" },
+          errorText: "no such agent"
+        }
+      ])
+    ] as SessionMessage[];
+
+    const out = await toModelMessages(history);
+    expect(out.map((m) => m.role)).toEqual(["assistant", "tool", "assistant"]);
+    expect(out[1].content).toMatchObject([{ type: "tool-result" }]);
   });
 });

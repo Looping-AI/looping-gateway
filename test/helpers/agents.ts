@@ -63,12 +63,28 @@ export function fakeRecallEnv() {
  * `vi.restoreAllMocks()`.
  */
 export function stubAgentAi(text = "stubbed agent reply") {
-  return vi
-    .spyOn(env.AI, "run")
-    .mockImplementation((async (model: string, inputs: { text?: string[] }) =>
-      model === EMBED_MODEL_ID
-        ? { data: (inputs.text ?? [""]).map(() => Array(1024).fill(0.1)) }
-        : { response: text }) as never);
+  return vi.spyOn(env.AI, "run").mockImplementation((async (
+    model: string,
+    inputs?: { text?: string[]; tools?: { function?: { name?: string } }[] }
+  ) => {
+    if (model === EMBED_MODEL_ID) {
+      return { data: (inputs?.text ?? [""]).map(() => Array(1024).fill(0.1)) };
+    }
+    // An agent running with `requireFinalReply` cannot end a turn in prose, so
+    // the stub has to answer the way the real contract does. Replying with text
+    // would fail every attempt — and the turn would then burn both models plus a
+    // final round, outliving the test that stubbed this binding and rejecting
+    // against the real one on its detached promise.
+    const requiresFinalReply = (inputs?.tools ?? []).some(
+      (t) => t?.function?.name === "final_reply"
+    );
+    return requiresFinalReply
+      ? {
+          response: "",
+          tool_calls: [{ name: "final_reply", arguments: { text } }]
+        }
+      : { response: text };
+  }) as never);
 }
 
 // Minimal valid LanguageModelV3 generate result.
@@ -116,6 +132,25 @@ export function toolCallResult(toolName: string, input: unknown) {
       totalTokens: 2
     },
     warnings: []
+  };
+}
+
+/**
+ * How an agent running with `requireFinalReply` ends a turn: the reply arrives as
+ * the `final_reply` control call's input, not as plain text. Use this wherever a
+ * spec would otherwise have used {@link okResult} to answer.
+ */
+export function finalReplyResult(text: string, toolCallId = "fr1") {
+  return {
+    ...toolCallResult("final_reply", { text }),
+    content: [
+      {
+        type: "tool-call",
+        toolCallId,
+        toolName: "final_reply",
+        input: JSON.stringify({ text })
+      }
+    ]
   };
 }
 

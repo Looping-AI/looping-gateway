@@ -12,8 +12,10 @@ import {
   executeAgentTurn,
   type AgentTurnConfig
 } from "@/agents/shared/loop";
+import { sessionText } from "@/agents/shared/messages";
 import {
   FakeSession,
+  finalReplyResult,
   okResult,
   lengthResult,
   toolCallResult
@@ -814,5 +816,575 @@ describe("executeAgentTurn — HITL park", () => {
     expect(publishedStates(bus)).not.toContain(
       TaskState.TASK_STATE_INPUT_REQUIRED
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Forced ending (`requireFinalReply`) — prose is no longer an outcome.
+//
+// The failure these cover really happened: five consecutive admin turns came back
+// `finish_reason: stop` with zero tool calls, each rendering a confident "Feito! ✅"
+// table, while the database showed nothing had been written.
+// ---------------------------------------------------------------------------
+
+/** A step that emits some narration alongside `toolName`. */
+function narratedToolCall(text: string, toolName: string, input: unknown) {
+  return {
+    ...toolCallResult(toolName, input),
+    content: [
+      { type: "text", text },
+      {
+        type: "tool-call",
+        toolCallId: `tc-${toolName}`,
+        toolName,
+        input: JSON.stringify(input)
+      }
+    ]
+  };
+}
+
+/** A `final_reply` call preceded by narration in the same step. */
+function narratedFinalReply(text: string, reply: string) {
+  return {
+    ...finalReplyResult(reply),
+    content: [
+      { type: "text", text },
+      {
+        type: "tool-call",
+        toolCallId: "fr1",
+        toolName: "final_reply",
+        input: JSON.stringify({ text: reply })
+      }
+    ]
+  };
+}
+
+const workTool = tool({
+  description: "Do some work.",
+  inputSchema: z.object({ name: z.string().optional() }),
+  execute: async () => ({ ok: true })
+});
+
+function forcedCfg(
+  session: SessionLike,
+  models: ModelPair,
+  overrides: Partial<AgentTurnConfig> = {}
+): AgentTurnConfig {
+  return makeCfg(session, models, {
+    requireFinalReply: true,
+    recordToolCalls: true,
+    prepare: async () => ({
+      session,
+      systemSuffix: "",
+      tools: { work: workTool }
+    }),
+    ...overrides
+  });
+}
+
+/** The tool parts of the persisted assistant message, if any. */
+function persistedActions(session: FakeSession) {
+  const assistant = session.messages.find((m) => m.role === "assistant");
+  return (assistant?.parts ?? []).filter((p) => p.type.startsWith("tool-"));
+}
+
+describe("executeAgentTurn — forced final_reply", () => {
+  it("takes the final_reply call's text as the reply", async () => {
+    const session = new FakeSession();
+    const model = new MockLanguageModelV3({
+      doGenerate: async () => finalReplyResult("Here are your agents.") as never
+    });
+    const bus = fakeEventBus();
+
+    await executeAgentTurn(
+      fakeRequestContext("list agents"),
+      bus.eventBus,
+      forcedCfg(session, fakeModels(model))
+    );
+
+    expect(partsText(expectTerminalReply(bus)?.parts)).toBe(
+      "Here are your agents."
+    );
+    expect(session.messages.map((m) => m.role)).toEqual(["user", "assistant"]);
+    expect(sessionText(session.messages[1])).toBe("Here are your agents.");
+  });
+
+  it("declares final_reply and forces a tool choice", async () => {
+    const session = new FakeSession();
+    const seen: { tools: string[]; toolChoice: unknown }[] = [];
+    const model = new MockLanguageModelV3({
+      doGenerate: async (options) => {
+        seen.push({
+          tools: (options.tools ?? []).map((t) => t.name),
+          toolChoice: options.toolChoice
+        });
+        return finalReplyResult("ok") as never;
+      }
+    });
+    const bus = fakeEventBus();
+
+    await executeAgentTurn(
+      fakeRequestContext("hi"),
+      bus.eventBus,
+      forcedCfg(session, fakeModels(model))
+    );
+
+    expect(seen[0].toolChoice).toEqual({ type: "required" });
+    // Declared first: tool order is part of the prompt, and reaching an ending is
+    // the thing every turn has to do.
+    expect(seen[0].tools[0]).toBe("final_reply");
+    expect(seen[0].tools).toContain("work");
+  });
+
+  it("never ships narration as an answer: prose burns both slots and apologizes", async () => {
+    // The regression. Under the old loop this exact generation — text, no call —
+    // completed the task successfully and told the user the work was done.
+    const session = new FakeSession();
+    let primaryCalls = 0;
+    let fallbackCalls = 0;
+    const primary = new MockLanguageModelV3({
+      doGenerate: async () => {
+        primaryCalls++;
+        return okResult("Feito! ✅ I updated the endpoint.") as never;
+      }
+    });
+    const fallback = new MockLanguageModelV3({
+      doGenerate: async () => {
+        fallbackCalls++;
+        return okResult("Feito! ✅ I updated the endpoint.") as never;
+      }
+    });
+    const bus = fakeEventBus();
+
+    await executeAgentTurn(
+      fakeRequestContext("update the endpoint"),
+      bus.eventBus,
+      forcedCfg(session, fakeModels(primary, fallback))
+    );
+
+    expect(primaryCalls).toBeGreaterThan(0);
+    expect(fallbackCalls).toBeGreaterThan(0);
+    // The claim never reaches the user, and is never persisted as history.
+    expect(publishedText(bus)).not.toContain("Feito!");
+    expect(partsText(expectTerminalReply(bus)?.parts)).toMatch(
+      /temporarily unavailable/i
+    );
+    expect(session.messages.map((m) => m.role)).toEqual(["user"]);
+  });
+
+  it("repairs a blank final_reply on the same model", async () => {
+    const session = new FakeSession();
+    const prompts: string[] = [];
+    let n = 0;
+    const model = new MockLanguageModelV3({
+      doGenerate: async (options) => {
+        prompts.push(JSON.stringify(options.prompt));
+        return (
+          n++ === 0 ? finalReplyResult("   ") : finalReplyResult("Real answer.")
+        ) as never;
+      }
+    });
+    const bus = fakeEventBus();
+
+    await executeAgentTurn(
+      fakeRequestContext("hi"),
+      bus.eventBus,
+      forcedCfg(session, fakeModels(model))
+    );
+
+    expect(prompts).toHaveLength(2);
+    // The rejection is shown to the model as a failed tool result…
+    expect(prompts[1]).toContain("final_reply");
+    expect(prompts[1]).toContain("must not be blank");
+    // …and the blank reply never reaches the user.
+    expect(partsText(expectTerminalReply(bus)?.parts)).toBe("Real answer.");
+    // The repair exchange is ephemeral — history keeps only the ending it landed on.
+    expect(session.messages.map((m) => m.role)).toEqual(["user", "assistant"]);
+    expect(sessionText(session.messages[1])).toBe("Real answer.");
+  });
+
+  it("forces a final round when the turn spends every step on work", async () => {
+    const session = new FakeSession();
+    const declared: string[][] = [];
+    const model = new MockLanguageModelV3({
+      doGenerate: async (options) => {
+        const names = (options.tools ?? []).map((t) => t.name);
+        declared.push(names);
+        // Keep working for as long as there is anything to work with.
+        return (
+          names.includes("work")
+            ? narratedToolCall("still going", "work", {})
+            : finalReplyResult("Here is what I managed.")
+        ) as never;
+      }
+    });
+    const bus = fakeEventBus();
+
+    await executeAgentTurn(
+      fakeRequestContext("do a lot"),
+      bus.eventBus,
+      forcedCfg(session, fakeModels(model))
+    );
+
+    // The last call is the final round: nothing on the table but the reply.
+    expect(declared.at(-1)).toEqual(["final_reply"]);
+    // The user gets the real summary, not an apology for an outage that never happened.
+    expect(partsText(expectTerminalReply(bus)?.parts)).toBe(
+      "Here is what I managed."
+    );
+    expect(publishedText(bus)).not.toMatch(/temporarily unavailable/i);
+  });
+
+  it("publishes intermediate narration but not the final_reply step's text", async () => {
+    const session = new FakeSession();
+    let n = 0;
+    const model = new MockLanguageModelV3({
+      doGenerate: async () =>
+        (n++ === 0
+          ? narratedToolCall("I will check that.", "work", {})
+          : narratedFinalReply(
+              "thinking out loud",
+              "Here is what I found."
+            )) as never
+    });
+    const bus = fakeEventBus();
+
+    await executeAgentTurn(
+      fakeRequestContext("hi"),
+      bus.eventBus,
+      forcedCfg(session, fakeModels(model))
+    );
+
+    expect(publishedText(bus)).toContain("I will check that.");
+    // Publishing the ending step's text too would post the same thought twice.
+    expect(publishedText(bus)).not.toContain("thinking out loud");
+    expect(partsText(expectTerminalReply(bus)?.parts)).toBe(
+      "Here is what I found."
+    );
+  });
+
+  it("lets a park out-rank a final_reply emitted in the same step", async () => {
+    const session = new FakeSession();
+    const request = {
+      type: "io.looping.hitl.request",
+      requestId: "req-1",
+      requestKind: "choice",
+      prompt: "Which environment?",
+      options: [{ id: "opt_0", label: "dev" }],
+      allowFreeform: true
+    };
+    const model = new MockLanguageModelV3({
+      doGenerate: async () =>
+        ({
+          ...toolCallResult("ask", {}),
+          content: [
+            {
+              type: "tool-call",
+              toolCallId: "tc-ask",
+              toolName: "ask",
+              input: "{}"
+            },
+            {
+              type: "tool-call",
+              toolCallId: "fr1",
+              toolName: "final_reply",
+              input: JSON.stringify({ text: "Using dev." })
+            }
+          ]
+        }) as never
+    });
+    const bus = fakeEventBus();
+
+    await executeAgentTurn(
+      fakeRequestContext("set up an agent"),
+      bus.eventBus,
+      forcedCfg(session, fakeModels(model), {
+        prepare: async (_t, _m, turn) => ({
+          session,
+          systemSuffix: "",
+          tools: {
+            ask: tool({
+              description: "Ask the user.",
+              inputSchema: z.object({}),
+              execute: async () => {
+                turn.park(request as never);
+                return { status: "awaiting_user" };
+              }
+            })
+          }
+        })
+      })
+    );
+
+    // Asking is the more committal act, so the question is raised and the answer
+    // it would have given is discarded.
+    expect(publishedStates(bus).at(-1)).toBe(
+      TaskState.TASK_STATE_INPUT_REQUIRED
+    );
+    expect(publishedText(bus)).not.toContain("Using dev.");
+  });
+
+  it("lets a 🛑 out-rank everything, with no fallback or final round after it", async () => {
+    const session = new FakeSession();
+    let calls = 0;
+    const model = new MockLanguageModelV3({
+      doGenerate: async () => {
+        calls++;
+        return narratedToolCall("working", "work", {}) as never;
+      }
+    });
+    const bus = fakeEventBus();
+
+    await executeAgentTurn(
+      fakeRequestContext("do some work"),
+      bus.eventBus,
+      forcedCfg(session, fakeModels(model), { isCanceled: async () => true })
+    );
+
+    expect(calls).toBe(1);
+    expect(publishedStates(bus).at(-1)).toBe(TaskState.TASK_STATE_CANCELED);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Tool-call evidence in history (`recordToolCalls`)
+//
+// History used to keep only the assistant's final text, so a fabricated claim
+// became fact for every later turn. Now the transcript either contains the call
+// or visibly does not.
+// ---------------------------------------------------------------------------
+
+describe("executeAgentTurn — recorded tool calls", () => {
+  it("persists a call's input and output alongside the reply", async () => {
+    const session = new FakeSession();
+    let n = 0;
+    const model = new MockLanguageModelV3({
+      doGenerate: async () =>
+        (n++ === 0
+          ? toolCallResult("work", { name: "arc-player" })
+          : finalReplyResult("Updated the endpoint.")) as never
+    });
+    const bus = fakeEventBus();
+
+    await executeAgentTurn(
+      fakeRequestContext("update it"),
+      bus.eventBus,
+      forcedCfg(session, fakeModels(model))
+    );
+
+    const actions = persistedActions(session);
+    expect(actions).toHaveLength(1);
+    expect(actions[0]).toMatchObject({
+      type: "tool-work",
+      state: "output-available",
+      input: { name: "arc-player" },
+      output: { ok: true }
+    });
+    // The reply is still the only text — recall and FTS see no tool JSON.
+    expect(sessionText(session.messages[1])).toBe("Updated the endpoint.");
+  });
+
+  it("records nothing when the turn called nothing — the absence is the evidence", async () => {
+    const session = new FakeSession();
+    const model = new MockLanguageModelV3({
+      doGenerate: async () => finalReplyResult("Feito! ✅") as never
+    });
+    const bus = fakeEventBus();
+
+    await executeAgentTurn(
+      fakeRequestContext("update it"),
+      bus.eventBus,
+      forcedCfg(session, fakeModels(model))
+    );
+
+    // A later turn asked "did that go through?" can now see that it did not.
+    expect(persistedActions(session)).toHaveLength(0);
+    expect(sessionText(session.messages[1])).toBe("Feito! ✅");
+  });
+
+  it("never records final_reply itself as an action", async () => {
+    const session = new FakeSession();
+    const model = new MockLanguageModelV3({
+      doGenerate: async () => finalReplyResult("done") as never
+    });
+    const bus = fakeEventBus();
+
+    await executeAgentTurn(
+      fakeRequestContext("hi"),
+      bus.eventBus,
+      forcedCfg(session, fakeModels(model))
+    );
+
+    expect(persistedActions(session)).toHaveLength(0);
+  });
+
+  it("keeps calls that ran before a 🛑 — the side effects are real", async () => {
+    const session = new FakeSession();
+    let stopped = false;
+    const model = new MockLanguageModelV3({
+      doGenerate: async () => {
+        const result = toolCallResult("work", {});
+        stopped = true;
+        return result as never;
+      }
+    });
+    const bus = fakeEventBus();
+
+    await executeAgentTurn(
+      fakeRequestContext("do some work"),
+      bus.eventBus,
+      forcedCfg(session, fakeModels(model), { isCanceled: async () => stopped })
+    );
+
+    expect(publishedStates(bus).at(-1)).toBe(TaskState.TASK_STATE_CANCELED);
+    expect(persistedActions(session)).toHaveLength(1);
+    expect(sessionText(session.messages[1])).toContain("stopped by the user");
+  });
+
+  it("keeps calls that ran before a HITL park", async () => {
+    const session = new FakeSession();
+    const request = {
+      type: "io.looping.hitl.request",
+      requestId: "req-1",
+      requestKind: "approval",
+      prompt: "Delete arc-player?"
+    };
+    let n = 0;
+    const model = new MockLanguageModelV3({
+      doGenerate: async () =>
+        (n++ === 0
+          ? toolCallResult("work", {})
+          : toolCallResult("ask", {})) as never
+    });
+    const bus = fakeEventBus();
+
+    await executeAgentTurn(
+      fakeRequestContext("delete it"),
+      bus.eventBus,
+      forcedCfg(session, fakeModels(model), {
+        prepare: async (_t, _m, turn) => ({
+          session,
+          systemSuffix: "",
+          tools: {
+            work: workTool,
+            ask: tool({
+              description: "Ask the user.",
+              inputSchema: z.object({}),
+              execute: async () => {
+                turn.park(request as never);
+                return { status: "awaiting_approval" };
+              }
+            })
+          }
+        })
+      })
+    );
+
+    expect(publishedStates(bus).at(-1)).toBe(
+      TaskState.TASK_STATE_INPUT_REQUIRED
+    );
+    // Both the work that ran and the question that parked the turn.
+    expect(persistedActions(session).map((p) => p.type)).toEqual([
+      "tool-work",
+      "tool-ask"
+    ]);
+    expect(sessionText(session.messages[1])).toBe("Delete arc-player?");
+  });
+
+  it("records a failed call so a later turn cannot confirm it as a success", async () => {
+    const session = new FakeSession();
+    let n = 0;
+    const model = new MockLanguageModelV3({
+      doGenerate: async () =>
+        (n++ === 0
+          ? toolCallResult("work", {})
+          : finalReplyResult("That didn't work.")) as never
+    });
+    const bus = fakeEventBus();
+
+    await executeAgentTurn(
+      fakeRequestContext("update it"),
+      bus.eventBus,
+      forcedCfg(session, fakeModels(model), {
+        prepare: async () => ({
+          session,
+          systemSuffix: "",
+          tools: {
+            // The annotation matters: an `execute` that only ever throws infers
+            // `Promise<never>`, which collapses the tool's output generic.
+            work: tool({
+              description: "Do some work.",
+              inputSchema: z.object({}),
+              execute: async (): Promise<{ ok: boolean }> => {
+                throw new Error("no such agent");
+              }
+            })
+          }
+        })
+      })
+    );
+
+    const actions = persistedActions(session);
+    expect(actions).toHaveLength(1);
+    expect(actions[0]).toMatchObject({ state: "output-error" });
+    expect(
+      (actions[0] as unknown as { errorText: string }).errorText
+    ).toContain("no such agent");
+  });
+
+  it("keeps the record when the turn produced no reply at all", async () => {
+    // The apology is not persisted — it says nothing true about the workspace —
+    // but a call that ran and left no trace is how the next turn ends up guessing.
+    const session = new FakeSession();
+    let n = 0;
+    const model = new MockLanguageModelV3({
+      doGenerate: async () =>
+        (n++ === 0
+          ? toolCallResult("work", {})
+          : okResult("Feito! ✅")) as never
+    });
+    const bus = fakeEventBus();
+
+    await executeAgentTurn(
+      fakeRequestContext("update it"),
+      bus.eventBus,
+      forcedCfg(session, fakeModels(model))
+    );
+
+    expect(partsText(expectTerminalReply(bus)?.parts)).toMatch(
+      /temporarily unavailable/i
+    );
+    expect(publishedText(bus)).not.toContain("Feito!");
+    expect(persistedActions(session)).toHaveLength(1);
+  });
+
+  it("stays off for agents that have not opted in", async () => {
+    const session = new FakeSession();
+    let n = 0;
+    const model = new MockLanguageModelV3({
+      doGenerate: async () =>
+        (n++ === 0
+          ? toolCallResult("work", {})
+          : okResult("Here is what I found.")) as never
+    });
+    const bus = fakeEventBus();
+
+    await executeAgentTurn(
+      fakeRequestContext("hi"),
+      bus.eventBus,
+      makeCfg(session, fakeModels(model), {
+        prepare: async () => ({
+          session,
+          systemSuffix: "",
+          tools: { work: workTool }
+        })
+      })
+    );
+
+    // The plain-text ending still answers, and history stays text-only.
+    expect(partsText(expectTerminalReply(bus)?.parts)).toBe(
+      "Here is what I found."
+    );
+    expect(persistedActions(session)).toHaveLength(0);
   });
 });

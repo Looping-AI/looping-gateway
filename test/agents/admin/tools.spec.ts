@@ -66,15 +66,33 @@ describe("admin tools — agents_create / agents_read", () => {
     });
     expect(reg).toMatchObject({ ok: true });
 
-    const read = (await agentsRead(d, { name: "tool-agent-a" })) as {
-      agents: Array<{ name: string; kind: string; workspaceId: number }>;
+    type ReadResult = {
+      agents: Array<{
+        name: string;
+        kind: string;
+        tenantId: string;
+        workspaceId: number;
+      }>;
     };
+    const read = (await agentsRead(d, { name: "tool-agent-a" })) as ReadResult;
     expect(read.agents).toHaveLength(1);
     expect(read.agents[0]).toMatchObject({
       name: "tool-agent-a",
       kind: "remote",
+      tenantId: "unregister_agent",
       workspaceId: wsId
     });
+
+    // The list path shapes rows separately from the by-name lookup, so it needs
+    // its own assertion that tenantId — which addresses the agent at its
+    // endpoint — is surfaced too.
+    const listed = (await agentsRead(d, {})) as ReadResult;
+    expect(listed.agents).toEqual([
+      expect.objectContaining({
+        name: "tool-agent-a",
+        tenantId: "unregister_agent"
+      })
+    ]);
   });
 
   it("denies a caller who is not an admin of the workspace", async () => {
