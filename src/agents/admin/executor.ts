@@ -1,6 +1,7 @@
 import type { AgentExecutor, ExecutionEventBus } from "@a2a-js/sdk/server";
 import { RequestContext } from "@a2a-js/sdk/server";
 import { textPart } from "@/a2a/parts";
+import { COMPACT_AFTER_TOKENS, COMPACT_TAIL_TOKENS } from "@/config";
 import { createModelPair, type ModelOverrides } from "@/agents/model";
 import {
   buildAgentSession,
@@ -34,8 +35,6 @@ import { generateAvatar, type GeneratedImage } from "./avatar";
 
 // Re-exported so existing test imports (`@/agents/admin/executor`) keep working.
 export type { SessionHost, SessionLike } from "@/agents/shared/session";
-
-const COMPACT_AFTER_TOKENS = 60_000;
 
 /** Test seams — production uses the defaults (real model + Sessions store). */
 export interface AdminExecutorOptions extends ModelOverrides {
@@ -96,6 +95,7 @@ export class AdminAgentExecutor implements AgentExecutor {
               "Durable facts about this workspace — who the admins are, conventions, and decisions. Keep it concise.",
             memoryMaxTokens: 1200,
             compactAfterTokens: COMPACT_AFTER_TOKENS,
+            compactTailTokens: COMPACT_TAIL_TOKENS,
             onArchive: (msgs) => archiveMessages(namespace, msgs)
           });
     }
