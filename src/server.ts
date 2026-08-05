@@ -1,5 +1,6 @@
 import { handleSlackEvent } from "@/slack-webhook-handler";
 import { handleSlackInteractivity } from "@/slack-interactivity-handler";
+import { JWKS_PATH } from "@loopingai/a2a-protocol";
 import { getPublicJwks } from "@/auth/agent-outbound";
 import {
   handleRemoteAgentNotification,
@@ -28,7 +29,7 @@ export default {
     // Public JWKS — the gateway's Ed25519 signing public key(s). Remote (custom)
     // A2A agents fetch this to verify the gateway-identity JWT on each request.
     // Only public key material is ever exposed; no secret is shared.
-    if (request.method === "GET" && url.pathname === "/.well-known/jwks.json") {
+    if (request.method === "GET" && url.pathname === JWKS_PATH) {
       return Response.json(getPublicJwks(), {
         headers: { "cache-control": "public, max-age=3600" }
       });

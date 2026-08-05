@@ -203,27 +203,22 @@ export function originOf(endpoint: string): string {
  * The `aud` a dispatch token carries: the agent's **exact endpoint**, which is
  * the URL its own card advertises as its JSONRPC interface.
  *
- * Not the origin. It proves a token was minted for *this service* rather than
- * anything else the host serves — a webhook, an admin API — so a token cannot be
- * replayed sideways at a neighbour that happens to trust the same gateway. It
- * says nothing about *which agent* on it: every tenant of a deployment shares one
- * endpoint and so one audience, and `TENANT_CLAIM` is what separates those.
+ * From `@loopingai/a2a-protocol`, because it is one half of a two-sided rule.
+ * The receiving side derives its expected audience from the same place — it
+ * composes its card's interface URL with `endpointUrl` and verifies that same
+ * string — and the package pins `audienceFor(endpointUrl(o, p)) === endpointUrl(o, p)`
+ * for every path, so both ends agree by construction rather than by two
+ * implementations happening to match.
  *
- * The value is never guessed. `verifyRemoteAgentEndpoint` resolves it from the
- * card at registration and stores it, so no path convention exists to be wrong
- * about — an agent serving on `/api/v2/agent` works exactly as one on `/a2a`.
- * That matters because the receiving side derives its expected audience from the
- * same place: `@loopingai/core` builds a card interface as `${origin}${rpcPath}`
- * and verifies that same string, so both ends agree by construction for any path
- * an agent chooses.
+ * `verifyRemoteAgentEndpoint` resolves the endpoint from the card at
+ * registration and stores it, so the value is never guessed and no path
+ * convention exists to be wrong about — an agent serving on `/api/v2/agent`
+ * works exactly as one on `/a2a`.
  *
- * Rebuilt as `origin + pathname` rather than passed through verbatim, so a query
- * string or fragment on the stored URL cannot change it.
+ * Re-exported here so the rest of the gateway keeps importing it from the
+ * module that owns endpoint policy.
  */
-export function audienceFor(endpoint: string): string {
-  const url = new URL(endpoint);
-  return `${url.origin}${url.pathname}`;
-}
+export { audienceFor } from "@loopingai/a2a-protocol";
 
 /**
  * The card's JSONRPC interface — where to POST, and what the audience is built

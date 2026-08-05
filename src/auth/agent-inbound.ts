@@ -5,9 +5,8 @@ import {
   type JWK,
   type JWTPayload
 } from "jose";
+import { A2A_JWS_ALG } from "@loopingai/a2a-protocol";
 import { resolveSigningKey } from "@/a2a/card-verify";
-
-const ALG = "EdDSA";
 
 /** The pinned signing identity of a remote agent, from its registry row. */
 export interface CallbackVerifyPin {
@@ -53,7 +52,7 @@ export async function verifyAgentCallbackToken(args: {
   } catch {
     throw new AgentCallbackAuthError("callback token is not a valid JWS");
   }
-  if (header.alg !== ALG) {
+  if (header.alg !== A2A_JWS_ALG) {
     throw new AgentCallbackAuthError(
       `unexpected alg '${header.alg ?? "none"}'`
     );
@@ -78,10 +77,10 @@ export async function verifyAgentCallbackToken(args: {
     );
   }
 
-  const key = await importJWK(jwk, ALG);
+  const key = await importJWK(jwk, A2A_JWS_ALG);
   try {
     const { payload } = await jwtVerify(token, key, {
-      algorithms: [ALG],
+      algorithms: [A2A_JWS_ALG],
       audience,
       clockTolerance: 60,
       maxTokenAge: "10 minutes"

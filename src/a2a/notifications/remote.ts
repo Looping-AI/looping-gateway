@@ -1,3 +1,4 @@
+import { NOTIFICATION_TOKEN_HEADER } from "@loopingai/a2a-protocol";
 import { getAgent } from "@/db/models/agents";
 import {
   getAgentTaskByToken,
@@ -14,10 +15,27 @@ import {
 import { parseStreamResponse, snapshotOf } from "@/a2a/snapshot";
 import { deliverTaskToSlack, TaskDeliveryValidationError } from "./shared";
 
-/** Header carrying the per-task validation token set in pushNotificationConfig. */
-export const NOTIFICATION_TOKEN_HEADER = "x-a2a-notification-token";
+/**
+ * Header carrying the per-task validation token set in pushNotificationConfig.
+ *
+ * From `@loopingai/a2a-protocol`, which the remote agent also reads it from —
+ * it used to be declared here and again in `@loopingai/core`, each pointing a
+ * comment at the other. Slightly different from the claim names: the value is
+ * `@a2a-js/sdk`'s own default for `tokenHeaderName`, but the SDK never exports
+ * it, so neither side could import it and both wrote it down.
+ *
+ * Re-exported so the rest of the gateway keeps importing it from here.
+ */
+export { NOTIFICATION_TOKEN_HEADER } from "@loopingai/a2a-protocol";
 
-/** The gateway path remote agents POST A2A Task snapshots to. */
+/**
+ * The gateway path remote agents POST A2A Task snapshots to.
+ *
+ * Deliberately **not** in the protocol package. It is not a shared constant at
+ * all: the gateway hands each agent the full callback URL in the
+ * `taskPushNotificationConfig`, and the agent POSTs to whatever it was given. No
+ * remote ever spells this path, so nothing can drift from it.
+ */
 export const NOTIFICATIONS_PATH = "/a2a/notifications";
 
 const OK = () => new Response("ok", { status: 200 });

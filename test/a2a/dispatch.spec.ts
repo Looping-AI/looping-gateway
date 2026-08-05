@@ -690,10 +690,16 @@ describe("dispatchToAgent (tenant)", () => {
 
     const token = posts.at(-1)?.authorization?.replace(/^Bearer /, "") ?? "";
     const claims = decodeJwt(token);
-    // Spelled out rather than imported from `TENANT_CLAIM` on purpose: this is
-    // the wire contract with `@loopingai/core`, which reads this exact key and
-    // refuses a token without it. Asserting through the constant would follow
-    // the constant, so a rename here would pass while every remote 401s.
+    // Spelled out rather than imported from `TENANT_CLAIM` on purpose, though
+    // no longer for the original reason. Both sides now derive this key from
+    // `@loopingai/a2a-protocol`, so asserting through the constant would no
+    // longer let a rename pass while remotes 401 — the rename would reach the
+    // remote too.
+    //
+    // It stays a literal because this is the one *end-to-end* assertion: it
+    // reads the token off a real dispatch and checks the bytes on the wire. A
+    // unit test proves the minter uses the package; this proves what actually
+    // left the building.
     expect(claims["https://loopingai.org/tenant"]).toBe("proactive");
     expect(claims.aud).toBe(ENDPOINT);
   });
