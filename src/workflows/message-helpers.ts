@@ -1,5 +1,4 @@
 import type { WorkflowStep } from "cloudflare:workers";
-import { env } from "cloudflare:workers";
 import type { MessageWorkflowParams } from "@/slack/types";
 import { buildUserAuthContext } from "@/auth";
 import {
@@ -11,15 +10,17 @@ import {
 } from "@/agents/dispatch";
 import { InvalidEndpointError } from "@/a2a/endpoint";
 import {
-  completeAgentTask,
-  getPendingAgentTasksByEventId
+  getPendingAgentTasksByEventId,
+  markAgentTaskCanceled,
+  markCancelRequested,
+  type AgentTaskRow
 } from "@/db/models/agent-tasks";
+import { getAgent } from "@/db/models/agents";
+import { cancelHitlRequestsByToken } from "@/db/models/hitl-requests";
+import { markHitlPromptResolved } from "@/a2a/notifications/hitl";
 import { renderEditDiff } from "@/util/text-diff";
 import { postReply } from "@/wrappers/slack";
-import {
-  REACTION_COLLECT_EVENT,
-  reactionInstanceId
-} from "@/workflows/reaction";
+import { signalReactionSync } from "@/workflows/reaction-helpers";
 
 // Shown when a dispatch's retries are fully exhausted (persistently unreachable
 // endpoint, TLS/DNS failure, persistent 5xx, accept timeout). Not transient by
@@ -192,28 +193,8 @@ export async function dispatchMessage(
 }
 
 /**
- * Tell the parallel ReactionWorkflow that a reply was posted so it collects
- * (removes) the 🛑 stop reaction immediately. Best-effort: any failure is
- * logged, not thrown — the reaction is cosmetic and the ReactionWorkflow's
- * timeout backstop removes it regardless.
- */
-export async function signalReactionCollect(eventId: string): Promise<void> {
-  try {
-    const instance = await env.REACTION_WORKFLOW.get(
-      reactionInstanceId(eventId)
-    );
-    await instance.sendEvent({ type: REACTION_COLLECT_EVENT, payload: {} });
-  } catch (err) {
-    console.warn("[message] reaction collect signal failed (non-fatal)", {
-      eventId,
-      err: String(err)
-    });
-  }
-}
-
-/**
  * Collect (remove) the 🛑 reaction only once the whole fan-out for a trigger
- * event has drained — i.e. no `pending` task remains for it. A single Slack
+ * event has drained — i.e. no non-terminal task remains for it. A single Slack
  * message can wake several agents; each finishes independently, so the reaction
  * must linger until the *last* one is terminal (otherwise it clears on the first
  * completion and the user loses the ability to stop the rest). Called at every
@@ -223,11 +204,17 @@ export async function signalReactionCollect(eventId: string): Promise<void> {
  * Race note: this is only reliable because every fan-out row is recorded up front
  * (before any dispatch), so a fast terminal callback can never observe an
  * incomplete sibling set and drain early.
+ *
+ * The drain check is also what keeps the signal honest. The ReactionWorkflow
+ * measures its processing budget with its own timer, so it must only ever be
+ * woken at a real leg boundary — signalling on *every* completion would hand a
+ * slow sibling a fresh hour each time a fast one finished. Hence the guard: no
+ * signal until nothing is left.
  */
 export async function collectIfEventDrained(eventId: string): Promise<void> {
   const pending = await getPendingAgentTasksByEventId(eventId);
   if (pending.length === 0) {
-    await signalReactionCollect(eventId);
+    await signalReactionSync(eventId);
   }
 }
 
@@ -237,19 +224,27 @@ export async function collectIfEventDrained(eventId: string): Promise<void> {
  *                   recorded for a not-yet-accepted task (all "it will stop / is
  *                   stopped" from the user's view).
  * - `unsupported` — the agent doesn't implement cancellation; it keeps running.
- * - `error`       — a transport/other failure; best-effort, left to finish.
+ * - `error`       — a transport/other failure; the agent may keep running.
+ *
+ * All three terminalize the row (see {@link cancelAndReconcile}); the distinction
+ * only decides what the user is told.
  */
 export type CancelRowKind = "stopped" | "unsupported" | "error";
 
 /**
- * Ask an agent to stop `taskId` and reconcile the ledger row from the outcome.
+ * Ask an agent to stop `taskId`, then mark the row `canceled` — **whatever the
+ * agent answered**.
  *
- * Cancellation is *attempted*, not guaranteed (A2A §7.5). Only the terminal /
- * idempotent outcomes (`canceled`, `not_cancelable`, `not_found`) mean the agent
- * will send no further callback, so only those complete the row. On `unsupported`
- * or `error` the task is still running and may yet deliver a valid reply — the
- * row must stay `pending` so that callback still routes to Slack (and the 🛑
- * lingers until it lands) instead of being dropped against a completed row.
+ * Cancellation is *attempted*, not guaranteed (A2A §7.5): on `unsupported` or
+ * `error` the agent may well run to completion and deliver. This used to leave
+ * the row `pending` so that late reply still reached Slack. It no longer does. A
+ * stop is a decision about whether the user wants the answer at all, so once one
+ * is issued the task is over here: the row goes terminal, and the reply — if it
+ * ever arrives — is dropped at the notification boundary with a 200 (which also
+ * stops the remote's retry ladder rather than inviting it to hammer us).
+ *
+ * The kind is still returned, because "we stopped it" and "it refused to stop"
+ * are different things to *say*, even though the ledger treats them alike.
  */
 export async function cancelAndReconcile(
   agent: DispatchAgentRef,
@@ -257,11 +252,11 @@ export async function cancelAndReconcile(
   token: string
 ): Promise<CancelRowKind> {
   const outcome = await cancelAgentTask(agent, taskId);
+  await markAgentTaskCanceled(token);
   switch (outcome.kind) {
     case "canceled":
     case "not_cancelable":
     case "not_found":
-      await completeAgentTask(token);
       return "stopped";
     case "unsupported":
       return "unsupported";
@@ -271,13 +266,103 @@ export async function cancelAndReconcile(
 }
 
 /**
- * Notice posted when a stop wasn't honored and the agent runs to completion —
- * for both `unsupported` and `error`. The cause differs but the user-visible
- * consequence is identical (a reply is still coming), and the gateway shouldn't
- * leak transport detail into the thread.
+ * Notice posted when a stop wasn't honored — for both `unsupported` and `error`.
+ * The cause differs but the user-visible consequence is identical, and the
+ * gateway shouldn't leak transport detail into the thread.
+ *
+ * Says the reply is discarded rather than promising it will arrive: the row is
+ * terminal from the moment the stop was issued, so a reply the agent still
+ * produces never reaches this thread.
  */
 export function cancelNotHonoredText(agentName: string): string {
-  return `*Agent ${agentName}* can't be stopped mid-run and will finish on its own.`;
+  return `*Agent ${agentName}* couldn't be stopped mid-run. It may keep running, but its reply will be discarded.`;
+}
+
+/** Why a task was stopped. Recorded in the log line — the ledger keeps only `canceled`. */
+export type CancelReason = "user" | "task-timeout";
+
+/** Who or what issued a stop, for the one log line that records it. */
+export interface CancelOrigin {
+  reason: CancelReason;
+  /** Slack user id that tapped 🛑; null when the gateway timed the task out. */
+  actorUserId: string | null;
+}
+
+/**
+ * Stop one non-terminal task via the standard A2A `tasks/cancel`, reconciling the
+ * gateway ledger from the (synchronous) response — a conformant agent sends no
+ * push callback after cancellation, so the gateway is the source of truth here.
+ *
+ * Shared by both triggers: a human's 🛑 (`CancelWorkflow`) and the gateway's own
+ * processing-deadline cancel (`ReactionWorkflow`). They differ only in what the
+ * user is told and in the `origin` recorded below.
+ *
+ * Handles the taskId race: if the accept hasn't returned a taskId yet, record a
+ * `cancelRequested` intent instead. If that atomic mark reveals the accept just
+ * committed (taskId now present), cancel directly; otherwise the dispatch's
+ * accept path honors the intent. Exactly one cancel fires either way.
+ *
+ * Exported for unit testing.
+ */
+export async function cancelTaskRow(
+  row: AgentTaskRow,
+  origin: CancelOrigin
+): Promise<CancelRowResult> {
+  // The only record of *who* stopped a task: the actor is not a column, and the
+  // ledger keeps a single `canceled` status for both triggers.
+  console.log("[cancel] canceling task", {
+    reason: origin.reason,
+    actorUserId: origin.actorUserId,
+    agent: row.agentName,
+    token: row.token,
+    taskId: row.taskId,
+    eventId: row.eventId,
+    channelId: row.channelId,
+    messageTs: row.messageTs
+  });
+
+  const agent = await getAgent(row.agentName);
+  if (!agent) {
+    // Agent deregistered mid-flight — nothing to cancel; reconcile the row.
+    await markAgentTaskCanceled(row.token);
+    return { agentName: row.agentName, kind: "stopped" };
+  }
+  const ref: DispatchAgentRef = {
+    name: agent.name,
+    kind: agent.kind,
+    a2aEndpoint: agent.a2aEndpoint,
+    tenantId: agent.tenantId,
+    workspaceId: agent.workspaceId
+  };
+
+  let taskId = row.taskId;
+  if (!taskId) {
+    const mark = await markCancelRequested(row.token);
+    // Row completed/purged between resolve and now, or intent recorded for a
+    // task whose taskId is still unknown → the accept path (dispatch) honors it.
+    if (!mark.matched || !mark.taskId) {
+      return { agentName: row.agentName, kind: "stopped" };
+    }
+    taskId = mark.taskId; // accept raced in — cancel directly now
+  }
+
+  const kind = await cancelAndReconcile(ref, taskId, row.token);
+
+  // Close any human-in-the-loop prompt the task had open (the stop supersedes it),
+  // and strip its now-dead buttons in Slack. Independent of the cancel outcome:
+  // the run is over, so the pending question no longer stands.
+  const canceledPrompts = await cancelHitlRequestsByToken(row.token);
+  for (const prompt of canceledPrompts) {
+    await markHitlPromptResolved(prompt, "🛑 Canceled.");
+  }
+
+  return { agentName: row.agentName, kind };
+}
+
+/** What one row's cancel attempt produced, for the caller's user-facing summary. */
+export interface CancelRowResult {
+  agentName: string;
+  kind: CancelRowKind;
 }
 
 /**

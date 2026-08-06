@@ -37,9 +37,9 @@ import {
  *   1. pre-dispatch guard — if a stop was already recorded, skip the send
  *      entirely (never wake the agent);
  *   2. post-accept honor — if a stop landed during the send, `tasks/cancel` the
- *      now-known taskId (the atomic `updateAgentTaskTaskId` reports it) and
- *      complete the row only if that cancel was terminal; an agent that can't be
- *      canceled keeps its row pending so its eventual reply still reaches Slack.
+ *      now-known taskId (the atomic `updateAgentTaskTaskId` reports it). The row
+ *      goes terminal either way: an agent that can't be canceled may run on, but
+ *      its reply is dropped at the notification boundary rather than posted.
  */
 async function runAgentTask(
   step: WorkflowStep,
@@ -86,10 +86,10 @@ async function runAgentTask(
       );
       if (stop === "stopped") return { kind: "done" };
 
-      // The agent won't (or couldn't be asked to) stop, so its row stays pending
-      // and its eventual callback still delivers. Say so: the CancelWorkflow
-      // raced ahead of the taskId and already reported the intent as stopped, so
-      // this notice is the only correction the user gets.
+      // The agent won't (or couldn't be asked to) stop, so it may run on — but its
+      // row is already terminal and its callback will be dropped. Say so: the
+      // CancelWorkflow raced ahead of the taskId and already reported the intent as
+      // stopped, so this notice is the only correction the user gets.
       await step.do(`cancel-not-honored:${plan.agent.name}`, () =>
         postReply(
           p.channelId,
@@ -99,7 +99,9 @@ async function runAgentTask(
           null
         )
       );
-      return { kind: "accepted" };
+      // `done`, not `accepted`: nothing is still owed to this thread, so the 🛑
+      // should drain now rather than linger waiting for a reply we'd discard.
+      return { kind: "done" };
     }
     return { kind: "accepted" };
   }
@@ -141,6 +143,8 @@ async function runAgentTask(
  * authenticated `/a2a/notifications` callback. The 🛑 reaction lingers until the
  * *last* pending task of the fan-out is terminal — `collectIfEventDrained` at the
  * end here (and in every terminal delivery) clears it only when nothing is left.
+ * If an agent never delivers, the ReactionWorkflow cancels it once its processing
+ * budget (`TASK_DEADLINE_SECONDS`) runs out, so the 🛑 always drains eventually.
  *
  * Steps: `resolve` → one `record-tasks` (all rows up front) → per agent
  * `guard-cancel` + `dispatch` + `update-task` (+ `honor-cancel`) → `collect`.

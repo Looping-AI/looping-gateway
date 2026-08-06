@@ -6,7 +6,7 @@ import {
   setAllowedRemoteAgentDomains
 } from "@/db/models/workspace-configs";
 import { createAgentTask, getAgentTaskByToken } from "@/db/models/agent-tasks";
-import { cancelTaskRow } from "@/workflows/cancel";
+import { cancelTaskRow } from "@/workflows/message-helpers";
 import { buildAgentCard } from "@/a2a/card";
 import { makeTask } from "../helpers/a2a";
 
@@ -84,15 +84,18 @@ async function seedTask(token: string, taskId: string | null): Promise<void> {
   });
 }
 
+/** A human tapping the 🛑 — the origin for every case that isn't about the timeout. */
+const USER_ORIGIN = { reason: "user", actorUserId: "U123" } as const;
+
 describe("cancelTaskRow", () => {
-  it("cancels a task with a known taskId and completes the ledger row", async () => {
+  it("cancels a task with a known taskId and terminalizes the ledger row", async () => {
     stubCancelRemote((id) => ({ jsonrpc: "2.0", id, result: canceledTask }));
     await seedTask("t1", "task-9");
     const row = await getAgentTaskByToken("t1");
 
-    const res = await cancelTaskRow(row!);
+    const res = await cancelTaskRow(row!, USER_ORIGIN);
     expect(res).toEqual({ agentName: "remoteagent", kind: "stopped" });
-    expect((await getAgentTaskByToken("t1"))?.status).toBe("completed");
+    expect((await getAgentTaskByToken("t1"))?.status).toBe("canceled");
   });
 
   it("records intent (no cancel call) when the taskId isn't known yet", async () => {
@@ -102,7 +105,7 @@ describe("cancelTaskRow", () => {
     await seedTask("t2", null);
     const row = await getAgentTaskByToken("t2");
 
-    const res = await cancelTaskRow(row!);
+    const res = await cancelTaskRow(row!, USER_ORIGIN);
     expect(res).toEqual({ agentName: "remoteagent", kind: "stopped" });
     // The row stays pending, flagged for the dispatch's accept path to honor.
     const after = await getAgentTaskByToken("t2");
@@ -111,7 +114,7 @@ describe("cancelTaskRow", () => {
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
-  it("leaves an agent that doesn't support cancel running (unsupported)", async () => {
+  it("terminalizes even when the agent refuses to cancel (unsupported)", async () => {
     stubCancelRemote((id) => ({
       jsonrpc: "2.0",
       id,
@@ -120,13 +123,14 @@ describe("cancelTaskRow", () => {
     await seedTask("t3", "task-9");
     const row = await getAgentTaskByToken("t3");
 
-    const res = await cancelTaskRow(row!);
+    const res = await cancelTaskRow(row!, USER_ORIGIN);
     expect(res).toEqual({ agentName: "remoteagent", kind: "unsupported" });
-    // Not reconciled — the task keeps running and its own callback completes it.
-    expect((await getAgentTaskByToken("t3"))?.status).toBe("pending");
+    // The agent may run on, but the stop stands: the row is terminal and the reply
+    // it still produces is dropped at the notification boundary.
+    expect((await getAgentTaskByToken("t3"))?.status).toBe("canceled");
   });
 
-  it("leaves the row pending when the cancel attempt fails (error)", async () => {
+  it("terminalizes even when the cancel attempt fails (error)", async () => {
     stubCancelRemote((id) => ({
       jsonrpc: "2.0",
       id,
@@ -135,11 +139,11 @@ describe("cancelTaskRow", () => {
     await seedTask("t5", "task-9");
     const row = await getAgentTaskByToken("t5");
 
-    const res = await cancelTaskRow(row!);
+    const res = await cancelTaskRow(row!, USER_ORIGIN);
     expect(res).toEqual({ agentName: "remoteagent", kind: "error" });
-    // Never reconciled on a failed attempt — the agent may still call back, and a
-    // completed row would drop that reply.
-    expect((await getAgentTaskByToken("t5"))?.status).toBe("pending");
+    // A failed attempt doesn't reprieve the task — the user asked for it to stop,
+    // so the row goes terminal and any late callback is dropped.
+    expect((await getAgentTaskByToken("t5"))?.status).toBe("canceled");
   });
 
   it("treats an already-terminal task as stopped (idempotent)", async () => {
@@ -151,8 +155,23 @@ describe("cancelTaskRow", () => {
     await seedTask("t4", "task-9");
     const row = await getAgentTaskByToken("t4");
 
-    const res = await cancelTaskRow(row!);
+    const res = await cancelTaskRow(row!, USER_ORIGIN);
     expect(res).toEqual({ agentName: "remoteagent", kind: "stopped" });
-    expect((await getAgentTaskByToken("t4"))?.status).toBe("completed");
+    expect((await getAgentTaskByToken("t4"))?.status).toBe("canceled");
+  });
+
+  it("records the same canceled status when the gateway times the task out", async () => {
+    stubCancelRemote((id) => ({ jsonrpc: "2.0", id, result: canceledTask }));
+    await seedTask("t6", "task-9");
+    const row = await getAgentTaskByToken("t6");
+
+    const res = await cancelTaskRow(row!, {
+      reason: "task-timeout",
+      actorUserId: null
+    });
+    // One terminal state for both triggers — which one fired lives in the log line,
+    // since the actor is not a column.
+    expect(res).toEqual({ agentName: "remoteagent", kind: "stopped" });
+    expect((await getAgentTaskByToken("t6"))?.status).toBe("canceled");
   });
 });

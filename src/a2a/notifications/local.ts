@@ -11,6 +11,7 @@ import type {
 import { getAgent, type BuiltinTenant } from "@/db/models/agents";
 import {
   getAgentTaskByToken,
+  isTerminalTaskStatus,
   recordAgentTaskError
 } from "@/db/models/agent-tasks";
 import { isTerminalTaskState } from "@/a2a/parts";
@@ -34,6 +35,14 @@ const DELIVERY_BACKOFF_MS = [250, 1000];
  * the DO alive for one turn. A turn always publishes a terminal state (so the
  * barrier normally resolves on delivery); this only bounds `ctx.waitUntil` if a
  * terminal is somehow never emitted, well past any real turn budget.
+ *
+ * Deliberately **not** raised to match `TASK_DEADLINE_SECONDS` (1 hour), however
+ * tempting the symmetry looks. This barrier keeps a Durable Object resident, and
+ * Durable Objects bill wall-clock duration for their full 128 MB allocation for
+ * as long as they are alive — so unlike the gateway's hour-long *wait* (a
+ * hibernating Workflow, billed on CPU it never spends), every minute here is paid
+ * for. The hour is an affordance for remote agents, whose compute runs on their
+ * own Worker; a built-in has no business taking eight minutes, let alone sixty.
  */
 const SETTLE_TIMEOUT_MS = 480_000;
 /** Cap on remembered already-settled task ids (guards a settle that beats whenSettled). */
@@ -93,7 +102,11 @@ export async function deliverLocalAgentTask(
     });
     return;
   }
-  if (row.status === "completed") return;
+  // Delivered, stopped, or timed out — the task is over, so this snapshot is
+  // dropped rather than posted. Unreachable in practice (the settle barrier below
+  // outlives any built-in turn by a wide margin), but it keeps both notification
+  // boundaries honest about the same invariant.
+  if (isTerminalTaskStatus(row.status)) return;
 
   const agent = await getAgent(row.agentName);
   if (!agent || agent.tenantId !== expectedTenant) {

@@ -9,6 +9,10 @@ import {
   recordReceivedMessageId,
   updateAgentTaskTaskId,
   markCancelRequested,
+  markAgentTaskCanceled,
+  suspendForInput,
+  isTerminalTaskStatus,
+  getPendingAgentTasksByEventId,
   deleteAgentTask,
   sweepStaleAgentTasks,
   type CreateAgentTaskInput
@@ -253,6 +257,67 @@ describe("agent-tasks model", () => {
       await createAgentTask(input("upd-stop", { taskId: null }));
       await markCancelRequested("upd-stop");
       expect(await updateAgentTaskTaskId("upd-stop", "task-2")).toBe(true);
+    });
+  });
+  describe("terminal states", () => {
+    it("markAgentTaskCanceled terminalizes a pending row, once", async () => {
+      await createAgentTask(input("cx-a"));
+      expect(await markAgentTaskCanceled("cx-a")).toBe(true);
+      const row = await getAgentTaskByToken("cx-a");
+      expect(row?.status).toBe("canceled");
+      expect(row?.completedAt).toBeTruthy();
+      // Idempotent: a replayed cancel flips nothing and reports it.
+      expect(await markAgentTaskCanceled("cx-a")).toBe(false);
+    });
+
+    it("cancels a task parked on a human prompt", async () => {
+      // A 🛑 must still reach a task waiting on an answer, so `awaiting-input` is
+      // not terminal and stays cancelable.
+      await createAgentTask(input("cx-park"));
+      await suspendForInput("cx-park");
+      expect(await markAgentTaskCanceled("cx-park")).toBe(true);
+      expect((await getAgentTaskByToken("cx-park"))?.status).toBe("canceled");
+    });
+
+    it("never reopens a terminal row", async () => {
+      // The invariant behind dropping late callbacks: once the gateway has given
+      // up on a task, a reply arriving afterwards cannot resurrect it.
+      await createAgentTask(input("cx-b"));
+      await markAgentTaskCanceled("cx-b");
+      expect(await completeAgentTask("cx-b")).toBe(false);
+      expect((await getAgentTaskByToken("cx-b"))?.status).toBe("canceled");
+
+      await createAgentTask(input("cx-c"));
+      await completeAgentTask("cx-c");
+      expect(await markAgentTaskCanceled("cx-c")).toBe(false);
+      expect((await getAgentTaskByToken("cx-c"))?.status).toBe("completed");
+    });
+
+    it("excludes every terminal status from the pending lookups", async () => {
+      await createAgentTask(input("cx-done", { eventId: "EvTerm" }));
+      await createAgentTask(input("cx-stop", { eventId: "EvTerm" }));
+      await createAgentTask(input("cx-live", { eventId: "EvTerm" }));
+      await completeAgentTask("cx-done");
+      await markAgentTaskCanceled("cx-stop");
+
+      const byEvent = await getPendingAgentTasksByEventId("EvTerm");
+      expect(byEvent.map((r) => r.token)).toEqual(["cx-live"]);
+
+      const byMessage = await getPendingAgentTasksByChannelAndTs(
+        "C1",
+        "1700.1"
+      );
+      expect(byMessage.map((r) => r.token)).toContain("cx-live");
+      expect(byMessage.map((r) => r.token)).not.toContain("cx-done");
+      expect(byMessage.map((r) => r.token)).not.toContain("cx-stop");
+    });
+
+    it("classifies which statuses are over", () => {
+      expect(isTerminalTaskStatus("completed")).toBe(true);
+      expect(isTerminalTaskStatus("canceled")).toBe(true);
+      expect(isTerminalTaskStatus("pending")).toBe(false);
+      // Parked is *not* terminal: the fan-out stays undrained and the 🛑 alive.
+      expect(isTerminalTaskStatus("awaiting-input")).toBe(false);
     });
   });
 });

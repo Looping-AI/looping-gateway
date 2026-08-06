@@ -214,8 +214,13 @@ export const agentTasks = sqliteTable(
     // prompt is open (see `hitl_requests`): the row is non-terminal (so the fan-out
     // stays undrained and 🛑 still cancels) but every `pending`-conditional mutator
     // is a safe no-op until `resumeFromInput` flips it back to `pending`.
+    // `canceled` is the other terminal state: a stop was issued and honored to the
+    // ledger's satisfaction. One value for both triggers — a human's 🛑 and the
+    // gateway's own processing-deadline cancel are the same event here; *which*
+    // fired is recorded in the `[cancel] canceling task` log line, since the
+    // actor is not stored.
     status: text("status", {
-      enum: ["pending", "awaiting-input", "completed"]
+      enum: ["pending", "awaiting-input", "completed", "canceled"]
     })
       .notNull()
       .default("pending"),

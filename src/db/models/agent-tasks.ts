@@ -1,9 +1,32 @@
-import { and, eq, lt, ne, sql } from "drizzle-orm";
+import { and, eq, lt, notInArray, sql } from "drizzle-orm";
 import { getDb } from "../client";
 import * as schema from "../schema";
 import { TASK_RETENTION_SECONDS } from "@/config";
 
 export type AgentTaskRow = typeof schema.agentTasks.$inferSelect;
+
+/**
+ * Statuses a task can never leave. Everything else (`pending`, `awaiting-input`)
+ * is still in flight: it keeps the fan-out undrained, keeps the 🛑 alive, and
+ * still accepts callbacks.
+ *
+ * Read this as the definition of "done" — the pending-task queries below exclude
+ * it, and the notification boundaries drop any callback that arrives against it.
+ * Adding a terminal state means adding it here and nowhere else.
+ */
+export const TERMINAL_TASK_STATUSES: AgentTaskRow["status"][] = [
+  "completed",
+  "canceled"
+];
+
+/**
+ * Whether a task is over. The notification boundaries ask this before routing a
+ * callback: a reply that arrives after the task was delivered, stopped, or timed
+ * out is dropped rather than posted.
+ */
+export function isTerminalTaskStatus(status: AgentTaskRow["status"]): boolean {
+  return TERMINAL_TASK_STATUSES.includes(status);
+}
 
 /** Everything captured at dispatch so the async callback can correlate, route, and collect. */
 export interface CreateAgentTaskInput {
@@ -63,7 +86,7 @@ export async function getPendingAgentTasksByChannelAndTs(
       and(
         eq(schema.agentTasks.channelId, channelId),
         eq(schema.agentTasks.messageTs, messageTs),
-        ne(schema.agentTasks.status, "completed")
+        notInArray(schema.agentTasks.status, TERMINAL_TASK_STATUSES)
       )
     );
 }
@@ -111,7 +134,7 @@ export async function getPendingAgentTasksByEventId(
     .where(
       and(
         eq(schema.agentTasks.eventId, eventId),
-        ne(schema.agentTasks.status, "completed")
+        notInArray(schema.agentTasks.status, TERMINAL_TASK_STATUSES)
       )
     );
 }
@@ -282,8 +305,13 @@ export async function suspendForInput(token: string): Promise<boolean> {
  * → `pending`, so the resumed turn's callbacks (progress + terminal) are honored
  * again. Conditional on `awaiting-input` so an already-resumed/cancelled row is a
  * no-op.
+ *
+ * Returns the row's `eventId` when it un-parked, so the caller can wake the
+ * ReactionWorkflow: this is the start of a fresh processing leg, and the workflow
+ * measures legs with its own timer rather than a stored timestamp, so it has to
+ * be told. Null means nothing was un-parked and there is nothing to signal.
  */
-export async function resumeFromInput(token: string): Promise<boolean> {
+export async function resumeFromInput(token: string): Promise<string | null> {
   const db = getDb();
   const rows = await db
     .update(schema.agentTasks)
@@ -294,16 +322,19 @@ export async function resumeFromInput(token: string): Promise<boolean> {
         eq(schema.agentTasks.status, "awaiting-input")
       )
     )
-    .returning({ token: schema.agentTasks.token });
-  return rows.length > 0;
+    .returning({ eventId: schema.agentTasks.eventId });
+  return rows[0]?.eventId ?? null;
 }
 
 /**
- * Mark a task completed. Conditional on it not already being `completed` so a
+ * Mark a task completed. Conditional on it not already being terminal so a
  * duplicate or replayed callback flips exactly one row — the returned count is
  * the caller's idempotency signal (1 = we own this callback; 0 = already
  * handled). Completes from `pending` (the normal terminal callback) or from
- * `awaiting-input` (a 🛑 that cancels a task parked on a human prompt).
+ * `awaiting-input` (a task parked on a human prompt that then finished).
+ *
+ * The terminal guard is what stops a late callback from reopening a task the
+ * gateway already gave up on: a `canceled` row stays canceled.
  */
 export async function completeAgentTask(token: string): Promise<boolean> {
   const db = getDb();
@@ -313,7 +344,37 @@ export async function completeAgentTask(token: string): Promise<boolean> {
     .where(
       and(
         eq(schema.agentTasks.token, token),
-        ne(schema.agentTasks.status, "completed")
+        notInArray(schema.agentTasks.status, TERMINAL_TASK_STATUSES)
+      )
+    )
+    .returning({ token: schema.agentTasks.token });
+  return rows.length > 0;
+}
+
+/**
+ * Mark a task canceled — the terminal state for a stop, whoever issued it: a
+ * human tapping 🛑, or the gateway hitting `TASK_DEADLINE_SECONDS` on a leg that
+ * never delivered. The two are indistinguishable to the ledger; the actor is
+ * captured in the `[cancel] canceling task` log line instead.
+ *
+ * Unlike the old behaviour, this is applied on *every* cancel outcome — including
+ * an agent that answered `unsupported` and is still running. Its eventual
+ * callback is dropped at the notification boundary rather than posted, so a
+ * stopped run stays stopped from the user's point of view.
+ *
+ * Same conditional and same idempotency contract as {@link completeAgentTask}:
+ * cancels from `pending` or from `awaiting-input` (a 🛑 on a parked task), and is
+ * a no-op against an already-terminal row.
+ */
+export async function markAgentTaskCanceled(token: string): Promise<boolean> {
+  const db = getDb();
+  const rows = await db
+    .update(schema.agentTasks)
+    .set({ status: "canceled", completedAt: sql`(unixepoch())` })
+    .where(
+      and(
+        eq(schema.agentTasks.token, token),
+        notInArray(schema.agentTasks.status, TERMINAL_TASK_STATUSES)
       )
     )
     .returning({ token: schema.agentTasks.token });

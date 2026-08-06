@@ -75,6 +75,24 @@ export const COMPACT_TAIL_TOKENS = 4_000;
 export const HITL_REQUEST_TTL_SECONDS = 7 * 24 * 60 * 60;
 
 /**
+ * How long an agent has to finish **one processing leg** — from the moment it is
+ * handed the turn to the moment it delivers — before the gateway cancels the task
+ * itself and tells the user. The 🛑 stop reaction lives for exactly this long, so
+ * the human keeps a working stop control for the whole run.
+ *
+ * A *leg*, not a task lifetime. The clock runs only while a task is `pending`;
+ * parking on a human-in-the-loop prompt stops it (that stretch is human time,
+ * bounded by {@link HITL_REQUEST_TTL_SECONDS} instead), and a human answer starts
+ * a fresh hour. Charging a slow human to the agent's budget would kill approvals
+ * left over a weekend, which is the case that TTL exists for.
+ *
+ * Only remote agents can reach this. A built-in runs inside a Durable Object held
+ * alive by `SETTLE_TIMEOUT_MS` (8 minutes) — see `a2a/notifications/local.ts`,
+ * which explains why that one must *not* be raised to match.
+ */
+export const TASK_DEADLINE_SECONDS = 60 * 60;
+
+/**
  * How long a completed agent task is kept before it is swept, for both halves of
  * the split: the `agent_tasks` correlation rows in D1 (remote agents) and the A2A
  * Tasks a local agent persists in its own Durable Object storage. One constant

@@ -187,8 +187,12 @@ describe("agent_tasks suspend/resume for input", () => {
     // Idempotent: a second suspend is a no-op.
     expect(await suspendForInput("tok-s")).toBe(false);
 
-    expect(await resumeFromInput("tok-s")).toBe(true);
+    // Returns the event id so the caller can wake the ReactionWorkflow: a resume
+    // starts a fresh processing leg, and the workflow times legs itself.
+    expect(await resumeFromInput("tok-s")).toBe("Ev1");
     expect((await getAgentTaskByToken("tok-s"))?.status).toBe("pending");
+    // Idempotent: nothing left parked, so nothing to signal.
+    expect(await resumeFromInput("tok-s")).toBeNull();
   });
 
   it("keeps a parked task cancelable via the fan-out lookup", async () => {

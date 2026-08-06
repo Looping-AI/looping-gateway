@@ -2,6 +2,7 @@ import { NOTIFICATION_TOKEN_HEADER } from "@loopingai/a2a-protocol";
 import { getAgent } from "@/db/models/agents";
 import {
   getAgentTaskByToken,
+  isTerminalTaskStatus,
   recordAgentTaskError
 } from "@/db/models/agent-tasks";
 import {
@@ -75,7 +76,18 @@ export async function handleRemoteAgentNotification(
 
   const row = await getAgentTaskByToken(notificationToken);
   if (!row) return new Response("unknown task", { status: 404 });
-  if (row.status === "completed") return OK();
+  if (isTerminalTaskStatus(row.status)) {
+    // The task is over: delivered already, or stopped by a 🛑 or by its processing
+    // deadline. Either way this reply is discarded rather than posted. A 200 (not
+    // an error) is deliberate — it retires the remote's retry ladder instead of
+    // inviting it to keep hammering a decision that will not change.
+    console.log("[notifications] dropping callback for a finished task", {
+      agent: row.agentName,
+      taskId: row.taskId,
+      status: row.status
+    });
+    return OK();
+  }
 
   const agent = await getAgent(row.agentName);
   if (!agent) {
