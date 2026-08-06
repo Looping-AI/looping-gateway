@@ -31,6 +31,27 @@ export {
 export const DELIVERY_RETRY_GRACE_SECONDS = 6 * 60;
 
 /**
+ * The grace is spent *inside* the first leg, so it can never outlast the budget
+ * it is carved from — and what remains afterwards must still be a legal
+ * `waitForEvent` timeout, which rejects anything below one second.
+ *
+ * Both clamps only bind when `TASK_DEADLINE_SECONDS` is set below the grace,
+ * which is exactly what this PR's own verification steps ask you to do
+ * (shorten it to ~60s to watch the timeout path run). Without them that produces
+ * a `"-300 seconds"` timeout, and the leg ends by throwing rather than by
+ * deciding — correct-looking behaviour that comes out of the catch block instead
+ * of the logic.
+ */
+const GRACE_SECONDS = Math.min(
+  DELIVERY_RETRY_GRACE_SECONDS,
+  TASK_DEADLINE_SECONDS
+);
+const REMAINING_AFTER_GRACE = Math.max(
+  1,
+  TASK_DEADLINE_SECONDS - GRACE_SECONDS
+);
+
+/**
  * Ceiling on how many times the budget loop may go round. A leg is a real state
  * transition, not a slice of time — a parked task waits the full HITL TTL in one
  * leg, woken early by the resume signal — so at roughly two legs per ask/answer
@@ -203,7 +224,7 @@ export class ReactionWorkflow extends WorkflowEntrypoint<
       try {
         await step.waitForEvent("await collect signal", {
           type: REACTION_SYNC_EVENT,
-          timeout: `${DELIVERY_RETRY_GRACE_SECONDS} seconds`
+          timeout: `${GRACE_SECONDS} seconds`
         });
       } catch (err) {
         graceTimedOut = true;
@@ -224,7 +245,7 @@ export class ReactionWorkflow extends WorkflowEntrypoint<
       // Phase 2 — the budget loop. Phase 1's wait was part of the first leg, so
       // only the remainder is left unless a signal already restarted the clock.
       let budgetSeconds = graceTimedOut
-        ? TASK_DEADLINE_SECONDS - DELIVERY_RETRY_GRACE_SECONDS
+        ? REMAINING_AFTER_GRACE
         : TASK_DEADLINE_SECONDS;
 
       let leg = 0;
