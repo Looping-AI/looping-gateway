@@ -1,13 +1,16 @@
 import { env } from "cloudflare:workers";
 
 /**
- * The 🛑 reaction and the signal that wakes the workflow owning it.
+ * Shared vocabulary for the 🛑 reaction: its emoji, the event that wakes the
+ * workflow owning it, and the one-line sender for that event. The ReactionWorkflow
+ * itself lives in `reaction.ts` and re-exports these, mirroring how
+ * `message-helpers.ts` sits beside `message.ts`.
  *
- * A leaf module on purpose: `reaction.ts` needs the cancellation machinery in
- * `message-helpers.ts` (and through it `dispatch.ts`), while `dispatch.ts` needs
- * to signal the workflow when a parked task resumes. Keeping the shared
- * constants and the one-line signal here — with no imports of our own beyond the
- * env — lets all three depend on this instead of on each other.
+ * Split out to keep the import graph acyclic. `reaction.ts` needs the
+ * cancellation machinery in `message-helpers.ts` (and through it `dispatch.ts`),
+ * while `dispatch.ts` needs to signal the workflow when a parked task resumes —
+ * so the constants and the signal live here, importing nothing of ours, and all
+ * three depend on this rather than on each other.
  */
 
 /**

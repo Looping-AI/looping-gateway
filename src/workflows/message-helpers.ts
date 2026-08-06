@@ -20,7 +20,7 @@ import { cancelHitlRequestsByToken } from "@/db/models/hitl-requests";
 import { markHitlPromptResolved } from "@/a2a/notifications/hitl";
 import { renderEditDiff } from "@/util/text-diff";
 import { postReply } from "@/wrappers/slack";
-import { signalReactionSync } from "@/workflows/reaction-signal";
+import { signalReactionSync } from "@/workflows/reaction-helpers";
 
 // Shown when a dispatch's retries are fully exhausted (persistently unreachable
 // endpoint, TLS/DNS failure, persistent 5xx, accept timeout). Not transient by

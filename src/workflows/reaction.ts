@@ -8,16 +8,16 @@ import { cancelTaskRow } from "@/workflows/message-helpers";
 import {
   REACTION_SYNC_EVENT,
   STOP_REACTION
-} from "@/workflows/reaction-signal";
+} from "@/workflows/reaction-helpers";
 
 // Re-exported so callers and tests can keep importing the 🛑 vocabulary from the
-// workflow that owns it, while the definitions live in the leaf module that
-// `dispatch` and `message-helpers` can depend on without a cycle.
+// workflow that owns it, while the definitions sit in `reaction-helpers` where
+// `dispatch` and `message-helpers` can reach them without a cycle.
 export {
   STOP_REACTION,
   REACTION_SYNC_EVENT,
   reactionInstanceId
-} from "@/workflows/reaction-signal";
+} from "@/workflows/reaction-helpers";
 
 /**
  * How long the first wait runs before the gateway speaks up about deliveries it

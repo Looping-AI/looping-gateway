@@ -9,7 +9,7 @@ import { signGatewayToken, type RemoteIdentity } from "@/auth/agent-outbound";
 import { getAgent, type AgentRow } from "@/db/models/agents";
 import { getWorkspaceByAdminChannel } from "@/db/models/workspaces";
 import { resumeFromInput } from "@/db/models/agent-tasks";
-import { signalReactionSync } from "@/workflows/reaction-signal";
+import { signalReactionSync } from "@/workflows/reaction-helpers";
 import type { HitlRequestRow } from "@/db/models/hitl-requests";
 import { buildHitlResponseParts, buildHitlTimeoutParts } from "@/a2a/hitl";
 import { buildAgentCard } from "@/a2a/card";
