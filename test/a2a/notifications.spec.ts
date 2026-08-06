@@ -16,7 +16,8 @@ import { upsertWorkspace } from "@/db/models/workspaces";
 import {
   createAgentTask,
   getAgentTaskByToken,
-  completeAgentTask
+  completeAgentTask,
+  markAgentTaskCanceled
 } from "@/db/models/agent-tasks";
 import {
   handleRemoteAgentNotification,
@@ -221,6 +222,25 @@ describe("handleRemoteAgentNotification", () => {
     expect(res.status).toBe(200);
     expect(posts).toHaveLength(0);
     expect((await getAgentTaskByToken(NTOK))?.status).toBe("completed");
+  });
+
+  it("drops a reply that lands after the task was canceled", async () => {
+    // A stop — a human's 🛑 or the gateway's processing deadline — ends the task
+    // here even if the agent runs on. Its eventual reply must not reach the
+    // thread, and the 200 is deliberate: it retires the remote's retry ladder
+    // rather than inviting it to keep re-posting a verdict that won't change.
+    const posts: SlackPost[] = [];
+    stubFetch(key, posts);
+    const bearer = await signJwt(key, { jku: JKU, sub: SUB, aud: AUD });
+    await markAgentTaskCanceled(NTOK);
+
+    const res = await handleRemoteAgentNotification(
+      callbackRequest(bearer, NTOK, makeTask("Too late — I finished anyway"))
+    );
+
+    expect(res.status).toBe(200);
+    expect(posts).toHaveLength(0);
+    expect((await getAgentTaskByToken(NTOK))?.status).toBe("canceled");
   });
 
   it("rejects a callback whose token is signed for the wrong audience", async () => {

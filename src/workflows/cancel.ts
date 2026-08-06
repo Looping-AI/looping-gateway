@@ -1,90 +1,25 @@
 import { WorkflowEntrypoint } from "cloudflare:workers";
 import type { WorkflowEvent, WorkflowStep } from "cloudflare:workers";
 import type { CancelWorkflowParams } from "@/slack/types";
-import { getAgent } from "@/db/models/agents";
-import {
-  getPendingAgentTasksByChannelAndTs,
-  markCancelRequested,
-  completeAgentTask,
-  type AgentTaskRow
-} from "@/db/models/agent-tasks";
-import { type DispatchAgentRef } from "@/agents/dispatch";
-import { cancelHitlRequestsByToken } from "@/db/models/hitl-requests";
-import { markHitlPromptResolved } from "@/a2a/notifications/hitl";
+import { getPendingAgentTasksByChannelAndTs } from "@/db/models/agent-tasks";
 import { postReply } from "@/wrappers/slack";
 import {
-  cancelAndReconcile,
+  cancelTaskRow,
   cancelNotHonoredText,
   collectIfEventDrained,
-  type CancelRowKind
+  type CancelRowResult
 } from "@/workflows/message-helpers";
-
-interface CancelRowResult {
-  agentName: string;
-  kind: CancelRowKind;
-}
-
-/**
- * Stop one pending task via the standard A2A `tasks/cancel`, reconciling the
- * gateway ledger from the (synchronous) response — a conformant agent sends no
- * push callback after cancellation, so the gateway is the source of truth here.
- *
- * Handles the taskId race: if the accept hasn't returned a taskId yet, record a
- * `cancelRequested` intent instead. If that atomic mark reveals the accept just
- * committed (taskId now present), cancel directly; otherwise the dispatch's
- * accept path honors the intent. Exactly one cancel fires either way.
- *
- * Exported for unit testing.
- */
-export async function cancelTaskRow(
-  row: AgentTaskRow
-): Promise<CancelRowResult> {
-  const agent = await getAgent(row.agentName);
-  if (!agent) {
-    // Agent deregistered mid-flight — nothing to cancel; reconcile the row.
-    await completeAgentTask(row.token);
-    return { agentName: row.agentName, kind: "stopped" };
-  }
-  const ref: DispatchAgentRef = {
-    name: agent.name,
-    kind: agent.kind,
-    a2aEndpoint: agent.a2aEndpoint,
-    tenantId: agent.tenantId,
-    workspaceId: agent.workspaceId
-  };
-
-  let taskId = row.taskId;
-  if (!taskId) {
-    const mark = await markCancelRequested(row.token);
-    // Row completed/purged between resolve and now, or intent recorded for a
-    // task whose taskId is still unknown → the accept path (dispatch) honors it.
-    if (!mark.matched || !mark.taskId) {
-      return { agentName: row.agentName, kind: "stopped" };
-    }
-    taskId = mark.taskId; // accept raced in — cancel directly now
-  }
-
-  // Completes the row only for terminal outcomes; a task that can't be canceled
-  // keeps its row pending so the reply it still produces reaches Slack.
-  const kind = await cancelAndReconcile(ref, taskId, row.token);
-
-  // Close any human-in-the-loop prompt the task had open (the 🛑 supersedes it),
-  // and strip its now-dead buttons in Slack. Independent of the cancel outcome:
-  // the user chose to stop, so the pending question no longer stands.
-  const canceledPrompts = await cancelHitlRequestsByToken(row.token);
-  for (const prompt of canceledPrompts) {
-    await markHitlPromptResolved(prompt, "🛑 Canceled.");
-  }
-
-  return { agentName: row.agentName, kind };
-}
 
 /**
  * Durable workflow for a 🛑 stop reaction. One instance per reaction `event_id`.
- * Looks up every pending task the reacted trigger message woke (the fan-out) and
- * cancels them all via A2A `tasks/cancel`, then drains the 🛑 reaction and posts a
- * short confirmation. Idempotent: `completeAgentTask` and the reaction collect are
- * both no-ops on replay.
+ * Looks up every non-terminal task the reacted trigger message woke (the fan-out)
+ * and cancels them all via A2A `tasks/cancel`, then drains the 🛑 reaction and posts
+ * a short confirmation. Idempotent: the row terminalization and the reaction collect
+ * are both no-ops on replay.
+ *
+ * The cancelling itself lives in `cancelTaskRow`, shared with the ReactionWorkflow's
+ * processing-deadline cancel — this workflow is just the human-triggered entry point,
+ * which is why it passes the reactor's user id as the origin.
  */
 export class CancelWorkflow extends WorkflowEntrypoint<
   Env,
@@ -101,22 +36,25 @@ export class CancelWorkflow extends WorkflowEntrypoint<
       const results: CancelRowResult[] = [];
       for (const row of rows) {
         results.push(
-          await step.do(`cancel:${row.token}`, () => cancelTaskRow(row))
+          await step.do(`cancel:${row.token}`, () =>
+            cancelTaskRow(row, { reason: "user", actorUserId: p.userId })
+          )
         );
       }
 
       await step.do("finalize", async () => {
         const threadTs = rows[0].replyThreadTs;
         const stopped = results.filter((r) => r.kind === "stopped");
-        // `unsupported` and `error` both leave the agent running to completion,
-        // so the user hears the same thing for either.
-        const stillRunning = results.filter((r) => r.kind !== "stopped");
+        // `unsupported` and `error` both mean the agent may run on to completion,
+        // so the user hears the same thing for either — its reply is discarded
+        // regardless, since the row is already terminal.
+        const notHonored = results.filter((r) => r.kind !== "stopped");
 
         // App-branded gateway notices (null username), never an agent reply.
         if (stopped.length > 0) {
           await postReply(p.channelId, threadTs, "🛑 Stopped.", null, null);
         }
-        for (const r of stillRunning) {
+        for (const r of notHonored) {
           await postReply(
             p.channelId,
             threadTs,

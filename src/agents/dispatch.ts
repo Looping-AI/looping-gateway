@@ -9,6 +9,7 @@ import { signGatewayToken, type RemoteIdentity } from "@/auth/agent-outbound";
 import { getAgent, type AgentRow } from "@/db/models/agents";
 import { getWorkspaceByAdminChannel } from "@/db/models/workspaces";
 import { resumeFromInput } from "@/db/models/agent-tasks";
+import { signalReactionSync } from "@/workflows/reaction-signal";
 import type { HitlRequestRow } from "@/db/models/hitl-requests";
 import { buildHitlResponseParts, buildHitlTimeoutParts } from "@/a2a/hitl";
 import { buildAgentCard } from "@/a2a/card";
@@ -541,6 +542,18 @@ function continuationFailureDetail(
  * path ({@link timeoutAgentTask}); the `messageId` is deterministic so a retried
  * continuation dedupes at the agent.
  */
+/**
+ * Un-park the task row and wake the ReactionWorkflow, because this is the start
+ * of a fresh processing leg and the workflow measures legs with its own timer
+ * rather than a stored timestamp — parking only ever *extends* its wait, so this
+ * is the one transition it has to be told about. Without the nudge it would sit
+ * on the parked wait (the full HITL TTL) instead of the agent's hour.
+ */
+async function markResumed(token: string): Promise<void> {
+  const eventId = await resumeFromInput(token);
+  if (eventId) await signalReactionSync(eventId);
+}
+
 async function sendTaskContinuation(
   row: HitlRequestRow,
   input: { parts: Message["parts"]; messageId: string; caller: UserAuthContext }
@@ -613,7 +626,7 @@ async function sendTaskContinuation(
       remotePushNotificationConfig(issuer, row.token)
     );
     if (accept.kind === "accepted") {
-      await resumeFromInput(row.token);
+      await markResumed(row.token);
       return { kind: "resumed" };
     }
     console.error("[hitl] continuation: remote did not accept", {
@@ -675,7 +688,7 @@ async function sendTaskContinuation(
     localPushNotificationConfig(row.token)
   );
   if (accept.kind === "accepted") {
-    await resumeFromInput(row.token);
+    await markResumed(row.token);
     return { kind: "resumed" };
   }
   console.error("[hitl] continuation: local agent did not accept", {
