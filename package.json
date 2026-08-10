@@ -35,7 +35,7 @@
     "@chat-adapter/slack": "^4.36.0",
     "@loopingai/a2a-protocol": "^0.2.0",
     "agents": "^0.20.1",
-    "ai": "^7.0.51",
+    "ai": "^7.0.56",
     "chat": "^4.36.0",
     "drizzle-orm": "^0.45.2",
     "jose": "^6.2.8",
