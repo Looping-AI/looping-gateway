@@ -41,6 +41,9 @@ const BASE = "https://api.cloudflare.com/client/v4";
 const DATASET = "cloudflare-workers";
 // The telemetry API's hard ceiling on `limit`; above it the request 400s.
 const MAX_LIMIT = 2000;
+// AI Gateway has its own, much lower ceiling on `per_page` (verified: 50 is
+// accepted, 51 gets "Number must be less than or equal to 50").
+const AI_MAX_LIMIT = 50;
 const METHODS = new Set(["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD"]);
 
 function die(msg) {
@@ -90,6 +93,17 @@ function parseSince(s) {
   if (!m) die(`bad --since "${s}" (expected like 30m, 2h, 1d)`);
   const unit = { s: 1e3, m: 60e3, h: 3600e3, d: 86400e3 }[m[2]];
   return Number(m[1]) * unit;
+}
+
+// `--limit` for both `logs` and `ai`. Number.parseInt would quietly accept
+// "2.5" and "20abc" as 2 and 20; Number() alone would pass NaN to the API and
+// let it answer with a validation body nobody can read.
+function parseLimit(raw, fallback) {
+  if (raw === undefined) return fallback;
+  const n = Number(String(raw).trim());
+  if (!Number.isInteger(n) || n <= 0)
+    die(`bad --limit "${raw}" (expected a positive integer)`);
+  return n;
 }
 
 // Pull known --flags out of an arg list; everything else is a positional.
@@ -177,9 +191,7 @@ async function cmdLogs(args) {
   const sinceLabel = flags.since ?? "1h";
   const to = Date.now();
   const from = to - parseSince(sinceLabel);
-  const limit = Number.parseInt(String(flags.limit ?? 100), 10);
-  if (!Number.isFinite(limit) || limit <= 0)
-    die(`bad --limit "${flags.limit}" (expected a positive integer)`);
+  const limit = parseLimit(flags.limit, 100);
   // The API rejects anything above this with a validation body nobody can read.
   if (limit > MAX_LIMIT)
     die(`--limit ${limit} is above the API maximum of ${MAX_LIMIT}`);
@@ -398,7 +410,9 @@ async function cmdAi(args) {
   const gw = flags.gateway ?? AI_GW_DEFAULT;
   if (pos[0]) return cmdAiDetail(gw, pos[0], flags);
 
-  const limit = Number(flags.limit ?? 20);
+  const limit = parseLimit(flags.limit, 20);
+  if (limit > AI_MAX_LIMIT)
+    die(`--limit ${limit} is above the API maximum of ${AI_MAX_LIMIT}`);
   // Both filters go to the API, for the same reason `logs --grep` does: applied
   // here they would run *after* `per_page`, so `--since 2h` would search the
   // newest 20 calls and confidently report "no AI Gateway calls match" for a
@@ -462,7 +476,9 @@ async function cmdAi(args) {
   // `total` is authoritative now, so this can say what is actually missing
   // rather than guessing from a page length.
   if (total != null && total > logs.length)
-    out(`\n⚠ showing ${logs.length} of ${total} — raise --limit to see more`);
+    out(
+      `\n⚠ showing ${logs.length} of ${total} — raise --limit (max ${AI_MAX_LIMIT}) or narrow --since`
+    );
 }
 
 async function cmdAiDetail(gw, id, flags) {
