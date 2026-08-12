@@ -32,11 +32,11 @@
   },
   "dependencies": {
     "@a2a-js/sdk": "^1.0.1",
-    "@chat-adapter/slack": "^4.36.0",
-    "@loopingai/a2a-protocol": "^0.2.0",
+    "@chat-adapter/slack": "^4.37.0",
+    "@loopingai/a2a-protocol": "^0.2.1",
     "agents": "^0.20.1",
-    "ai": "^7.0.51",
-    "chat": "^4.36.0",
+    "ai": "^7.0.62",
+    "chat": "^4.37.0",
     "drizzle-orm": "^0.45.2",
     "jose": "^6.2.8",
     "slackify-markdown": "github:Looping-AI/slackify-markdown#5.0.0",
@@ -44,17 +44,17 @@
     "zod": "^4.4.3"
   },
   "devDependencies": {
-    "@cloudflare/vitest-pool-workers": "^0.20.1",
-    "@types/node": "^26.1.2",
-    "@typescript-eslint/utils": "^8.66.0",
+    "@cloudflare/vitest-pool-workers": "^0.21.1",
+    "@types/node": "^26.2.0",
+    "@typescript-eslint/utils": "^8.67.0",
     "drizzle-kit": "^0.31.10",
-    "eslint": "^10.8.0",
+    "eslint": "^10.8.1",
     "husky": "^9.1.7",
     "prettier": "^3.9.6",
     "typescript": "^6.0.3",
-    "typescript-eslint": "^8.66.0",
+    "typescript-eslint": "^8.67.0",
     "vitest": "^4.1.10",
-    "wrangler": "^4.118.0"
+    "wrangler": "^4.121.0"
   },
   "overrides": {
     "@esbuild-kit/core-utils": {
