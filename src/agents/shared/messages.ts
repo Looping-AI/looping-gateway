@@ -4,6 +4,7 @@ import type {
   SessionMessage,
   SessionMessagePart
 } from "agents/experimental/memory/session";
+import { isRecord, jsonOf } from "@/util/json";
 
 /**
  * Glue between A2A text and the Agents SDK Sessions store.
@@ -189,7 +190,8 @@ export interface ToolRecord {
 }
 
 /**
- * Per-value ceiling on a recorded call's input/output. History is replayed on
+ * Ceiling on one recorded value — a call's output, or any single property of its
+ * input. History is replayed on
  * every subsequent turn and counted toward compaction, so one broad read must not
  * be able to crowd out the conversation on its own. Truncation is explicit in the
  * value so the model can tell "large result" from "small result".
@@ -218,14 +220,40 @@ function capText(text: string): string {
 function cap(value: unknown): unknown {
   if (value === undefined) return undefined;
   if (typeof value === "string") return capText(value);
-  let json: string;
-  try {
-    json = JSON.stringify(value) ?? String(value);
-  } catch {
-    json = String(value);
-  }
+  const json = jsonOf(value);
   if (json.length <= MAX_TOOL_RECORD_CHARS) return value;
   return `${json.slice(0, MAX_TOOL_RECORD_CHARS)}… [truncated, ${json.length} chars total]`;
+}
+
+/**
+ * Cap a recorded call's **input**, which — unlike its output — must survive as an
+ * *object*.
+ *
+ * A tool call's arguments are a JSON object by contract, and every provider
+ * re-serializes a replayed call as `arguments: JSON.stringify(input)`. Capping the
+ * whole value the way {@link cap} does would put a *string* there: Workers AI
+ * rejects that outright on `glm-5.2` ("Assistant tool call function.arguments must
+ * be a JSON object"), and on `glm-4.7-flash` the chat template calls `.items()` on
+ * it and dies with `'str object' has no attribute 'items'`. Because history is
+ * replayed on every later turn, one such record fails *every* subsequent turn — a
+ * durable break, not a blip.
+ *
+ * So the ceiling is applied per property instead. The keys and the shape survive,
+ * the over-long values carry the same truncation marker they always did, and the
+ * model reads a call it can still recognize rather than one opaque blob.
+ *
+ * A non-object input is not a tool call the model got merely too verbose about — it
+ * is one the SDK could not parse at all, and hands back as the raw arguments string
+ * (`invalid: true`). That still has to be replayed as an object, so it is wrapped
+ * rather than dropped: the malformed text stays visible to the next turn.
+ */
+function capInput(value: unknown): Record<string, unknown> {
+  if (isRecord(value)) {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, v]) => [key, cap(v)])
+    );
+  }
+  return { _raw: capText(typeof value === "string" ? value : jsonOf(value)) };
 }
 
 /**
@@ -243,7 +271,7 @@ function toolPart(record: ToolRecord): SessionMessagePart {
   const call = {
     type: `tool-${record.toolName}`,
     toolCallId: record.toolCallId,
-    input: cap(record.input)
+    input: capInput(record.input)
   };
   const part =
     record.errorText === undefined

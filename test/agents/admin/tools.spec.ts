@@ -10,6 +10,7 @@ import {
   agentsRevokeChannel,
   agentsRegenerateAvatar,
   agentsDelete,
+  agentsRepin,
   askUser,
   workspaceRead,
   workspaceCreate,
@@ -333,6 +334,127 @@ describe("admin tools — human-in-the-loop", () => {
     const { d, parked } = hitlDeps(ORG_WORKSPACE_ID, orgAdmin);
     expect(await agentsDelete(d, { name: "admin" })).toHaveProperty("error");
     expect(parked).toHaveLength(0);
+  });
+
+  /** hitlDeps whose verifier reports whatever `kid` the card is meant to name. */
+  function repinDeps(wsId: number, c: UserAuthContext | null, kid: string) {
+    const base = hitlDeps(wsId, c);
+    return {
+      ...base,
+      d: {
+        ...base.d,
+        verifyEndpoint: async (url: string) => ({
+          pin: {
+            cardSigningJku: `${new URL(url).origin}/.well-known/jwks.json`,
+            cardSigningKid: kid
+          },
+          displayName: "Stubbed Agent",
+          endpoint: url
+        })
+      } satisfies AdminToolDeps
+    };
+  }
+
+  it("agents_repin is a no-op when the card still names the pinned key", async () => {
+    const wsId = await freshWsId("tools-ws-repin-same");
+    // `deps` and `repinDeps` agree on the kid, so registration pins what the
+    // card will report on the re-read.
+    const { d, parked, stored } = repinDeps(
+      wsId,
+      ctx({ adminWorkspaces: [wsId] }),
+      "test-kid"
+    );
+    await agentsCreate(d, {
+      name: "repin-same",
+      a2aEndpoint: "https://example.com/repin-same",
+      tenantId: "main",
+      notifyOn: "mention"
+    });
+
+    const res = await agentsRepin(d, { name: "repin-same" });
+
+    expect(res).toMatchObject({ ok: true });
+    expect(res.note).toContain("already pinned");
+    // A no-op must not spend a human's approval.
+    expect(parked).toHaveLength(0);
+    expect(stored).toHaveLength(0);
+  });
+
+  it("agents_repin gates a changed key behind an approval and names both", async () => {
+    const wsId = await freshWsId("tools-ws-repin-new");
+    const admin = ctx({ adminWorkspaces: [wsId] });
+    // Registered against the default verifier ("test-kid")…
+    const registered = hitlDeps(wsId, admin);
+    await agentsCreate(registered.d, {
+      name: "repin-new",
+      a2aEndpoint: "https://example.com/repin-new",
+      tenantId: "main",
+      notifyOn: "mention"
+    });
+    // …then the agent rotates its key.
+    const { d, parked, stored } = repinDeps(wsId, admin, "rotated-kid");
+
+    const res = await agentsRepin(d, { name: "repin-new" });
+
+    expect(res).toMatchObject({ status: "awaiting_approval" });
+    // Nothing is written until the human approves.
+    expect((await getAgent("repin-new"))?.cardSigningKid).toBe("test-kid");
+    expect(parked).toHaveLength(1);
+    expect(parked[0].requestKind).toBe("approval");
+    // Both keys are on screen — that is the whole basis for the decision.
+    expect(parked[0].prompt).toContain("test-kid");
+    expect(parked[0].prompt).toContain("rotated-kid");
+    expect(stored).toHaveLength(1);
+    expect(stored[0].action).toEqual({
+      kind: "repin_agent",
+      name: "repin-new",
+      wsId,
+      jku: "https://example.com/.well-known/jwks.json",
+      kid: "rotated-kid"
+    });
+    expect(stored[0].requestId).toBe(parked[0].requestId);
+  });
+
+  it("agents_repin refuses a built-in agent and a non-admin caller", async () => {
+    const wsId = await freshWsId("tools-ws-repin-deny");
+    const reserved = repinDeps(wsId, ctx({ adminWorkspaces: [wsId] }), "k");
+    expect(await agentsRepin(reserved.d, { name: "admin" })).toHaveProperty(
+      "error"
+    );
+    expect(reserved.parked).toHaveLength(0);
+
+    const outsider = repinDeps(
+      wsId,
+      ctx({ adminWorkspaces: [wsId + 999] }),
+      "k"
+    );
+    expect(await agentsRepin(outsider.d, { name: "anything" })).toHaveProperty(
+      "error"
+    );
+    expect(outsider.parked).toHaveLength(0);
+  });
+
+  it("agents_repin reports a card it cannot read, without parking", async () => {
+    const wsId = await freshWsId("tools-ws-repin-down");
+    const admin = ctx({ adminWorkspaces: [wsId] });
+    const base = hitlDeps(wsId, admin);
+    await agentsCreate(base.d, {
+      name: "repin-down",
+      a2aEndpoint: "https://example.com/repin-down",
+      tenantId: "main",
+      notifyOn: "mention"
+    });
+    const d: AdminToolDeps = {
+      ...base.d,
+      verifyEndpoint: async () => {
+        throw new Error("card fetch failed");
+      }
+    };
+
+    const res = await agentsRepin(d, { name: "repin-down" });
+
+    expect(res.error).toContain("card fetch failed");
+    expect(base.parked).toHaveLength(0);
   });
 });
 

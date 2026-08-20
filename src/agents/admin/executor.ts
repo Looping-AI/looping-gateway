@@ -25,7 +25,7 @@ import {
 } from "@/a2a/hitl";
 import type { AgentTurnMetadata } from "@/agents/dispatch";
 import { adminSoul, callerContext } from "./prompt";
-import { buildAdminTools } from "./tools";
+import { buildAdminTools, type EndpointVerifier } from "./tools";
 import {
   describeGatedAction,
   runGatedAction,
@@ -152,41 +152,7 @@ export class AdminAgentExecutor implements AgentExecutor {
             ...buildAdminTools({
               ctx,
               wsId,
-              verifyEndpoint: async (url, tenantId) => {
-                const allowedDomains = await getAllowedRemoteAgentDomains();
-                // Registration reads the tenant's card over an *authenticated*
-                // call, so it needs the same issuer dispatch signs with. The
-                // admin agent only ever runs in response to a Slack event, and
-                // the fetch isolate records the public URL on the first one, so
-                // this is set by the time an admin can register anything.
-                const issuer = await getPublicUrl();
-                if (!issuer) {
-                  throw new Error(
-                    "Gateway public URL has not been discovered yet. " +
-                      "Ensure the worker has received at least one Slack event " +
-                      "before registering remote agents."
-                  );
-                }
-                return verifyRemoteAgentEndpoint({
-                  url,
-                  tenantId,
-                  allowedDomains,
-                  authToken: (audience, tenant) =>
-                    signGatewayToken({
-                      audience,
-                      issuer,
-                      tenant,
-                      // Registration has no agent row yet, so the caller is the
-                      // admin agent doing the registering.
-                      identity: {
-                        key: `admin:${wsId}:admin`,
-                        name: "admin",
-                        kind: "admin",
-                        workspaceId: wsId
-                      }
-                    })
-                });
-              },
+              verifyEndpoint: this.verifyEndpoint(wsId),
               generateImage: (prompt) => generateAvatar(prompt),
               storeIcon: this.options.storeIcon,
               park: turn.park,
@@ -198,6 +164,50 @@ export class AdminAgentExecutor implements AgentExecutor {
       }
     });
   };
+
+  /**
+   * The card verifier for one workspace, bound to this gateway's signing identity.
+   *
+   * Shared by the tools that verify a card during a turn and by the approval resume
+   * below, which re-verifies at the moment a human clicks Approve — one definition,
+   * so the two can never disagree about what "verified" means.
+   */
+  private verifyEndpoint(wsId: number): EndpointVerifier {
+    return async (url, tenantId) => {
+      const allowedDomains = await getAllowedRemoteAgentDomains();
+      // Reading a tenant's card is an *authenticated* call, so it needs the same
+      // issuer dispatch signs with. The admin agent only ever runs in response to
+      // a Slack event, and the fetch isolate records the public URL on the first
+      // one, so this is set by the time an admin can register anything.
+      const issuer = await getPublicUrl();
+      if (!issuer) {
+        throw new Error(
+          "Gateway public URL has not been discovered yet. " +
+            "Ensure the worker has received at least one Slack event " +
+            "before registering remote agents."
+        );
+      }
+      return verifyRemoteAgentEndpoint({
+        url,
+        tenantId,
+        allowedDomains,
+        authToken: (audience, tenant) =>
+          signGatewayToken({
+            audience,
+            issuer,
+            tenant,
+            // Registration has no agent row yet, so the caller is the admin
+            // agent doing the registering.
+            identity: {
+              key: `admin:${wsId}:admin`,
+              name: "admin",
+              kind: "admin",
+              workspaceId: wsId
+            }
+          })
+      });
+    };
+  }
 
   /**
    * If this turn resumes a parked destructive-action approval, take the pending
@@ -227,7 +237,9 @@ export class AdminAgentExecutor implements AgentExecutor {
         {}) as Partial<AgentTurnMetadata>;
       const approver = metadata.user;
       if (response?.optionId === HITL_APPROVE_OPTION_ID && approver) {
-        const result = await runGatedAction(action, approver);
+        const result = await runGatedAction(action, approver, {
+          verifyEndpoint: this.verifyEndpoint(action.wsId)
+        });
         outcome = result.ok
           ? `The user approved. I have ${result.summary}. Confirm this succinctly to the user.`
           : `The user approved, but the action could not be completed: ${result.summary}. Explain this plainly to the user.`;
