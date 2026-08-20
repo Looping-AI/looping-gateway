@@ -445,8 +445,9 @@ export async function agentsUpdate(
       return {
         error:
           `New endpoint for "${args.name}" is signed by a different key than the ` +
-          `one pinned at registration. Unregister and re-register if the agent's ` +
-          `signing identity changed intentionally.`
+          `one pinned at registration. If the agent's signing identity changed ` +
+          `intentionally, use agents_repin — it re-reads the card and replaces the ` +
+          `pin behind a human approval, without unregistering the agent.`
       };
     }
   }
@@ -565,6 +566,71 @@ export async function agentsDelete(
   return requestApproval(deps, {
     prompt: `Delete agent *${args.name}*? This permanently removes it and its channel mappings, and cannot be undone.`,
     action: { kind: "unregister_agent", name: args.name, wsId: deps.wsId }
+  });
+}
+
+export type AgentsRepinArgs = { name: string };
+
+/**
+ * Re-read a custom agent's AgentCard and replace the pinned signing identity with
+ * the one it now advertises.
+ *
+ * The deliberate hole in Trust-On-First-Use. TOFU is what makes a validly-signed
+ * token from *any other* key a rejection rather than a login, so every other path
+ * treats a changed signer as an attack: `agentsUpdate` refuses outright, and
+ * callback verification fails with "callback token key does not match the agent's
+ * pinned signing key". But an operator who rotates their own gateway key is not an
+ * attacker, and their only recourse used to be deleting the agent and registering
+ * it again — which drops its channel mappings and its avatar to fix a single
+ * column.
+ *
+ * So the trust decision is handed to the one party that can actually make it. The
+ * new key is verified, named in the prompt beside the old one, and written only
+ * once a workspace admin approves it in Slack — the same gate `agents_delete` uses,
+ * for the same reason.
+ *
+ * Nothing but the pin moves: the card is re-read at the endpoint and tenant already
+ * on the row, so this cannot be used to re-point an agent somewhere else. A card
+ * that still names the pinned key is a no-op, and says so without spending a
+ * human's approval on nothing.
+ */
+export async function agentsRepin(
+  deps: AdminToolDeps,
+  args: AgentsRepinArgs
+): Promise<ToolResult> {
+  const denied = ensureAgentAdmin(deps);
+  if (denied) return denied;
+
+  const target = await requireWritableAgent(deps, args.name);
+  if ("error" in target) return target;
+
+  let verified: VerifiedAgentCard;
+  try {
+    verified = await deps.verifyEndpoint(target.a2aEndpoint, target.tenantId);
+  } catch (err) {
+    return {
+      error: `Endpoint verification failed: ${(err as Error).message}`
+    };
+  }
+
+  const { cardSigningJku: jku, cardSigningKid: kid } = verified.pin;
+  if (jku === target.cardSigningJku && kid === target.cardSigningKid) {
+    return {
+      ok: true,
+      note:
+        `"${args.name}" is already pinned to the key its card advertises ` +
+        `(kid \`${kid}\`). Nothing to change.`
+    };
+  }
+
+  return requestApproval(deps, {
+    prompt:
+      `Re-pin agent *${args.name}* to a new signing key?\n` +
+      `Pinned: \`${target.cardSigningKid ?? "(none)"}\`\n` +
+      `Card now says: \`${kid}\`\n` +
+      `Approve only if you rotated this agent's signing key yourself — ` +
+      `re-pinning is what makes the gateway trust it.`,
+    action: { kind: "repin_agent", name: args.name, wsId: deps.wsId, jku, kid }
   });
 }
 
@@ -955,6 +1021,17 @@ export function buildAdminTools(deps: AdminToolDeps): ToolSet {
         "approval in Slack before removing the agent and its channel mappings.",
       inputSchema: z.object({ name: z.string() }),
       execute: (args) => agentsDelete(deps, args)
+    }),
+    agents_repin: tool({
+      description:
+        "Re-fetch a custom agent's AgentCard and re-pin the signing key it now " +
+        "advertises. Use when an agent's callbacks fail with \"callback token key " +
+        "does not match the agent's pinned signing key\" because its signing key " +
+        "was rotated. Nothing but the pin changes — the endpoint, tenant, channels " +
+        "and avatar are untouched. Pauses for a human approval when the key really " +
+        "has changed.",
+      inputSchema: z.object({ name: z.string() }),
+      execute: (args) => agentsRepin(deps, args)
     }),
     workspace_read: tool({
       description:

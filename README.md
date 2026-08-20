@@ -51,13 +51,19 @@ npx wrangler secret put SLACK_BOT_TOKEN
 npx wrangler secret put SLACK_SIGNING_SECRET
 ```
 
+Or, once your local `.env` holds the real values, push the whole file in one go:
+
+```bash
+npx wrangler deploy --secrets-file .env
+```
+
 For local development with `wrangler dev`, copy the example env file and fill in your Slack values:
 
 ```bash
-cp .dev.vars.example .dev.vars
+cp .env.example .env
 ```
 
-`wrangler dev` loads variables from `.dev.vars` locally. Keep this file uncommitted.
+`wrangler dev` loads variables from `.env` locally. Keep this file uncommitted.
 
 ### 6. Generate gateway identity key
 
@@ -65,9 +71,9 @@ cp .dev.vars.example .dev.vars
 npm run keygen
 ```
 
-This prints a private JWK and ready-to-paste `wrangler secret put` commands.
-Set the printed key as `GATEWAY_JWT_PRIVATE_KEY` in `.dev.vars` for local dev,
-or via `wrangler secret put` for deployed environments.
+This prints a private JWK and ready-to-paste commands for both routes.
+Set the printed key as `GATEWAY_JWT_PRIVATE_KEY` in `.env` for local dev, and
+deploy it with `wrangler deploy --secrets-file .env` or `wrangler secret put`.
 
 ### 7. Deploy
 
@@ -98,7 +104,7 @@ Your gateway is live. Mention the bot in a channel (`@your-bot`) or send it a DM
 Before starting, make sure your local env file exists and secrets of your Dev Slack App are added:
 
 ```bash
-cp .dev.vars.example .dev.vars
+cp .env.example .env
 ```
 
 ### Option A — Built-in tunnel (quickest)

@@ -5,8 +5,8 @@
  *   npm run keygen          # kid defaults to "gw-1"
  *   npm run keygen gw-2     # pass a different kid when rotating
  *
- * Output only — no files are written. Copy the printed line into whichever
- * env file / wrangler environment you need.
+ * Output only — no files are written. Copy the printed line into `.env` (or
+ * whichever wrangler environment you are targeting).
  */
 import { generateKeyPair, exportJWK } from "jose";
 
@@ -31,13 +31,16 @@ const hr = "─".repeat(76);
 console.log(`\nGenerated Ed25519 keypair  (kid: ${kid})\n`);
 
 console.log(`── Local dev ${hr.slice(12)}`);
-console.log("Add to .dev.vars:\n");
+console.log("Add to .env:\n");
 console.log(`${privLine}\n`);
 
-console.log(`── Wrangler secret (deployed env) ${hr.slice(34)}`);
+console.log(`── Deployed env ${hr.slice(15)}`);
+console.log("Push the whole file:\n");
+console.log(`  npx wrangler deploy --secrets-file .env`);
 console.log(
-  "Run for your target env, then paste the JSON value below when prompted:\n"
+  `  npx wrangler deploy --secrets-file .env.staging --env staging\n`
 );
+console.log("Or set just this secret, pasting the JSON below when prompted:\n");
 console.log(
   `  npx wrangler secret put GATEWAY_JWT_PRIVATE_KEY              # default env`
 );

@@ -1,6 +1,7 @@
 import { createWorkersAI } from "workers-ai-provider";
-import type { LanguageModel } from "ai";
+import { wrapLanguageModel, type LanguageModel } from "ai";
 import { env } from "cloudflare:workers";
+import { normalizeToolInputMiddleware } from "@/agents/model-middleware";
 import {
   AI_GATEWAY_ID,
   CHAT_MODEL_ID,
@@ -15,22 +16,32 @@ import {
  */
 const CHAT_SETTINGS = { reasoning_effort: CHAT_REASONING_EFFORT } as const;
 
-/** The model used by the agent tool loop and the Sessions compaction summarizer. */
-export function chatModel(): LanguageModel {
+/**
+ * One Workers-AI model, guarded by {@link normalizeToolInputMiddleware}.
+ *
+ * Both slots are wrapped, not just the primary: a turn reaches the fallback by way
+ * of the *same* history, so a message shape the primary refuses is one the fallback
+ * would refuse a moment later.
+ */
+function workersAiModel(modelId: string): LanguageModel {
   const workersai = createWorkersAI({
     binding: env.AI,
     gateway: { id: AI_GATEWAY_ID }
   });
-  return workersai(CHAT_MODEL_ID, CHAT_SETTINGS);
+  return wrapLanguageModel({
+    model: workersai(modelId, CHAT_SETTINGS),
+    middleware: normalizeToolInputMiddleware
+  });
+}
+
+/** The model used by the agent tool loop and the Sessions compaction summarizer. */
+export function chatModel(): LanguageModel {
+  return workersAiModel(CHAT_MODEL_ID);
 }
 
 /** Fallback model used when the primary model is over capacity. */
 export function fallbackChatModel(): LanguageModel {
-  const workersai = createWorkersAI({
-    binding: env.AI,
-    gateway: { id: AI_GATEWAY_ID }
-  });
-  return workersai(CHAT_FALLBACK_MODEL_ID, CHAT_SETTINGS);
+  return workersAiModel(CHAT_FALLBACK_MODEL_ID);
 }
 
 export interface ModelOverrides {

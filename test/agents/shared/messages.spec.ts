@@ -293,6 +293,56 @@ describe("assistantSessionMessage", () => {
     expect((m.parts[0] as { output: unknown }).output).toBe("all good");
   });
 
+  // A recorded input is replayed as a tool call's `arguments`, which every
+  // provider requires to be an object. Capping it to a string is what bricked the
+  // admin agent: Workers AI answered "Assistant tool call function.arguments must
+  // be a JSON object" on one model and crashed its chat template on the other —
+  // on every turn thereafter, because history is replayed.
+  it("keeps an oversized input an object, truncating the offending property", () => {
+    const big = "x".repeat(MAX_TOOL_RECORD_CHARS * 2);
+    const m = assistantSessionMessage("Saved.", [
+      {
+        toolCallId: "tc1",
+        toolName: "set_context",
+        input: { label: "memory", content: big, action: "replace" },
+        output: "Written to memory."
+      }
+    ]);
+    const input = (m.parts[0] as { input: Record<string, unknown> }).input;
+    expect(typeof input).toBe("object");
+    // The keys the model needs to recognize its own call all survive.
+    expect(input.label).toBe("memory");
+    expect(input.action).toBe("replace");
+    expect(input.content).toContain(`[truncated, ${big.length} chars total]`);
+  });
+
+  it("keeps a small input untouched", () => {
+    const m = assistantSessionMessage("Done.", [
+      {
+        toolCallId: "tc1",
+        toolName: "agents_read",
+        input: { name: "coder" },
+        output: "{}"
+      }
+    ]);
+    expect((m.parts[0] as { input: unknown }).input).toEqual({ name: "coder" });
+  });
+
+  // The SDK hands back the raw arguments string for a call it could not parse
+  // (`invalid: true`). It still has to replay as an object.
+  it("wraps a non-object input rather than storing it bare", () => {
+    const m = assistantSessionMessage("That call was malformed.", [
+      {
+        toolCallId: "tc1",
+        toolName: "final_reply",
+        input: '{"text": "unterminated',
+        errorText: "invalid tool input"
+      }
+    ]);
+    const input = (m.parts[0] as { input: Record<string, unknown> }).input;
+    expect(input).toEqual({ _raw: '{"text": "unterminated' });
+  });
+
   it("keeps a small output structured", () => {
     const m = assistantSessionMessage("ok", [
       {
