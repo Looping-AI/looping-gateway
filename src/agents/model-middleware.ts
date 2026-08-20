@@ -1,5 +1,5 @@
 import type { LanguageModelMiddleware } from "ai";
-import { isRecord } from "@/util/json";
+import { isRecord, jsonOf } from "@/util/json";
 
 /**
  * Guard the one invariant every provider assumes and none of them state: a
@@ -49,10 +49,13 @@ function asArgumentsObject(input: unknown): Record<string, unknown> {
     } catch {
       // Not JSON at all — fall through to the wrapper.
     }
+    return { _raw: input };
   }
-  if (typeof input === "string") return { _raw: input };
-  // `JSON.stringify` is `undefined` for `undefined`, which would drop the key.
-  return { _raw: JSON.stringify(input) ?? String(input) };
+  // `jsonOf`, not `JSON.stringify`: this is the last guard before the provider, so
+  // it has to survive whatever it is handed. A cycle or a BigInt throwing here
+  // would turn a repairable message into the crash the middleware exists to
+  // prevent, and `undefined` would silently drop the key.
+  return { _raw: jsonOf(input) };
 }
 
 export const normalizeToolInputMiddleware: LanguageModelMiddleware = {

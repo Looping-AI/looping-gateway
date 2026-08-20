@@ -91,6 +91,28 @@ describe("normalizeToolInputMiddleware", () => {
     warn.mockRestore();
   });
 
+  // The middleware is the last guard before serialization, so it must survive
+  // input it cannot serialize rather than becoming the crash it exists to prevent.
+  it("survives an input that cannot be JSON-serialized", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const cyclic: Record<string, unknown> = {};
+    cyclic.self = cyclic;
+    // An *array* holding the cycle: a bare object would be passed through as a
+    // valid arguments object without ever reaching the wrapper.
+    const out = await run(promptWithToolCall([cyclic]));
+
+    expect(typeof toolInput(out)).toBe("object");
+    expect(toolInput(out)).toHaveProperty("_raw");
+    warn.mockRestore();
+  });
+
+  it("keeps a BigInt input from throwing", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const out = await run(promptWithToolCall([1n]));
+    expect(toolInput(out)).toHaveProperty("_raw");
+    warn.mockRestore();
+  });
+
   it("wraps a non-string, non-object input", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const out = await run(promptWithToolCall(["not", "an", "object"]));

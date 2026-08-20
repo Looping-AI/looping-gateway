@@ -4,7 +4,7 @@ import type {
   SessionMessage,
   SessionMessagePart
 } from "agents/experimental/memory/session";
-import { isRecord } from "@/util/json";
+import { isRecord, jsonOf } from "@/util/json";
 
 /**
  * Glue between A2A text and the Agents SDK Sessions store.
@@ -203,15 +203,6 @@ function capText(text: string): string {
   return text.length <= MAX_TOOL_RECORD_CHARS
     ? text
     : `${text.slice(0, MAX_TOOL_RECORD_CHARS)}… [truncated, ${text.length} chars total]`;
-}
-
-/** Serialize for measurement, falling back to `String` for anything cyclic. */
-function jsonOf(value: unknown): string {
-  try {
-    return JSON.stringify(value) ?? String(value);
-  } catch {
-    return String(value);
-  }
 }
 
 /**
