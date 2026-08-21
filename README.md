@@ -210,3 +210,6 @@ Found a bug, have a question, or want to suggest a feature? [Open an issue](http
 ## License
 
 [GPL-3.0](LICENSE)
+
+Hi Tiago, back in action and ready to build!
+Glad to be back — let's keep shipping!
