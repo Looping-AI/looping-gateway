@@ -1,7 +1,7 @@
 import { applyD1Migrations, reset } from "cloudflare:test";
 import { env } from "cloudflare:workers";
 import { beforeEach } from "vitest";
-import type { D1Migration } from "@cloudflare/vitest-pool-workers";
+import type { D1Migration } from "@cloudflare/vitest-plugin";
 
 // TEST_MIGRATIONS is injected by vitest.config.ts (readD1Migrations). It's a
 // test-only binding, so cast rather than widen the generated production Env.

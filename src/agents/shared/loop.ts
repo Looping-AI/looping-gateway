@@ -10,7 +10,12 @@ import type {
   StopCondition,
   ToolSet
 } from "ai";
-import { generateText, hasToolCall, isStepCount } from "ai";
+import {
+  generateText,
+  hasToolCall,
+  isStepCount,
+  ToolChoiceViolationError
+} from "ai";
 import type { createModelPair } from "@/agents/model";
 import { buildMessage, textOf, textPart } from "@/a2a/parts";
 import { buildHitlRequestParts, type HitlRequest } from "@/a2a/hitl";
@@ -553,6 +558,18 @@ export async function executeAgentTurn(
           try {
             result = await generate(model(), slotMessages, mode);
           } catch (err) {
+            // Narration under `toolChoice: "required"` arrives as a throw, not a
+            // result — the SDK enforces the constraint it cannot make the model
+            // honour. It is an *ending*, not an outage: the model was reachable
+            // and answered, it just answered in prose. Classifying it here keeps
+            // it on the same path a returned text-only result took, so a slot
+            // that narrates still burns through to the fallback and ends in the
+            // forced `final` round rather than an apology for a service that
+            // never went down.
+            if (ToolChoiceViolationError.isInstance(err)) {
+              last = { kind: "none", finishReason: err.finishReason };
+              break;
+            }
             // The last slot's throw is the one the outer catch classifies, so it
             // is left to propagate; an earlier slot's is spent and moves on.
             if (slot === "fallback") throw err;
