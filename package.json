@@ -9,7 +9,7 @@
     "cloudflare",
     "slack"
   ],
-  "license": "GPL-3.0",
+  "license": "Apache-2.0",
   "type": "module",
   "engines": {
     "node": ">=24"
