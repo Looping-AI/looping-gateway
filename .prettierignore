@@ -1,4 +1,3 @@
 worker-configuration.d.ts
 # Drizzle-generated migration artifacts
 migrations/
-.agents/skills/
