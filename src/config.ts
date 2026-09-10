@@ -48,13 +48,19 @@ export const EMBED_MAX_PER_CALL = 100;
  * Stands in for the binding's `truncate_inputs`, which cannot be reached through the
  * provider: it spreads extra settings into `binding.run`'s *options*, while Cloudflare
  * declares `truncate_inputs` on the model's *inputs*, and `AiOptions` is a closed type
- * with nowhere to smuggle it through. Without a cap, one over-long message fails the
- * whole batch instead of being shortened.
+ * with nowhere to smuggle it through. That flag defaults to `false`, so without a cap
+ * of our own one over-long message errors the whole batch instead of being shortened.
  *
- * Only the *vector* is affected. Vectorize still stores the full text as metadata, so
- * recall keeps quoting messages exactly.
+ * A backstop, not a budget. {@link EMBED_MODEL_ID}'s context window is 60,000 tokens,
+ * and 40,000 characters is Slack's own per-message ceiling — so no real message is
+ * ever shortened, and even a pathological all-CJK input at one token per character
+ * stays well inside the window. Cutting closer than that would drop tail text out of
+ * the *searchable* vector while pretending the message was archived whole.
+ *
+ * Only the vector is affected either way: Vectorize still stores the full text as
+ * metadata, so recall keeps quoting messages exactly.
  */
-export const EMBED_INPUT_CHAR_CAP = 8_000;
+export const EMBED_INPUT_CHAR_CAP = 40_000;
 
 /** Cloudflare AI Gateway slug — "default" auto-provisions a gateway on first request. */
 export const AI_GATEWAY_ID = "default";

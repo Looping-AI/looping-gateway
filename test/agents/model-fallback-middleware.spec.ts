@@ -135,6 +135,21 @@ describe("fallbackMiddleware", () => {
     expect(fallback.doGenerateCalls).toHaveLength(0);
   });
 
+  it("lets a DOMException abort through — the shape AbortSignal actually throws", async () => {
+    // Caught deliberately rather than with `rejects.toThrow`, which assumes an
+    // Error: whether a DOMException is one is exactly what must not be assumed.
+    const primary = throwingModel(
+      "primary",
+      new DOMException("the turn was cancelled", "AbortError")
+    );
+    const fallback = model("fallback", async () => textResult("unused"));
+
+    const err: unknown = await run(primary, fallback).catch((e: unknown) => e);
+
+    expect((err as { name?: string }).name).toBe("AbortError");
+    expect(fallback.doGenerateCalls).toHaveLength(0);
+  });
+
   it("propagates the fallback's own failure when both models are down", async () => {
     const primary = throwingModel("primary", bindingError());
     const fallback = throwingModel(
