@@ -35,7 +35,7 @@
     "@chat-adapter/slack": "^4.40.0",
     "@dynamicagents/g2a-protocol": "^0.3.0",
     "agents": "^0.22.0",
-    "ai": "^7.0.93",
+    "ai": "7.0.87",
     "chat": "^4.40.0",
     "drizzle-orm": "^0.45.2",
     "jose": "^6.2.12",

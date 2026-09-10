@@ -26,18 +26,7 @@ export default defineConfig({
     }
   },
   test: {
-    setupFiles: ["./test/apply-migrations.ts"],
-    // Upstream leak, not ours. When a model narrates under `toolChoice:
-    // "required"`, `generateText` rejects with `AI_ToolChoiceViolationError` —
-    // and its telemetry tracing-channel wrapper leaves a *duplicate* rejected
-    // promise unhandled on workerd, whose unhandled-rejection detection is
-    // stricter than Node's. The loop awaits and handles the real rejection
-    // (`src/agents/shared/loop.ts`); the copy has no owner to catch it. Matched
-    // by name so any other unhandled error still fails the run.
-    onUnhandledError: (err) =>
-      (err as { name?: string })?.name === "AI_ToolChoiceViolationError"
-        ? false
-        : undefined
+    setupFiles: ["./test/apply-migrations.ts"]
   },
   plugins: [
     cloudflareTest({
