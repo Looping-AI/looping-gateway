@@ -95,8 +95,12 @@ export function buildAgentSession(
 ): Session {
   const compact = archivingCompaction(
     createCompactFunction({
+      // Telemetry off for the same reason as the turn (`loop.ts`): on workerd its
+      // tracing span leaves every rejection with an unhandled duplicate.
       summarize: (prompt) =>
-        generateText({ model, prompt }).then((r) => r.text),
+        generateText({ model, prompt, telemetry: { isEnabled: false } }).then(
+          (r) => r.text
+        ),
       tailTokenBudget: opts.compactTailTokens
     }),
     opts.onArchive
