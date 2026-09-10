@@ -1,7 +1,7 @@
 {
   "extends": "../tsconfig.json",
   "compilerOptions": {
-    "types": ["node", "@cloudflare/vitest-pool-workers/types"],
+    "types": ["node", "@cloudflare/vitest-plugin/types"],
     // For `wire-contract.spec.ts`, which reads dependency manifests to assert
     // that this gatekeeper never depends on the agent runtime. Import attributes
     // (`with { type: "json" }`) are the modern spelling but need `module` at
