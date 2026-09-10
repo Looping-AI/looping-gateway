@@ -1,7 +1,7 @@
 import type { SessionMessage } from "agents/experimental/memory/session";
 import { embedMany } from "ai";
 import { env } from "cloudflare:workers";
-import { EMBED_INPUT_CHAR_CAP } from "@/config";
+import { EMBED_INPUT_MAX_BYTES } from "@/config";
 import { embeddingModel } from "@/agents/model";
 import { parseTurn, sessionText } from "@/agents/shared/messages";
 
@@ -22,6 +22,25 @@ export interface RecallHit {
   createdAt: string; // ISO-8601; always present
 }
 
+const encoder = new TextEncoder();
+const decoder = new TextDecoder();
+
+/**
+ * Cut `text` to {@link EMBED_INPUT_MAX_BYTES} UTF-8 bytes, on a character boundary.
+ *
+ * The budget is in bytes because that is what bounds the model's token count — see
+ * {@link EMBED_INPUT_MAX_BYTES}. Slicing bytes can land mid-sequence, so the tail is
+ * decoded leniently and the replacement character that leaves behind is dropped
+ * rather than embedded.
+ */
+function capForEmbedding(text: string): string {
+  const bytes = encoder.encode(text);
+  if (bytes.length <= EMBED_INPUT_MAX_BYTES) return text;
+  return decoder
+    .decode(bytes.subarray(0, EMBED_INPUT_MAX_BYTES))
+    .replace(/�+$/, "");
+}
+
 /**
  * Embed texts via Workers AI. Returns one vector per input, in order.
  *
@@ -29,13 +48,13 @@ export interface RecallHit {
  * settings ({@link file://../model.ts model.ts}) — the request size and the
  * one-call-at-a-time shape are declared there, not looped here. The truncation is
  * ours: the binding's `truncate_inputs` cannot be reached through the provider, so
- * an over-long message is cut to {@link EMBED_INPUT_CHAR_CAP} rather than failing
- * the whole batch. Only the vector is affected; metadata still holds the full text.
+ * an over-long message is cut rather than failing the whole batch. Only the vector
+ * is affected; metadata still holds the full text.
  */
 async function embed(texts: string[]): Promise<number[][]> {
   const { embeddings } = await embedMany({
     model: embeddingModel(),
-    values: texts.map((text) => text.slice(0, EMBED_INPUT_CHAR_CAP)),
+    values: texts.map(capForEmbedding),
     telemetry: { isEnabled: false }
   });
   return embeddings;
@@ -46,7 +65,7 @@ async function embed(texts: string[]): Promise<number[][]> {
  * namespace. The vector `id` is the `SessionMessage.id`, so re-archiving an
  * overlapping range is idempotent (an upsert overwrites the same vector). The
  * **full** text is stored in metadata even though the embedding is capped at
- * {@link EMBED_INPUT_CHAR_CAP} — recall returns the exact quote, not a truncation.
+ * {@link EMBED_INPUT_MAX_BYTES} — recall returns the exact quote, not a truncation.
  *
  * User turns carry a Gatekeeper-authored `<turn>` wrapper; we parse it back out
  * (the single source of who/where/when) into structured `channel`/`author`/`at`

@@ -1,7 +1,7 @@
 import { describe, it, expect, afterEach, vi } from "vitest";
 import { env } from "cloudflare:workers";
 import type { SessionMessage } from "agents/experimental/memory/session";
-import { EMBED_INPUT_CHAR_CAP } from "@/config";
+import { EMBED_INPUT_MAX_BYTES } from "@/config";
 import { archiveMessages, recall } from "@/agents/shared/recall";
 import { recallTools } from "@/agents/shared/recall-tool";
 
@@ -168,7 +168,7 @@ describe("archiveMessages", () => {
 
   it("caps an over-long message for embedding but archives it whole", async () => {
     const { upsert, run } = fakeEnv();
-    const long = "x".repeat(EMBED_INPUT_CHAR_CAP + 500);
+    const long = "x".repeat(EMBED_INPUT_MAX_BYTES + 500);
 
     await archiveMessages("admin:0", [msg("long", "user", long)]);
 
@@ -176,7 +176,8 @@ describe("archiveMessages", () => {
       text: string[];
       truncate_inputs?: boolean;
     };
-    expect(input.text[0]).toHaveLength(EMBED_INPUT_CHAR_CAP);
+    // ASCII, so one byte per character.
+    expect(input.text[0]).toHaveLength(EMBED_INPUT_MAX_BYTES);
     // The binding's own `truncate_inputs` is unreachable through the provider,
     // which is why the cap above exists at all.
     expect(input.truncate_inputs).toBeUndefined();
@@ -184,6 +185,25 @@ describe("archiveMessages", () => {
       metadata: Record<string, unknown>;
     }>;
     expect(vectors[0].metadata.text).toBe(long);
+  });
+
+  it("measures the cap in bytes, and cuts on a character boundary", async () => {
+    const { run } = fakeEnv();
+    // Three bytes per character, offset by one ASCII character so the budget falls
+    // mid-sequence: a naive byte slice would leave half a character behind.
+    const long = "a" + "あ".repeat(EMBED_INPUT_MAX_BYTES);
+
+    await archiveMessages("admin:0", [msg("cjk", "user", long)]);
+
+    const sent = (run.mock.calls[0][1] as { text: string[] }).text[0];
+    expect(new TextEncoder().encode(sent).length).toBeLessThanOrEqual(
+      EMBED_INPUT_MAX_BYTES
+    );
+    // A character count alone would have sailed past the byte budget, which is what
+    // the model's token window actually reacts to.
+    expect(sent.length).toBeLessThan(EMBED_INPUT_MAX_BYTES);
+    expect(sent).not.toContain("�");
+    expect(sent.startsWith("aあ")).toBe(true);
   });
 });
 

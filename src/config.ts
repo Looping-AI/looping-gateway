@@ -43,7 +43,7 @@ export const EMBED_MODEL_ID = "@cf/baai/bge-m3";
 export const EMBED_MAX_PER_CALL = 100;
 
 /**
- * Characters an input is truncated to before it is embedded.
+ * UTF-8 **bytes** an input is truncated to before it is embedded.
  *
  * Stands in for the binding's `truncate_inputs`, which cannot be reached through the
  * provider: it spreads extra settings into `binding.run`'s *options*, while Cloudflare
@@ -51,16 +51,22 @@ export const EMBED_MAX_PER_CALL = 100;
  * with nowhere to smuggle it through. That flag defaults to `false`, so without a cap
  * of our own one over-long message errors the whole batch instead of being shortened.
  *
- * A backstop, not a budget. {@link EMBED_MODEL_ID}'s context window is 60,000 tokens,
- * and 40,000 characters is Slack's own per-message ceiling — so no real message is
- * ever shortened, and even a pathological all-CJK input at one token per character
- * stays well inside the window. Cutting closer than that would drop tail text out of
- * the *searchable* vector while pretending the message was archived whole.
+ * Bytes rather than characters because only bytes bound the *tokens*
+ * {@link EMBED_MODEL_ID} actually counts against its 60,000-token window. Its
+ * SentencePiece vocabulary spends at least one byte per token — a learned piece, an
+ * `<unk>`, or a byte fallback — so the encoded length is an upper bound on the token
+ * count. A character count is not: one uncommon character can cost several tokens, so
+ * a character cap that looks safe for Latin text can still overflow on rarer scripts
+ * and reject the whole batch.
+ *
+ * 48,000 leaves headroom under the window. Ordinary messages are untouched — Slack's
+ * own per-message ceiling is 40,000 characters, which is 40,000 bytes of ASCII — and
+ * the bound holds whatever the script.
  *
  * Only the vector is affected either way: Vectorize still stores the full text as
  * metadata, so recall keeps quoting messages exactly.
  */
-export const EMBED_INPUT_CHAR_CAP = 40_000;
+export const EMBED_INPUT_MAX_BYTES = 48_000;
 
 /** Cloudflare AI Gateway slug — "default" auto-provisions a gateway on first request. */
 export const AI_GATEWAY_ID = "default";
