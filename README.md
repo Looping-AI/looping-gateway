@@ -209,4 +209,4 @@ Found a bug, have a question, or want to suggest a feature? [Open an issue](http
 
 ## License
 
-[GPL-3.0](LICENSE)
+[Apache-2.0](LICENSE)
