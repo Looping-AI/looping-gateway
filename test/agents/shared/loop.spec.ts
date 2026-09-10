@@ -1,11 +1,10 @@
 import { describe, it, expect, vi } from "vitest";
 import { MockLanguageModelV3 } from "ai/test";
-import { tool, type LanguageModel } from "ai";
+import { APICallError, RetryError, tool, type LanguageModel } from "ai";
 import { z } from "zod";
 import { TaskState, type TaskStatusUpdateEvent } from "@a2a-js/sdk";
 import type { AgentExecutionEvent } from "@a2a-js/sdk/server";
 import { dataOf, partsText } from "@/a2a/parts";
-import type { ModelPair } from "@/agents/model";
 import type { SessionLike } from "@/agents/shared/session";
 import {
   isTransientAiError,
@@ -101,25 +100,13 @@ function expectTerminalReply(
   return terminal.status?.message;
 }
 
-function fakeModels(
-  primary: LanguageModel,
-  fallback: LanguageModel = primary
-): ModelPair {
-  return {
-    primary: () => primary,
-    fallback: () => fallback,
-    primaryId: () => "primary-model",
-    fallbackId: () => "fallback-model"
-  };
-}
-
 function makeCfg(
   session: SessionLike,
-  models: ModelPair,
+  model: LanguageModel,
   overrides: Partial<AgentTurnConfig> = {}
 ): AgentTurnConfig {
   return {
-    models,
+    model,
     prepare: async () => ({ session, systemSuffix: "", tools: {} }),
     unexpectedReply: "Something went wrong. Please try again.",
     ...overrides
@@ -130,42 +117,55 @@ function makeCfg(
 // isTransientAiError
 // ---------------------------------------------------------------------------
 
+/** What the provider hands us: a binding failure normalized to an APICallError. */
+function bindingError(statusCode?: number) {
+  return new APICallError({
+    message: "Capacity temporarily exceeded",
+    url: "workers-ai:binding/run/@cf/test",
+    requestBodyValues: {},
+    statusCode
+  });
+}
+
 describe("isTransientAiError", () => {
-  it("returns false for non-Error values", () => {
+  it("returns false for values the SDK never produced", () => {
     expect(isTransientAiError("string error")).toBe(false);
     expect(isTransientAiError(42)).toBe(false);
     expect(isTransientAiError(null)).toBe(false);
     expect(isTransientAiError(undefined)).toBe(false);
-  });
-
-  it("returns true when message contains error code 3040", () => {
-    expect(isTransientAiError(new Error("error code 3040 hit"))).toBe(true);
-  });
-
-  it("returns true when message contains error code 3046", () => {
-    expect(isTransientAiError(new Error("3046 returned from model"))).toBe(
-      true
-    );
-  });
-
-  it("returns true for 'capacity temporarily exceeded' (case-insensitive)", () => {
-    expect(isTransientAiError(new Error("Capacity Temporarily Exceeded"))).toBe(
-      true
-    );
-    expect(isTransientAiError(new Error("CAPACITY TEMPORARILY EXCEEDED"))).toBe(
-      true
-    );
-  });
-
-  it("returns true for 'request timeout' (case-insensitive)", () => {
-    expect(isTransientAiError(new Error("Request Timeout occurred"))).toBe(
-      true
-    );
-    expect(isTransientAiError(new Error("REQUEST TIMEOUT"))).toBe(true);
-  });
-
-  it("returns false for an unrelated error message", () => {
     expect(isTransientAiError(new Error("some unrelated failure"))).toBe(false);
+  });
+
+  it("is true for a retryable APICallError — the provider maps 3040 to 429", () => {
+    expect(isTransientAiError(bindingError(429))).toBe(true);
+  });
+
+  it("is false for a status the provider will not retry", () => {
+    expect(isTransientAiError(bindingError(400))).toBe(false);
+  });
+
+  it("unwraps a RetryError and classifies the failure underneath it", () => {
+    expect(
+      isTransientAiError(
+        new RetryError({
+          message: "Failed after 3 attempts",
+          reason: "maxRetriesExceeded",
+          errors: [bindingError(429), bindingError(429)]
+        })
+      )
+    ).toBe(true);
+  });
+
+  // Pinned, not overlooked. Workers AI code 3046 is absent from the provider's
+  // code→status table, so `normalizeBindingError` builds an APICallError with no
+  // status and it reads as permanent. The substring match this replaced did catch
+  // it — along with any error that merely mentioned the number. The fix belongs
+  // upstream in the table; this test is here to notice when it lands.
+  it("does not recognize 3046, which arrives with no status code", () => {
+    expect(isTransientAiError(bindingError(undefined))).toBe(false);
+    expect(isTransientAiError(new Error("3046 returned from model"))).toBe(
+      false
+    );
   });
 });
 
@@ -184,7 +184,7 @@ describe("executeAgentTurn", () => {
     await executeAgentTurn(
       fakeRequestContext("hi"),
       bus.eventBus,
-      makeCfg(session, fakeModels(model))
+      makeCfg(session, model)
     );
 
     // finished() always fires
@@ -214,55 +214,25 @@ describe("executeAgentTurn", () => {
     await executeAgentTurn(
       fakeRequestContext(wrapped),
       bus.eventBus,
-      makeCfg(session, fakeModels(model))
+      makeCfg(session, model)
     );
 
     const userTurn = session.messages.find((m) => m.role === "user");
     expect(userTurn?.parts[0]).toMatchObject({ type: "text", text: wrapped });
   });
 
-  it("falls back to the fallback model when the primary throws", async () => {
-    const session = new FakeSession();
-    const fallbackModel = new MockLanguageModelV3({
-      doGenerate: async () => okResult("Fallback reply") as never
-    });
-    const bus = fakeEventBus();
-
-    // Make primary() itself throw synchronously — exercises the inner catch that
-    // retries with fallback() without passing a throwing model to generateText
-    // (which would leak an unhandled rejection through the SDK telemetry span).
-    const models: ModelPair = {
-      primary: () => {
-        throw new Error("primary unavailable");
-      },
-      fallback: () => fallbackModel,
-      primaryId: () => "primary-model",
-      fallbackId: () => "fallback-model"
-    };
-
-    await executeAgentTurn(
-      fakeRequestContext("hi"),
-      bus.eventBus,
-      makeCfg(session, models)
-    );
-
-    expect(bus.finished).toHaveBeenCalledTimes(1);
-    expect(partsText(expectTerminalReply(bus)?.parts)).toBe("Fallback reply");
-  });
-
   it("publishes the transient reply when a transient error propagates to the outer catch", async () => {
-    // Inject the transient error through prepare() to test the outer catch's
-    // isTransientAiError branch without invoking generateText (which leaks
-    // unhandled rejections through the telemetry span in the Workers runtime).
+    // Injected through prepare(): the outer catch classifies whatever reaches it,
+    // and a throw there exercises that branch without a model in the way.
     const bus = fakeEventBus();
     const model = new MockLanguageModelV3({
       doGenerate: async () => okResult("unused") as never
     });
 
     await executeAgentTurn(fakeRequestContext("hi"), bus.eventBus, {
-      models: fakeModels(model),
+      model,
       prepare: async () => {
-        throw new Error("capacity temporarily exceeded");
+        throw bindingError(429);
       },
       unexpectedReply: "Something went wrong. Please try again."
     });
@@ -283,7 +253,7 @@ describe("executeAgentTurn", () => {
     });
 
     await executeAgentTurn(fakeRequestContext("hi"), bus.eventBus, {
-      models: fakeModels(model),
+      model,
       prepare: async () => {
         throw new Error("some unexpected failure");
       },
@@ -309,7 +279,7 @@ describe("executeAgentTurn", () => {
     await executeAgentTurn(
       fakeRequestContext("hi"),
       bus.eventBus,
-      makeCfg(session, fakeModels(model))
+      makeCfg(session, model)
     );
 
     expect(bus.finished).toHaveBeenCalledTimes(1);
@@ -330,7 +300,7 @@ describe("executeAgentTurn", () => {
     await executeAgentTurn(
       fakeRequestContext("hi"),
       bus.eventBus,
-      makeCfg(session, fakeModels(model))
+      makeCfg(session, model)
     );
 
     expect(bus.finished).toHaveBeenCalledTimes(1);
@@ -348,7 +318,7 @@ describe("executeAgentTurn", () => {
     const bus = fakeEventBus();
 
     await executeAgentTurn(fakeRequestContext(), bus.eventBus, {
-      models: fakeModels(model),
+      model,
       prepare: async () => {
         throw new Error("missing metadata");
       },
@@ -377,7 +347,7 @@ describe("executeAgentTurn", () => {
     await executeAgentTurn(
       fakeRequestContext(),
       bus.eventBus,
-      makeCfg(session, fakeModels(model))
+      makeCfg(session, model)
     );
 
     expect(bus.finished).toHaveBeenCalledTimes(1);
@@ -410,7 +380,7 @@ describe("executeAgentTurn", () => {
     await executeAgentTurn(
       fakeRequestContext("hi"),
       bus.eventBus,
-      makeCfg(session, fakeModels(model), {
+      makeCfg(session, model, {
         prepare: async () => ({
           session,
           systemSuffix: "",
@@ -477,7 +447,7 @@ describe("executeAgentTurn", () => {
     await executeAgentTurn(
       fakeRequestContext("hi"),
       bus.eventBus,
-      makeCfg(session, fakeModels(model), {
+      makeCfg(session, model, {
         prepare: async () => ({
           session,
           systemSuffix: "",
@@ -549,7 +519,7 @@ describe("executeAgentTurn — cancellation", () => {
     const done = executeAgentTurn(
       fakeRequestContext("do some work"),
       bus.eventBus,
-      makeCfg(session, fakeModels(model), {
+      makeCfg(session, model, {
         isCanceled,
         prepare: async () => ({
           session,
@@ -729,22 +699,26 @@ describe("executeAgentTurn — HITL park", () => {
     await executeAgentTurn(
       fakeRequestContext("set up an agent"),
       bus.eventBus,
-      makeCfg(session, fakeModels(askThenAnswerModel(() => generations++)), {
-        prepare: async (_t, _m, turn) => ({
-          session,
-          systemSuffix: "",
-          tools: {
-            ask: tool({
-              description: "Ask the user.",
-              inputSchema: z.object({}),
-              execute: async () => {
-                turn.park(request as never);
-                return { status: "awaiting_user" };
-              }
-            })
-          }
-        })
-      })
+      makeCfg(
+        session,
+        askThenAnswerModel(() => generations++),
+        {
+          prepare: async (_t, _m, turn) => ({
+            session,
+            systemSuffix: "",
+            tools: {
+              ask: tool({
+                description: "Ask the user.",
+                inputSchema: z.object({}),
+                execute: async () => {
+                  turn.park(request as never);
+                  return { status: "awaiting_user" };
+                }
+              })
+            }
+          })
+        }
+      )
     );
 
     // The turn always finishes, but the model's second (answering) step never runs.
@@ -793,23 +767,27 @@ describe("executeAgentTurn — HITL park", () => {
     await executeAgentTurn(
       fakeRequestContext("set up an agent"),
       bus.eventBus,
-      makeCfg(session, fakeModels(askThenAnswerModel(() => {})), {
-        isCanceled: async () => true,
-        prepare: async (_t, _m, turn) => ({
-          session,
-          systemSuffix: "",
-          tools: {
-            ask: tool({
-              description: "Ask the user.",
-              inputSchema: z.object({}),
-              execute: async () => {
-                turn.park(request as never);
-                return { status: "awaiting_user" };
-              }
-            })
-          }
-        })
-      })
+      makeCfg(
+        session,
+        askThenAnswerModel(() => {}),
+        {
+          isCanceled: async () => true,
+          prepare: async (_t, _m, turn) => ({
+            session,
+            systemSuffix: "",
+            tools: {
+              ask: tool({
+                description: "Ask the user.",
+                inputSchema: z.object({}),
+                execute: async () => {
+                  turn.park(request as never);
+                  return { status: "awaiting_user" };
+                }
+              })
+            }
+          })
+        }
+      )
     );
 
     expect(publishedStates(bus).at(-1)).toBe(TaskState.TASK_STATE_CANCELED);
@@ -867,10 +845,10 @@ const workTool = tool({
 
 function forcedCfg(
   session: SessionLike,
-  models: ModelPair,
+  model: LanguageModel,
   overrides: Partial<AgentTurnConfig> = {}
 ): AgentTurnConfig {
-  return makeCfg(session, models, {
+  return makeCfg(session, model, {
     requireFinalReply: true,
     recordToolCalls: true,
     prepare: async () => ({
@@ -899,7 +877,7 @@ describe("executeAgentTurn — forced final_reply", () => {
     await executeAgentTurn(
       fakeRequestContext("list agents"),
       bus.eventBus,
-      forcedCfg(session, fakeModels(model))
+      forcedCfg(session, model)
     );
 
     expect(partsText(expectTerminalReply(bus)?.parts)).toBe(
@@ -926,7 +904,7 @@ describe("executeAgentTurn — forced final_reply", () => {
     await executeAgentTurn(
       fakeRequestContext("hi"),
       bus.eventBus,
-      forcedCfg(session, fakeModels(model))
+      forcedCfg(session, model)
     );
 
     expect(seen[0].toolChoice).toEqual({ type: "required" });
@@ -936,21 +914,16 @@ describe("executeAgentTurn — forced final_reply", () => {
     expect(seen[0].tools).toContain("work");
   });
 
-  it("never ships narration as an answer: prose burns both slots and apologizes", async () => {
+  it("never ships narration as an answer: it apologizes instead", async () => {
     // The regression. Under the old loop this exact generation — text, no call —
-    // completed the task successfully and told the user the work was done.
+    // completed the task successfully and told the user the work was done. Reaching
+    // for a second model is a layer below this one now: by the time the SDK reports
+    // the violation, the model's own fallback has already answered in prose too.
     const session = new FakeSession();
-    let primaryCalls = 0;
-    let fallbackCalls = 0;
-    const primary = new MockLanguageModelV3({
+    let calls = 0;
+    const model = new MockLanguageModelV3({
       doGenerate: async () => {
-        primaryCalls++;
-        return okResult("Feito! ✅ I updated the endpoint.") as never;
-      }
-    });
-    const fallback = new MockLanguageModelV3({
-      doGenerate: async () => {
-        fallbackCalls++;
+        calls++;
         return okResult("Feito! ✅ I updated the endpoint.") as never;
       }
     });
@@ -959,11 +932,10 @@ describe("executeAgentTurn — forced final_reply", () => {
     await executeAgentTurn(
       fakeRequestContext("update the endpoint"),
       bus.eventBus,
-      forcedCfg(session, fakeModels(primary, fallback))
+      forcedCfg(session, model)
     );
 
-    expect(primaryCalls).toBeGreaterThan(0);
-    expect(fallbackCalls).toBeGreaterThan(0);
+    expect(calls).toBeGreaterThan(0);
     // The claim never reaches the user, and is never persisted as history.
     expect(publishedText(bus)).not.toContain("Feito!");
     expect(partsText(expectTerminalReply(bus)?.parts)).toMatch(
@@ -989,7 +961,7 @@ describe("executeAgentTurn — forced final_reply", () => {
     await executeAgentTurn(
       fakeRequestContext("hi"),
       bus.eventBus,
-      forcedCfg(session, fakeModels(model))
+      forcedCfg(session, model)
     );
 
     expect(prompts).toHaveLength(2);
@@ -1023,7 +995,7 @@ describe("executeAgentTurn — forced final_reply", () => {
     await executeAgentTurn(
       fakeRequestContext("do a lot"),
       bus.eventBus,
-      forcedCfg(session, fakeModels(model))
+      forcedCfg(session, model)
     );
 
     // The last call is the final round: nothing on the table but the reply.
@@ -1052,7 +1024,7 @@ describe("executeAgentTurn — forced final_reply", () => {
     await executeAgentTurn(
       fakeRequestContext("hi"),
       bus.eventBus,
-      forcedCfg(session, fakeModels(model))
+      forcedCfg(session, model)
     );
 
     expect(publishedText(bus)).toContain("I will check that.");
@@ -1098,7 +1070,7 @@ describe("executeAgentTurn — forced final_reply", () => {
     await executeAgentTurn(
       fakeRequestContext("set up an agent"),
       bus.eventBus,
-      forcedCfg(session, fakeModels(model), {
+      forcedCfg(session, model, {
         prepare: async (_t, _m, turn) => ({
           session,
           systemSuffix: "",
@@ -1138,7 +1110,7 @@ describe("executeAgentTurn — forced final_reply", () => {
     await executeAgentTurn(
       fakeRequestContext("do some work"),
       bus.eventBus,
-      forcedCfg(session, fakeModels(model), { isCanceled: async () => true })
+      forcedCfg(session, model, { isCanceled: async () => true })
     );
 
     expect(calls).toBe(1);
@@ -1169,7 +1141,7 @@ describe("executeAgentTurn — recorded tool calls", () => {
     await executeAgentTurn(
       fakeRequestContext("update it"),
       bus.eventBus,
-      forcedCfg(session, fakeModels(model))
+      forcedCfg(session, model)
     );
 
     const actions = persistedActions(session);
@@ -1194,7 +1166,7 @@ describe("executeAgentTurn — recorded tool calls", () => {
     await executeAgentTurn(
       fakeRequestContext("update it"),
       bus.eventBus,
-      forcedCfg(session, fakeModels(model))
+      forcedCfg(session, model)
     );
 
     // A later turn asked "did that go through?" can now see that it did not.
@@ -1212,7 +1184,7 @@ describe("executeAgentTurn — recorded tool calls", () => {
     await executeAgentTurn(
       fakeRequestContext("hi"),
       bus.eventBus,
-      forcedCfg(session, fakeModels(model))
+      forcedCfg(session, model)
     );
 
     expect(persistedActions(session)).toHaveLength(0);
@@ -1233,7 +1205,7 @@ describe("executeAgentTurn — recorded tool calls", () => {
     await executeAgentTurn(
       fakeRequestContext("do some work"),
       bus.eventBus,
-      forcedCfg(session, fakeModels(model), { isCanceled: async () => stopped })
+      forcedCfg(session, model, { isCanceled: async () => stopped })
     );
 
     expect(publishedStates(bus).at(-1)).toBe(TaskState.TASK_STATE_CANCELED);
@@ -1261,7 +1233,7 @@ describe("executeAgentTurn — recorded tool calls", () => {
     await executeAgentTurn(
       fakeRequestContext("delete it"),
       bus.eventBus,
-      forcedCfg(session, fakeModels(model), {
+      forcedCfg(session, model, {
         prepare: async (_t, _m, turn) => ({
           session,
           systemSuffix: "",
@@ -1305,7 +1277,7 @@ describe("executeAgentTurn — recorded tool calls", () => {
     await executeAgentTurn(
       fakeRequestContext("update it"),
       bus.eventBus,
-      forcedCfg(session, fakeModels(model), {
+      forcedCfg(session, model, {
         prepare: async () => ({
           session,
           systemSuffix: "",
@@ -1348,7 +1320,7 @@ describe("executeAgentTurn — recorded tool calls", () => {
     await executeAgentTurn(
       fakeRequestContext("update it"),
       bus.eventBus,
-      forcedCfg(session, fakeModels(model))
+      forcedCfg(session, model)
     );
 
     expect(partsText(expectTerminalReply(bus)?.parts)).toMatch(
@@ -1372,7 +1344,7 @@ describe("executeAgentTurn — recorded tool calls", () => {
     await executeAgentTurn(
       fakeRequestContext("hi"),
       bus.eventBus,
-      makeCfg(session, fakeModels(model), {
+      makeCfg(session, model, {
         prepare: async () => ({
           session,
           systemSuffix: "",

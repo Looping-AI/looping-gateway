@@ -2,7 +2,8 @@ import type { AgentExecutor, ExecutionEventBus } from "@a2a-js/sdk/server";
 import { RequestContext } from "@a2a-js/sdk/server";
 import { textPart } from "@/a2a/parts";
 import { COMPACT_AFTER_TOKENS, COMPACT_TAIL_TOKENS } from "@/config";
-import { createModelPair, type ModelOverrides } from "@/agents/model";
+import type { LanguageModel } from "ai";
+import { chatModel, type ModelOverrides } from "@/agents/model";
 import {
   buildAgentSession,
   type SessionHost,
@@ -73,13 +74,13 @@ export interface AdminExecutorOptions extends ModelOverrides {
  */
 export class AdminAgentExecutor implements AgentExecutor {
   private session?: SessionLike;
-  private readonly models: ReturnType<typeof createModelPair>;
+  private readonly model: LanguageModel;
 
   constructor(
     private readonly agent: SessionHost,
     private readonly options: AdminExecutorOptions = {}
   ) {
-    this.models = createModelPair(this.options);
+    this.model = chatModel(this.options);
   }
 
   /** Lazily build the one Session for this DO; `wsId` is fixed per instance. */
@@ -89,7 +90,7 @@ export class AdminAgentExecutor implements AgentExecutor {
       const namespace = `admin:${wsId}`;
       this.session = this.options.createSession
         ? this.options.createSession(wsId)
-        : buildAgentSession(this.agent, this.models.primary(), {
+        : buildAgentSession(this.agent, this.model, {
             soul: () => adminSoul(wsId),
             memoryDescription:
               "Durable facts about this workspace — who the admins are, conventions, and decisions. Keep it concise.",
@@ -112,7 +113,7 @@ export class AdminAgentExecutor implements AgentExecutor {
     // resumes (an `ask_user` answer, or a fresh message) pass through untouched.
     const turnContext = await this.applyPendingApproval(requestContext);
     await executeAgentTurn(turnContext, eventBus, {
-      models: this.models,
+      model: this.model,
       // The dispatch token is the A2A messageId, and the gatekeeper records a 🛑
       // against that same token — so the running turn can read its own stop flag.
       isCanceled: isCancelRequested,

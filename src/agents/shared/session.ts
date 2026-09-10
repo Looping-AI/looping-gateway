@@ -3,6 +3,7 @@ import { generateText } from "ai";
 import { Session } from "agents/experimental/memory/session";
 import type { SessionMessage } from "agents/experimental/memory/session";
 import { createCompactFunction } from "agents/experimental/memory/utils";
+import { CHAT_CALL_OPTIONS } from "@/agents/model";
 
 /**
  * The SQLite-backed host the Sessions API needs — satisfied by the Agents SDK
@@ -84,16 +85,15 @@ export function archivingCompaction(
 
 /**
  * The summarizer compaction runs: one plain `generateText` over the agent's own
- * model. Telemetry off for the same reason as the turn (`loop.ts`): on workerd its
- * tracing span leaves every rejection with an unhandled duplicate.
+ * model, carrying the same call options as the turn. A summary written at a
+ * different reasoning depth than the conversation it compresses would be a drift
+ * nothing reports — which is why the options are one shared constant.
  */
 export function compactionSummarizer(
   model: LanguageModel
 ): (prompt: string) => Promise<string> {
   return (prompt) =>
-    generateText({ model, prompt, telemetry: { isEnabled: false } }).then(
-      (r) => r.text
-    );
+    generateText({ model, prompt, ...CHAT_CALL_OPTIONS }).then((r) => r.text);
 }
 
 /**

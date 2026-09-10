@@ -15,9 +15,10 @@ export const CHAT_FALLBACK_MODEL_ID = "@cf/zai-org/glm-4.7-flash";
  * the provider accepts: enough deliberation to decide a tool call is needed,
  * without paying `high` on every Slack turn. `null` would disable thinking.
  *
- * Applied as a model *setting* rather than a per-call `providerOptions`, so it
- * covers the tool loop and the Sessions compaction summarizer alike — both run
- * on the same model instance.
+ * Passed as the SDK's unified `reasoning` call option, which the provider maps to
+ * Workers AI's `reasoning_effort`. It travels in `CHAT_CALL_OPTIONS`
+ * ({@link file://./agents/model.ts model.ts}) so the tool loop and the Sessions
+ * compaction summarizer cannot drift apart.
  */
 export const CHAT_REASONING_EFFORT = "medium";
 
@@ -34,6 +35,26 @@ export const AVATAR_IMAGE_MODEL_ID = "@cf/black-forest-labs/flux-2-klein-9b";
  * window. 1024-dimensional — must match the `agent-recall` Vectorize index dims.
  */
 export const EMBED_MODEL_ID = "@cf/baai/bge-m3";
+
+/**
+ * How many texts one embedding request carries. The provider would default to 3000;
+ * this keeps the request the size the recall store has always sent.
+ */
+export const EMBED_MAX_PER_CALL = 100;
+
+/**
+ * Characters an input is truncated to before it is embedded.
+ *
+ * Stands in for the binding's `truncate_inputs`, which cannot be reached through the
+ * provider: it spreads extra settings into `binding.run`'s *options*, while Cloudflare
+ * declares `truncate_inputs` on the model's *inputs*, and `AiOptions` is a closed type
+ * with nowhere to smuggle it through. Without a cap, one over-long message fails the
+ * whole batch instead of being shortened.
+ *
+ * Only the *vector* is affected. Vectorize still stores the full text as metadata, so
+ * recall keeps quoting messages exactly.
+ */
+export const EMBED_INPUT_CHAR_CAP = 8_000;
 
 /** Cloudflare AI Gateway slug — "default" auto-provisions a gateway on first request. */
 export const AI_GATEWAY_ID = "default";

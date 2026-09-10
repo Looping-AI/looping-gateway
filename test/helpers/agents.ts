@@ -87,7 +87,9 @@ export function stubAgentAi(text = "stubbed agent reply") {
   }) as never);
 }
 
-// Minimal valid LanguageModelV3 generate result.
+// Minimal valid generate result. The shape is the v4 one the provider actually
+// speaks (`finishReason` as an object, structured `usage`) — `MockLanguageModelV3`
+// only spoofs a version marker, so what a spec returns here is what the SDK reads.
 export function okResult(text: string) {
   return {
     content: [{ type: "text", text }],
