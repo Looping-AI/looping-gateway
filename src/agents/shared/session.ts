@@ -83,6 +83,20 @@ export function archivingCompaction(
 }
 
 /**
+ * The summarizer compaction runs: one plain `generateText` over the agent's own
+ * model. Telemetry off for the same reason as the turn (`loop.ts`): on workerd its
+ * tracing span leaves every rejection with an unhandled duplicate.
+ */
+export function compactionSummarizer(
+  model: LanguageModel
+): (prompt: string) => Promise<string> {
+  return (prompt) =>
+    generateText({ model, prompt, telemetry: { isEnabled: false } }).then(
+      (r) => r.text
+    );
+}
+
+/**
  * Build the one `Session` an agent Durable Object owns: a read-only `"soul"`
  * identity block + a writable `"memory"` scratchpad, with history compaction
  * summarized by the same model. Shared by the admin and onboarding agents — only
@@ -95,8 +109,7 @@ export function buildAgentSession(
 ): Session {
   const compact = archivingCompaction(
     createCompactFunction({
-      summarize: (prompt) =>
-        generateText({ model, prompt }).then((r) => r.text),
+      summarize: compactionSummarizer(model),
       tailTokenBudget: opts.compactTailTokens
     }),
     opts.onArchive
