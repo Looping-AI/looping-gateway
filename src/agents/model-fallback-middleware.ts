@@ -32,13 +32,21 @@ type CallOptions = WrapGenerateOptions["params"];
 type GenerateResult = Awaited<ReturnType<WrapGenerateOptions["doGenerate"]>>;
 type Model = WrapGenerateOptions["model"];
 
-/** A cancelled turn is not a model failure, and must not spend the fallback on it. */
+/**
+ * A cancelled turn is not a model failure, and must not spend the fallback on it.
+ *
+ * Deliberately the same predicate as the SDK's own `isAbortError`, which `ai` does
+ * not re-export: a cancellation reaches here as a `DOMException` rather than an
+ * `Error` — that is what `AbortSignal` throws — and the provider passes those
+ * through untouched. Testing `instanceof Error` alone would let a cancelled turn
+ * fall into the catch below and spend a second model on it.
+ */
 function isAbort(err: unknown): boolean {
-  const name = err instanceof Error ? err.name : undefined;
   return (
-    name === "AbortError" ||
-    name === "TimeoutError" ||
-    name === "ResponseAborted"
+    (err instanceof Error || err instanceof DOMException) &&
+    (err.name === "AbortError" ||
+      err.name === "ResponseAborted" ||
+      err.name === "TimeoutError")
   );
 }
 
