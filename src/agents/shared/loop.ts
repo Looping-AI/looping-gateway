@@ -11,12 +11,14 @@ import type {
   ToolSet
 } from "ai";
 import {
+  APICallError,
   generateText,
   hasToolCall,
   isStepCount,
+  RetryError,
   ToolChoiceViolationError
 } from "ai";
-import type { createModelPair } from "@/agents/model";
+import { CHAT_CALL_OPTIONS } from "@/agents/model";
 import { buildMessage, textOf, textPart } from "@/a2a/parts";
 import { buildHitlRequestParts, type HitlRequest } from "@/a2a/hitl";
 import type { AgentTurnMetadata } from "@/agents/dispatch";
@@ -38,14 +40,14 @@ import {
 const MAX_STEPS = 10;
 
 /**
- * How many times one model may be shown its own rejected `final_reply` and asked
- * again, before the turn gives up on that slot.
+ * How many times the model may be shown its own rejected `final_reply` and asked
+ * again, before the round gives up.
  *
- * Repair belongs to the **slot**, not the turn. A rejected call is not a model
- * that is unavailable — it is one that understood the request and got the shape
- * wrong, which is the single failure it can actually fix once it is shown the
- * rejection. Falling straight through to the fallback instead spends a whole
- * second model on a fresh guess that has no idea the first one failed.
+ * A rejected call is not a model that is unavailable — it is one that understood
+ * the request and got the shape wrong, which is the single failure it can actually
+ * fix once it is shown the rejection. Reaching for another model instead spends one
+ * on a fresh guess that has no idea the first one failed. Unavailability is a
+ * different failure, answered a layer down by the model's own fallback.
  */
 const MAX_REPAIR_ATTEMPTS = 2;
 
@@ -146,14 +148,30 @@ function repairExchange(
   ];
 }
 
+/**
+ * Whether a failure is the service being briefly unavailable rather than a bug —
+ * the difference between "try again in a moment" and an apology.
+ *
+ * The SDK decides this now, not us. The provider normalizes a binding failure into
+ * an `APICallError` carrying an HTTP status, and `isRetryable` is exactly the
+ * question being asked here (429, 408, 409, 5xx). A failure the SDK retried arrives
+ * wrapped, and the wrapper's own message ("Failed after N attempts") carries none of
+ * that signal, so unwrap before classifying.
+ *
+ * One known gap: Workers AI code 3046 is missing from the provider's code→status
+ * table, so it reaches us with no status at all and reads as permanent. That used to
+ * be caught by matching the message text — which also matched any error that merely
+ * mentioned the number. Fixing it belongs upstream, in the table, not here.
+ */
 export function isTransientAiError(err: unknown): boolean {
-  if (!(err instanceof Error)) return false;
-  return (
-    err.message.includes("3040") ||
-    err.message.includes("3046") ||
-    err.message.toLowerCase().includes("capacity temporarily exceeded") ||
-    err.message.toLowerCase().includes("request timeout")
-  );
+  if (RetryError.isInstance(err)) return isTransientAiError(err.lastError);
+  if (APICallError.isInstance(err)) return err.isRetryable;
+  return false;
+}
+
+/** What to log as the model. A `LanguageModel` may be a bare model-id string. */
+function modelIdOf(model: LanguageModel): string {
+  return typeof model === "string" ? model : model.modelId;
 }
 
 /** What an agent assembles for a single turn (inside the protected body). */
@@ -178,7 +196,12 @@ export interface TurnControls {
 }
 
 export interface AgentTurnConfig {
-  models: ReturnType<typeof createModelPair>;
+  /**
+   * The one model a turn runs on. It carries its own fallback — see
+   * {@link file://../model-fallback-middleware.ts model-fallback-middleware.ts} —
+   * so a second model is not this layer's concern.
+   */
+  model: LanguageModel;
   /**
    * Assemble the session/tools/system for this turn. Runs *inside* the protected
    * body, so throwing here (e.g. missing required metadata) yields the friendly
@@ -318,7 +341,7 @@ export async function executeAgentTurn(
   const userMessage = requestContext.userMessage;
   const text = textOf(userMessage);
   const metadata = (userMessage.metadata ?? {}) as Partial<AgentTurnMetadata>;
-  let modelId = cfg.models.primaryId();
+  const modelId = modelIdOf(cfg.model);
   let completed = false;
   // Set by the stop condition below once a 🛑 is seen for this turn.
   let canceled = false;
@@ -451,16 +474,12 @@ export async function executeAgentTurn(
     const stopIfHitlRequested: StopCondition<ToolSet> = () =>
       hitl.request !== null;
 
-    // One call shape, two models, two modes. The system prompt goes in
-    // `instructions`: `messages` rejects `role: "system"` entries by default,
-    // which is fine because `toModelMessages` only ever emits user/assistant turns.
-    const generate = (
-      model: LanguageModel,
-      msgs: ModelMessage[],
-      mode: RoundMode
-    ) =>
+    // One call shape, two modes. The system prompt goes in `instructions`:
+    // `messages` rejects `role: "system"` entries by default, which is fine because
+    // `toModelMessages` only ever emits user/assistant turns.
+    const generate = (msgs: ModelMessage[], mode: RoundMode) =>
       generateText({
-        model,
+        model: cfg.model,
         instructions:
           soul +
           (required ? FINAL_REPLY_CONTRACT : "") +
@@ -490,12 +509,10 @@ export async function executeAgentTurn(
                 ...(required ? [hasToolCall(FINAL_REPLY_TOOL_NAME)] : [])
               ],
         onStepEnd,
-        // Off because it is the only way to keep a rejection single. With telemetry
-        // on, `generateText` runs inside a tracing-channel span, and workerd never
-        // reports that channel as having no subscribers — so every throw leaves an
-        // unhandled duplicate behind. Nothing here registers an integration, so
-        // turning it off loses nothing.
-        telemetry: { isEnabled: false }
+        // `reasoning` and the telemetry opt-out travel together, shared with the
+        // compaction summarizer so the two call sites cannot drift — see
+        // {@link file://../model.ts model.ts}.
+        ...CHAT_CALL_OPTIONS
       });
 
     /** Classify what one completed generation produced. */
@@ -540,86 +557,66 @@ export async function executeAgentTurn(
     };
 
     /**
-     * Run one mode across both model slots, repairing a rejected ending in place.
+     * Run one mode, repairing a rejected ending in place.
      *
-     * Two nested recoveries answering different failures. Within a slot, a call the
-     * schema rejects goes back to the *same* model as a failed tool result — a shape
-     * error is the one thing a model can fix once it sees it. Across slots, an
-     * attempt that produced no ending at all moves to the fallback, which is what
-     * that slot is for.
+     * One recovery lives here, and only one: a call the schema rejects goes back to
+     * the same model as a failed tool result, because a shape error is the single
+     * failure a model can fix once it is shown it. A model that is *unavailable* is
+     * a different failure, and it is answered a layer down — the model carries its
+     * own fallback, so by the time anything reaches this catch both have been spent.
      */
     const runRounds = async (mode: RoundMode): Promise<Attempt> => {
       let last: Attempt = { kind: "none", finishReason: "stop" };
+      // A fresh copy per round, so a `final` round is never handed the open round's
+      // rejected calls to be confused by.
+      const roundMessages = [...messages];
 
-      for (const slot of ["primary", "fallback"] as const) {
-        if (slot === "fallback") modelId = cfg.models.fallbackId();
-        const model =
-          slot === "primary" ? cfg.models.primary : cfg.models.fallback;
-        // A fresh copy per slot, so a fallback that is reached is never handed the
-        // primary's rejected calls to be confused by.
-        const slotMessages = [...messages];
-
-        for (let repair = 0; repair <= MAX_REPAIR_ATTEMPTS; repair += 1) {
-          let result: Awaited<ReturnType<typeof generate>>;
-          try {
-            result = await generate(model(), slotMessages, mode);
-          } catch (err) {
-            // Narration under `toolChoice: "required"` arrives as a throw, not a
-            // result — the SDK enforces the constraint it cannot make the model
-            // honour. It is an *ending*, not an outage: the model was reachable
-            // and answered, it just answered in prose. Classifying it here keeps
-            // it on the same path a returned text-only result took, so a slot
-            // that narrates still burns through to the fallback and ends in the
-            // forced `final` round rather than an apology for a service that
-            // never went down.
-            if (ToolChoiceViolationError.isInstance(err)) {
-              last = { kind: "none", finishReason: err.finishReason };
-              break;
-            }
-            // The last slot's throw is the one the outer catch classifies, so it
-            // is left to propagate; an earlier slot's is spent and moves on.
-            if (slot === "fallback") throw err;
-            console.warn(
-              "[agent-loop] AI error on primary model, retrying with fallback",
-              {
-                model: modelId,
-                mode,
-                error: String(err),
-                contextId: requestContext.contextId
-              }
-            );
+      for (let repair = 0; repair <= MAX_REPAIR_ATTEMPTS; repair += 1) {
+        let result: Awaited<ReturnType<typeof generate>>;
+        try {
+          result = await generate(roundMessages, mode);
+        } catch (err) {
+          // Narration under `toolChoice: "required"` arrives as a throw, not a
+          // result — the SDK enforces the constraint it cannot make the model
+          // honour, and it only does so once the fallback has already answered in
+          // prose too. It is an *ending*, not an outage: both models were reachable
+          // and answered, they just answered in prose. Classifying it here keeps it
+          // on the same path a returned text-only result took, ending in the forced
+          // `final` round rather than an apology for a service that never went down.
+          if (ToolChoiceViolationError.isInstance(err)) {
+            last = { kind: "none", finishReason: err.finishReason };
             break;
           }
-
-          // A 🛑 or a park out-ranks the reply and ends the turn here: neither is
-          // a reason to spend another model.
-          if (await checkCanceled()) return { kind: "interrupted" };
-          if (hitl.request) return { kind: "interrupted" };
-
-          last = readEnding(result);
-          // The plain-text ending has never advanced to the fallback on anything
-          // but a throw, and does not repair. Keep it that way.
-          if (!required) return last;
-          if (last.kind === "replied" || last.kind === "exhausted") return last;
-
-          if (last.kind === "rejected" && repair < MAX_REPAIR_ATTEMPTS) {
-            console.warn("[agent-loop] final_reply rejected, repairing", {
-              model: modelId,
-              repair,
-              error: String(last.error),
-              contextId: requestContext.contextId
-            });
-            slotMessages.push(
-              ...repairExchange(
-                `${userMessage.messageId}:repair:${slot}:${repair}`,
-                last.input,
-                last.error
-              )
-            );
-            continue;
-          }
-          break;
+          throw err;
         }
+
+        // A 🛑 or a park out-ranks the reply and ends the turn here: neither is a
+        // reason to spend another call.
+        if (await checkCanceled()) return { kind: "interrupted" };
+        if (hitl.request) return { kind: "interrupted" };
+
+        last = readEnding(result);
+        // The plain-text ending does not repair. Keep it that way.
+        if (!required) return last;
+        if (last.kind === "replied" || last.kind === "exhausted") return last;
+
+        if (last.kind === "rejected" && repair < MAX_REPAIR_ATTEMPTS) {
+          console.warn("[agent-loop] final_reply rejected, repairing", {
+            model: modelId,
+            repair,
+            error: String(last.error),
+            contextId: requestContext.contextId
+          });
+          roundMessages.push(
+            ...repairExchange(
+              `${userMessage.messageId}:repair:${mode}:${repair}`,
+              last.input,
+              last.error
+            )
+          );
+          continue;
+        }
+        break;
       }
 
       return last;
@@ -641,7 +638,6 @@ export async function executeAgentTurn(
         ending: ending.kind,
         contextId: requestContext.contextId
       });
-      modelId = cfg.models.primaryId();
       ending = await runRounds("final");
     }
 

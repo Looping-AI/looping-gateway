@@ -1,6 +1,7 @@
 import { describe, it, expect, afterEach, vi } from "vitest";
 import { env } from "cloudflare:workers";
 import type { SessionMessage } from "agents/experimental/memory/session";
+import { EMBED_INPUT_CHAR_CAP } from "@/config";
 import { archiveMessages, recall } from "@/agents/shared/recall";
 import { recallTools } from "@/agents/shared/recall-tool";
 
@@ -154,9 +155,35 @@ describe("archiveMessages", () => {
       msg(`m${i}`, "user", `t${i}`)
     );
     await archiveMessages("admin:0", many);
-    expect(run).toHaveBeenCalledTimes(2); // 100 + 50
+    expect(run).toHaveBeenCalledTimes(2);
+    // 100 then 50, one call at a time. Both halves are declared on the model
+    // rather than looped here: the per-call cap, and `supportsParallelCalls:
+    // false`, which is what stops `embedMany` firing the chunks concurrently.
+    expect(
+      run.mock.calls.map((c) => (c[1] as { text: string[] }).text.length)
+    ).toEqual([100, 50]);
     expect(upsert).toHaveBeenCalledTimes(1);
     expect((upsert.mock.calls[0][0] as unknown[]).length).toBe(150);
+  });
+
+  it("caps an over-long message for embedding but archives it whole", async () => {
+    const { upsert, run } = fakeEnv();
+    const long = "x".repeat(EMBED_INPUT_CHAR_CAP + 500);
+
+    await archiveMessages("admin:0", [msg("long", "user", long)]);
+
+    const input = run.mock.calls[0][1] as {
+      text: string[];
+      truncate_inputs?: boolean;
+    };
+    expect(input.text[0]).toHaveLength(EMBED_INPUT_CHAR_CAP);
+    // The binding's own `truncate_inputs` is unreachable through the provider,
+    // which is why the cap above exists at all.
+    expect(input.truncate_inputs).toBeUndefined();
+    const vectors = upsert.mock.calls[0][0] as Array<{
+      metadata: Record<string, unknown>;
+    }>;
+    expect(vectors[0].metadata.text).toBe(long);
   });
 });
 

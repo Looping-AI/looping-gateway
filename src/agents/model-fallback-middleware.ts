@@ -1,0 +1,111 @@
+import type { LanguageModelMiddleware } from "ai";
+
+/**
+ * Fall back to a second model **within the failing call**, rather than by running
+ * the turn again.
+ *
+ * The turn used to own this: `runRounds` looped over a primary and a fallback slot
+ * and re-entered `generateText` from the original history, so every tool the primary
+ * had already run ran a second time. A middleware sits one layer down, where the
+ * unit of failure is a single model call — the steps already taken keep their
+ * results, and only the call that failed is retried elsewhere.
+ *
+ * Two failures reach here, and they arrive differently:
+ *
+ *  1. **A throw.** The provider normalizes a binding failure into an `APICallError`
+ *     before it gets here.
+ *  2. **Narration.** A model that answers in prose under an enforced `toolChoice`
+ *     *succeeds* as far as the provider is concerned — the SDK only rejects it
+ *     afterwards, in `generateText`, by which time this middleware has returned.
+ *     So the result has to be inspected here, not caught.
+ *
+ * It sits **inside** the SDK's retry loop (`generateText` wraps the whole wrapped
+ * model in `retry`), so each retry attempt re-enters it: an attempt is
+ * "primary, then fallback", and backoff happens between attempts, never between the
+ * two models. That ordering is the point — a primary that is out of capacity reaches
+ * the fallback immediately instead of after the primary's own backoff.
+ */
+
+type WrapGenerate = NonNullable<LanguageModelMiddleware["wrapGenerate"]>;
+type WrapGenerateOptions = Parameters<WrapGenerate>[0];
+type CallOptions = WrapGenerateOptions["params"];
+type GenerateResult = Awaited<ReturnType<WrapGenerateOptions["doGenerate"]>>;
+type Model = WrapGenerateOptions["model"];
+
+/** A cancelled turn is not a model failure, and must not spend the fallback on it. */
+function isAbort(err: unknown): boolean {
+  const name = err instanceof Error ? err.name : undefined;
+  return (
+    name === "AbortError" ||
+    name === "TimeoutError" ||
+    name === "ResponseAborted"
+  );
+}
+
+/**
+ * Whether a result fails the tool choice the call enforced.
+ *
+ * Deliberately the same test the SDK applies a moment later (the one that raises
+ * `ToolChoiceViolationError`): a `tool-call` part satisfies `required`, and one
+ * naming the tool satisfies `{ type: "tool" }`. Like the SDK, it does not care
+ * whether the call's *input* is valid — a malformed `final_reply` is the repair
+ * loop's problem, and switching models would not fix it.
+ */
+function violatesToolChoice(
+  toolChoice: CallOptions["toolChoice"],
+  content: GenerateResult["content"]
+): boolean {
+  if (toolChoice == null) return false;
+  const enforced = toolChoice;
+  if (enforced.type !== "required" && enforced.type !== "tool") return false;
+  return !content.some(
+    (part) =>
+      part.type === "tool-call" &&
+      (enforced.type === "required" || part.toolName === enforced.toolName)
+  );
+}
+
+/**
+ * Try `fallback` when the wrapped model throws, or narrates under an enforced tool
+ * choice.
+ *
+ * The fallback's own result is returned as it comes, even if it narrates too: one
+ * fallback per call, no second guess. `generateText` then raises the violation
+ * itself, and the turn classifies that as an ending it has no reply for — which is
+ * what the forced final round exists to rescue.
+ *
+ * Only `wrapGenerate` is implemented. Nothing here streams; a future `streamText`
+ * would get no fallback until `wrapStream` is written to match.
+ */
+export function fallbackMiddleware(fallback: Model): LanguageModelMiddleware {
+  return {
+    wrapGenerate: async ({ doGenerate, params, model }) => {
+      let result: GenerateResult;
+      try {
+        result = await doGenerate();
+      } catch (err) {
+        if (isAbort(err)) throw err;
+        console.warn("[model] call failed, trying the fallback model", {
+          model: model.modelId,
+          fallbackModel: fallback.modelId,
+          error: String(err)
+        });
+        // A failure here is the end of the line: it propagates to the SDK, which
+        // decides whether it is worth retrying the pair.
+        return await fallback.doGenerate(params);
+      }
+
+      if (!violatesToolChoice(params.toolChoice, result.content)) return result;
+
+      console.warn(
+        "[model] narrated under an enforced tool choice, trying the fallback model",
+        {
+          model: model.modelId,
+          fallbackModel: fallback.modelId,
+          finishReason: result.finishReason.unified
+        }
+      );
+      return await fallback.doGenerate(params);
+    }
+  };
+}

@@ -1,6 +1,8 @@
 import type { SessionMessage } from "agents/experimental/memory/session";
+import { embedMany } from "ai";
 import { env } from "cloudflare:workers";
-import { AI_GATEWAY_ID, EMBED_MODEL_ID } from "@/config";
+import { EMBED_INPUT_CHAR_CAP } from "@/config";
+import { embeddingModel } from "@/agents/model";
 import { parseTurn, sessionText } from "@/agents/shared/messages";
 
 /**
@@ -13,9 +15,6 @@ import { parseTurn, sessionText } from "@/agents/shared/messages";
  * agent can only ever recall what it already saw (permission-safe by construction).
  */
 
-/** Workers AI batches embeddings; keep requests under the per-call input cap. */
-const EMBED_BATCH = 100;
-
 export interface RecallHit {
   role: string;
   text: string;
@@ -23,32 +22,31 @@ export interface RecallHit {
   createdAt: string; // ISO-8601; always present
 }
 
-/** Embed texts via Workers AI, batched. Returns one vector per input, in order. */
+/**
+ * Embed texts via Workers AI. Returns one vector per input, in order.
+ *
+ * Batching, ordering and retries belong to `embedMany` and to the model's own
+ * settings ({@link file://../model.ts model.ts}) — the request size and the
+ * one-call-at-a-time shape are declared there, not looped here. The truncation is
+ * ours: the binding's `truncate_inputs` cannot be reached through the provider, so
+ * an over-long message is cut to {@link EMBED_INPUT_CHAR_CAP} rather than failing
+ * the whole batch. Only the vector is affected; metadata still holds the full text.
+ */
 async function embed(texts: string[]): Promise<number[][]> {
-  const out: number[][] = [];
-  for (let i = 0; i < texts.length; i += EMBED_BATCH) {
-    const batch = texts.slice(i, i + EMBED_BATCH);
-    // truncate_inputs: a single over-long message is truncated for embedding (the
-    // full text is still stored in metadata) rather than failing the whole batch.
-    const res = (await env.AI.run(
-      EMBED_MODEL_ID,
-      {
-        text: batch,
-        truncate_inputs: true
-      },
-      { gateway: { id: AI_GATEWAY_ID } }
-    )) as { data: number[][] };
-    out.push(...res.data);
-  }
-  return out;
+  const { embeddings } = await embedMany({
+    model: embeddingModel(),
+    values: texts.map((text) => text.slice(0, EMBED_INPUT_CHAR_CAP)),
+    telemetry: { isEnabled: false }
+  });
+  return embeddings;
 }
 
 /**
  * Archive the raw messages displaced by a compaction into the instance's
  * namespace. The vector `id` is the `SessionMessage.id`, so re-archiving an
  * overlapping range is idempotent (an upsert overwrites the same vector). The
- * **full** text is stored in metadata even though the embedding truncates at the
- * model's token limit — recall returns the exact quote, not a truncation.
+ * **full** text is stored in metadata even though the embedding is capped at
+ * {@link EMBED_INPUT_CHAR_CAP} — recall returns the exact quote, not a truncation.
  *
  * User turns carry a Gatekeeper-authored `<turn>` wrapper; we parse it back out
  * (the single source of who/where/when) into structured `channel`/`author`/`at`
