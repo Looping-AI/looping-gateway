@@ -7,13 +7,13 @@ import type {
   GenerateTextOnStepEndCallback,
   LanguageModel,
   ModelMessage,
+  PrepareStepFunction,
   StopCondition,
   ToolSet
 } from "ai";
 import {
   APICallError,
   generateText,
-  hasToolCall,
   isStepCount,
   RetryError,
   ToolChoiceViolationError
@@ -37,19 +37,15 @@ import {
   finalReplyTool
 } from "./final-reply";
 
-const MAX_STEPS = 10;
-
 /**
- * How many times the model may be shown its own rejected `final_reply` and asked
- * again, before the round gives up.
+ * How many model calls one turn may spend.
  *
- * A rejected call is not a model that is unavailable — it is one that understood
- * the request and got the shape wrong, which is the single failure it can actually
- * fix once it is shown the rejection. Reaching for another model instead spends one
- * on a fresh guess that has no idea the first one failed. Unavailability is a
- * different failure, answered a layer down by the model's own fallback.
+ * Under the forced ending the last of them is not a work step — it is the answer
+ * (see `endingStep`), so nine steps do the work and the tenth reports it. The
+ * reservation is the point: a budget that simply ran out would discard everything
+ * the turn did and apologize for an outage that never happened.
  */
-const MAX_REPAIR_ATTEMPTS = 2;
+const MAX_STEPS = 10;
 
 const TRANSIENT_REPLY =
   "The AI service is temporarily unavailable. Please try again in a moment.";
@@ -67,85 +63,43 @@ const NO_REPLY_NOTE =
   "(no reply was produced for this turn; the actions above did run)";
 
 /**
- * What a round may do.
+ * The reply a forced-ending call landed on, or `undefined` if it produced none.
  *
- * - `open` — the normal round: `final_reply` and every work tool, up to
- *   {@link MAX_STEPS} steps.
- * - `final` — the turn spent its steps without ever answering. **No work tools**:
- *   the only thing on the table is the reply. This is not a punishment but the
- *   shape of the ceiling — a budget that ends in a forced answer returns the work,
- *   where one that simply stopped would discard it and apologize for an outage
- *   that never happened.
+ * `staticToolCalls` holds only calls whose input passed the tool's own schema: the
+ * SDK validates every call, marks a rejected one `dynamic`, and this getter filters
+ * those out. So a call found here is already valid, and the parse below is how its
+ * input is read back *with a type* rather than a second check — it is the same
+ * schema object `finalReplyTool` declares, so the two cannot disagree.
+ *
+ * Typed by what it reads rather than as `GenerateTextResult`, whose three type
+ * parameters describe a tool set this turn only assembles at runtime — and so that
+ * the one-tool salvage call can be read by the same function.
  */
-type RoundMode = "open" | "final";
+function readFinalReply(result: {
+  finalStep: {
+    staticToolCalls: readonly { toolName: string; input: unknown }[];
+  };
+}): string | undefined {
+  const calls = result.finalStep.staticToolCalls.filter(
+    (c) => c.toolName === FINAL_REPLY_TOOL_NAME
+  );
+  if (calls.length === 0) return undefined;
+  // The last call of a repeated set: a model that restated its answer meant the
+  // restatement.
+  const parsed = finalReplyInputSchema.safeParse(calls[calls.length - 1].input);
+  return parsed.success ? parsed.data.text.trim() : undefined;
+}
 
 /**
- * How one model attempt ended.
- *
- * The two failure shapes are the point of the split. `rejected` means the model
- * reached an ending and got its *shape* wrong — repairable, by the same model,
- * which now has something specific to fix. `none` means the attempt produced no
- * ending at all, which no feedback can address and which is what the fallback slot
- * exists for. `exhausted` is neither: the model was working fine and simply ran out
- * of steps, so the answer is a `final` round, not a second opinion.
+ * The reply a plain-text turn landed on. `length` means the model was cut off
+ * mid-sentence, which is not an answer however much of one it looks like.
  */
-type Attempt =
-  | { kind: "replied"; text: string }
-  | { kind: "rejected"; input: unknown; error: unknown }
-  | { kind: "exhausted" }
-  | { kind: "none"; finishReason: FinishReason }
-  /** A 🛑 or a HITL park ended the turn; the caller reads which from its own state. */
-  | { kind: "interrupted" };
-
-/**
- * A rejected `final_reply` paired with its rejection, as the exchange the model
- * has to see in order to fix it.
- *
- * Deliberately the same shape the SDK produces for a work tool that failed — the
- * call, then an `error-text` result carrying the reason. A work tool gets this for
- * free and models already know how to read it; a control tool halts the loop before
- * the SDK can, so the turn builds it by hand.
- *
- * Entirely ephemeral: these messages exist for the next `generateText` call and are
- * never appended to the Session. The durable record of a turn is the ending it
- * landed on, and a call that was thrown out is not something a later turn should be
- * able to read back as history.
- */
-function repairExchange(
-  toolCallId: string,
-  input: unknown,
-  error: unknown
-): ModelMessage[] {
-  return [
-    {
-      role: "assistant",
-      content: [
-        {
-          type: "tool-call",
-          toolCallId,
-          toolName: FINAL_REPLY_TOOL_NAME,
-          input
-        }
-      ]
-    },
-    {
-      role: "tool",
-      content: [
-        {
-          type: "tool-result",
-          toolCallId,
-          toolName: FINAL_REPLY_TOOL_NAME,
-          output: {
-            type: "error-text",
-            value:
-              `${String(error)}\n\n` +
-              `The turn did not end and nothing was sent to the user. Call ` +
-              `${FINAL_REPLY_TOOL_NAME} again with your complete reply.`
-          }
-        }
-      ]
-    }
-  ];
+function readPlainReply(result: {
+  text: string;
+  finishReason: FinishReason;
+}): string | undefined {
+  const text = result.text.trim();
+  return text.length > 0 && result.finishReason !== "length" ? text : undefined;
 }
 
 /**
@@ -223,9 +177,10 @@ export interface AgentTurnConfig {
   isCanceled?: (token: string) => Promise<boolean>;
   /**
    * Make the turn end in a `final_reply` tool call instead of in plain text, with
-   * `toolChoice: "required"` on every step. Prose stops being an outcome, so a
-   * model that narrates an action and stops fails its attempt rather than shipping
-   * the narration as an answer — see {@link file://./final-reply.ts final-reply.ts}.
+   * `toolChoice: "required"` on every working step and the ending *named* on the
+   * last. Prose stops being an outcome, so a model that narrates an action and
+   * stops fails its attempt rather than shipping the narration as an answer — see
+   * {@link file://./final-reply.ts final-reply.ts}.
    *
    * Off by default: an agent that has not opted in keeps the plain-text ending.
    */
@@ -328,10 +283,15 @@ function publishInputRequired(
 
 /**
  * The generic agent turn shared by every in-repo agent: append the user message,
- * run a Workers-AI `generateText` tool loop over the Session history (primary →
- * fallback model on any error), persist + publish the final reply, and
- * always `finished()`. Agent-specific behavior (which session, which tools, which
- * caller context) is supplied by `cfg.prepare`.
+ * run **one** Workers-AI `generateText` tool loop over the Session history, persist
+ * + publish the final reply, and always `finished()`. Agent-specific behavior
+ * (which session, which tools, which caller context) is supplied by `cfg.prepare`.
+ *
+ * One call, because the SDK's loop already owns everything this used to re-implement
+ * around it: a rejected ending comes back to the model as a failed tool result on the
+ * next step, the forced final round is that loop's last step, and an unreachable
+ * model is answered a layer down by the model's own fallback. The single exception is
+ * `salvageEnding` below, for a turn the loop leaves with no answer at all.
  */
 export async function executeAgentTurn(
   requestContext: RequestContext,
@@ -474,40 +434,55 @@ export async function executeAgentTurn(
     const stopIfHitlRequested: StopCondition<ToolSet> = () =>
       hitl.request !== null;
 
-    // One call shape, two modes. The system prompt goes in `instructions`:
-    // `messages` rejects `role: "system"` entries by default, which is fine because
-    // `toModelMessages` only ever emits user/assistant turns.
-    const generate = (msgs: ModelMessage[], mode: RoundMode) =>
+    // The system prompt goes in `instructions`: `messages` rejects `role: "system"`
+    // entries by default, which is fine because `toModelMessages` only ever emits
+    // user/assistant turns.
+    const instructions = soul + (required ? FINAL_REPLY_CONTRACT : "");
+
+    /**
+     * The last step is the ending, not one more chance to work.
+     *
+     * Handing it only `final_reply` explains a constraint the model can already see
+     * rather than imposing a new one — and the *named* tool choice is the stronger
+     * form of the same ask: Workers AI enforces it server-side, where `required` is
+     * advisory and fails open into prose on long contexts, which is the exact failure
+     * this whole design exists to catch.
+     *
+     * Unlike the separate round it replaces, this step is inside the loop, so it can
+     * see every tool result the turn produced. The old one restarted from history and
+     * was asked to report work it could not read.
+     */
+    const endingStep: PrepareStepFunction<ToolSet> = ({ stepNumber }) =>
+      stepNumber < MAX_STEPS - 1
+        ? undefined
+        : {
+            activeTools: [FINAL_REPLY_TOOL_NAME],
+            toolChoice: { type: "tool", toolName: FINAL_REPLY_TOOL_NAME },
+            instructions: instructions + FINAL_ROUND_CONTRACT
+          };
+
+    const runTurn = () =>
       generateText({
         model: cfg.model,
-        instructions:
-          soul +
-          (required ? FINAL_REPLY_CONTRACT : "") +
-          (mode === "final" ? FINAL_ROUND_CONTRACT : ""),
-        messages: msgs,
+        instructions,
+        messages,
         // `final_reply` is declared *first*: tool order is part of the prompt, and
-        // reaching an ending is the thing every turn has to do. A `final` round is
-        // handed nothing to work with but the way out — leaving the work tools on
-        // would invite it to spend a budget it has already spent.
+        // reaching an ending is the thing every turn has to do.
         tools: required
-          ? {
-              [FINAL_REPLY_TOOL_NAME]: finalReplyTool,
-              ...(mode === "final" ? {} : workTools)
-            }
+          ? { [FINAL_REPLY_TOOL_NAME]: finalReplyTool, ...workTools }
           : workTools,
         // Every ending is a `final_reply` call, so the model must always call
         // something. Work tools stay freely available — `required` constrains the
         // *shape* of a step's output, not which tool is chosen.
-        ...(required ? { toolChoice: "required" as const } : {}),
-        stopWhen:
-          mode === "final"
-            ? [isStepCount(1)]
-            : [
-                isStepCount(MAX_STEPS),
-                stopIfCanceled,
-                stopIfHitlRequested,
-                ...(required ? [hasToolCall(FINAL_REPLY_TOOL_NAME)] : [])
-              ],
+        ...(required
+          ? { toolChoice: "required" as const, prepareStep: endingStep }
+          : {}),
+        // `hasToolCall(FINAL_REPLY_TOOL_NAME)` is deliberately absent here: it matches
+        // a *rejected* call too, so it would halt the loop on a malformed ending
+        // before the SDK could hand the model its own error to fix. A valid call ends
+        // the loop without help — `final_reply` has no `execute`, so it produces no
+        // output, and the loop only continues once every call has one.
+        stopWhen: [isStepCount(MAX_STEPS), stopIfCanceled, stopIfHitlRequested],
         onStepEnd,
         // `reasoning` and the telemetry opt-out travel together, shared with the
         // compaction summarizer so the two call sites cannot drift — see
@@ -515,130 +490,76 @@ export async function executeAgentTurn(
         ...CHAT_CALL_OPTIONS
       });
 
-    /** Classify what one completed generation produced. */
-    const readEnding = (
-      result: Awaited<ReturnType<typeof generate>>
-    ): Attempt => {
-      if (!required) {
-        const replyText = result.text.trim();
-        if (!replyText || result.finishReason === "length") {
-          return { kind: "none", finishReason: result.finishReason };
-        }
-        return { kind: "replied", text: replyText };
-      }
-
-      const calls = result.toolCalls.filter(
-        (c) => c.toolName === FINAL_REPLY_TOOL_NAME
-      );
-      if (calls.length > 0) {
-        // The last call of a repeated set: a model that restated its answer meant
-        // the restatement.
-        const input = calls[calls.length - 1].input as unknown;
-        const parsed = finalReplyInputSchema.safeParse(input);
-        if (parsed.success) {
-          return { kind: "replied", text: parsed.data.text.trim() };
-        }
-        return {
-          kind: "rejected",
-          input,
-          error: parsed.error.issues
-            .map((i) => `${i.path.join(".") || "(root)"}: ${i.message}`)
-            .join("; ")
-        };
-      }
-
-      // No ending. `tool-calls` means the model was still working when it hit the
-      // step ceiling — a `final` round is what it needs. Anything else means it
-      // ignored `toolChoice: "required"` and narrated instead of acting, which is
-      // the failure this whole design exists to catch.
-      return result.finishReason === "tool-calls"
-        ? { kind: "exhausted" }
-        : { kind: "none", finishReason: result.finishReason };
-    };
-
     /**
-     * Run one mode, repairing a rejected ending in place.
+     * Ask for an ending, once, with nothing else on the table.
      *
-     * One recovery lives here, and only one: a call the schema rejects goes back to
-     * the same model as a failed tool result, because a shape error is the single
-     * failure a model can fix once it is shown it. A model that is *unavailable* is
-     * a different failure, and it is answered a layer down — the model carries its
-     * own fallback, so by the time anything reaches this catch both have been spent.
+     * Reached only when the loop came back with no reply: the model narrated under
+     * the advisory `required` and the SDK raised the violation, or the ending step's
+     * own call was malformed with no budget left to repair it. Both are endings the
+     * turn can still recover, and the enforced tool choice is the one lever the
+     * failed steps did not have.
+     *
+     * No `onStepEnd`: nothing but the reply is declared, so there is no action to
+     * record and no intermediate text to publish.
      */
-    const runRounds = async (mode: RoundMode): Promise<Attempt> => {
-      let last: Attempt = { kind: "none", finishReason: "stop" };
-      // A fresh copy per round, so a `final` round is never handed the open round's
-      // rejected calls to be confused by.
-      const roundMessages = [...messages];
+    const salvageEnding = (seed: ModelMessage[]) =>
+      generateText({
+        model: cfg.model,
+        instructions: instructions + FINAL_ROUND_CONTRACT,
+        messages: seed,
+        tools: { [FINAL_REPLY_TOOL_NAME]: finalReplyTool },
+        toolChoice: { type: "tool", toolName: FINAL_REPLY_TOOL_NAME },
+        stopWhen: [isStepCount(1)],
+        ...CHAT_CALL_OPTIONS
+      });
 
-      for (let repair = 0; repair <= MAX_REPAIR_ATTEMPTS; repair += 1) {
-        let result: Awaited<ReturnType<typeof generate>>;
-        try {
-          result = await generate(roundMessages, mode);
-        } catch (err) {
-          // Narration under `toolChoice: "required"` arrives as a throw, not a
-          // result — the SDK enforces the constraint it cannot make the model
-          // honour, and it only does so once the fallback has already answered in
-          // prose too. It is an *ending*, not an outage: both models were reachable
-          // and answered, they just answered in prose. Classifying it here keeps it
-          // on the same path a returned text-only result took, ending in the forced
-          // `final` round rather than an apology for a service that never went down.
-          if (ToolChoiceViolationError.isInstance(err)) {
-            last = { kind: "none", finishReason: err.finishReason };
-            break;
-          }
-          throw err;
-        }
+    let result: Awaited<ReturnType<typeof runTurn>> | undefined;
+    let reply: string | undefined;
 
-        // A 🛑 or a park out-ranks the reply and ends the turn here: neither is a
-        // reason to spend another call.
-        if (await checkCanceled()) return { kind: "interrupted" };
-        if (hitl.request) return { kind: "interrupted" };
-
-        last = readEnding(result);
-        // The plain-text ending does not repair. Keep it that way.
-        if (!required) return last;
-        if (last.kind === "replied" || last.kind === "exhausted") return last;
-
-        if (last.kind === "rejected" && repair < MAX_REPAIR_ATTEMPTS) {
-          console.warn("[agent-loop] final_reply rejected, repairing", {
-            model: modelId,
-            repair,
-            error: String(last.error),
-            contextId: requestContext.contextId
-          });
-          roundMessages.push(
-            ...repairExchange(
-              `${userMessage.messageId}:repair:${mode}:${repair}`,
-              last.input,
-              last.error
-            )
-          );
-          continue;
-        }
-        break;
-      }
-
-      return last;
-    };
-
-    let ending = await runRounds("open");
-
-    // The turn spent its steps without answering. One more call, with nothing on
-    // the table but the reply, so the work it did do comes back to the user
-    // instead of being discarded behind an apology for an outage that never
-    // happened.
-    if (
-      required &&
-      ending.kind !== "replied" &&
-      ending.kind !== "interrupted"
-    ) {
-      console.warn("[agent-loop] no final_reply; forcing a final round", {
+    try {
+      result = await runTurn();
+      reply = required ? readFinalReply(result) : readPlainReply(result);
+    } catch (err) {
+      // Narration under an enforced tool choice arrives as a throw, not a result —
+      // the SDK enforces the constraint it cannot make the model honour, and it only
+      // does so once the model's own fallback has answered in prose too. It is an
+      // *ending*, not an outage: both models were reachable and answered, they just
+      // answered in prose. Catching it here keeps the turn off the failure path and
+      // on the one that asks once more for an answer.
+      if (!ToolChoiceViolationError.isInstance(err)) throw err;
+      console.warn("[agent-loop] narrated under an enforced tool choice", {
         model: modelId,
-        ending: ending.kind,
+        finishReason: err.finishReason,
         contextId: requestContext.contextId
       });
-      ending = await runRounds("final");
+    }
+
+    // A 🛑 or a park out-ranks the reply and ends the turn here: neither is a reason
+    // to spend another call.
+    const interrupted = (await checkCanceled()) || hitl.request !== null;
+
+    if (required && reply === undefined && !interrupted) {
+      console.warn("[agent-loop] no ending; asking once more with none else", {
+        model: modelId,
+        finishReason: result?.finishReason,
+        contextId: requestContext.contextId
+      });
+      try {
+        // With a result there is a whole run to report, so hand it over. A violation
+        // discards the run, leaving only history — which is all the round this
+        // replaces ever had.
+        const salvaged = await salvageEnding([
+          ...messages,
+          ...(result?.responseMessages ?? [])
+        ]);
+        reply = readFinalReply(salvaged);
+      } catch (err) {
+        if (!ToolChoiceViolationError.isInstance(err)) throw err;
+        console.warn("[agent-loop] narrated again under the enforced ending", {
+          model: modelId,
+          contextId: requestContext.contextId
+        });
+      }
     }
 
     // Every exit below persists `actions` alongside whatever the turn managed to
@@ -647,10 +568,11 @@ export async function executeAgentTurn(
     // up guessing at what happened.
 
     // Re-check after generation, not only between steps. A turn the model answers
-    // in a single call has no step boundary to be interrupted at, so this is the
-    // only chance to notice a 🛑 that landed while it was generating. The work is
-    // already spent by then, but the answer must still be withheld: the user was
-    // told "🛑 Stopped.", and delivering the reply anyway is the bug this fixes.
+    // in a single step has no step boundary to be interrupted at, and neither does
+    // a salvage call, so this is the only chance to notice a 🛑 that landed while
+    // either was generating. The work is already spent by then, but the answer must
+    // still be withheld: the user was told "🛑 Stopped.", and delivering the reply
+    // anyway is the bug this fixes.
     await checkCanceled();
 
     // Stopped: whatever was produced is abandoned work, not an answer. Publish an
@@ -686,11 +608,12 @@ export async function executeAgentTurn(
       return;
     }
 
-    if (ending.kind !== "replied") {
+    if (reply === undefined) {
       console.warn("[agent-loop] turn produced no reply", {
         model: modelId,
-        ending: ending.kind,
-        finishReason: ending.kind === "none" ? ending.finishReason : undefined,
+        // Absent when the turn ended in a violation: the throw carries the result
+        // away with it, and the warning above already named that case.
+        finishReason: result?.finishReason,
         contextId: requestContext.contextId
       });
       // The apology is not persisted — it says nothing true about the workspace —
@@ -704,8 +627,8 @@ export async function executeAgentTurn(
       return;
     }
 
-    await session.appendMessage(assistantSessionMessage(ending.text, actions));
-    publishTerminal(ending.text);
+    await session.appendMessage(assistantSessionMessage(reply, actions));
+    publishTerminal(reply);
   } catch (err) {
     console.error("[agent-loop] turn failed", {
       contextId: requestContext.contextId,

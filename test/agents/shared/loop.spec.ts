@@ -920,10 +920,10 @@ describe("executeAgentTurn — forced final_reply", () => {
     // for a second model is a layer below this one now: by the time the SDK reports
     // the violation, the model's own fallback has already answered in prose too.
     const session = new FakeSession();
-    let calls = 0;
+    const declared: string[][] = [];
     const model = new MockLanguageModelV4({
-      doGenerate: async () => {
-        calls++;
+      doGenerate: async (options) => {
+        declared.push((options.tools ?? []).map((t) => t.name));
         return okResult("Feito! ✅ I updated the endpoint.") as never;
       }
     });
@@ -935,7 +935,10 @@ describe("executeAgentTurn — forced final_reply", () => {
       forcedCfg(session, model)
     );
 
-    expect(calls).toBeGreaterThan(0);
+    // Narrated under `required`, then again under the enforced salvage — and no
+    // further: the salvage is asked once.
+    expect(declared).toHaveLength(2);
+    expect(declared[1]).toEqual(["final_reply"]);
     // The claim never reaches the user, and is never persisted as history.
     expect(publishedText(bus)).not.toContain("Feito!");
     expect(partsText(expectTerminalReply(bus)?.parts)).toMatch(
@@ -944,13 +947,15 @@ describe("executeAgentTurn — forced final_reply", () => {
     expect(session.messages.map((m) => m.role)).toEqual(["user"]);
   });
 
-  it("repairs a blank final_reply on the same model", async () => {
+  it("repairs a blank final_reply within the same call", async () => {
     const session = new FakeSession();
     const prompts: string[] = [];
+    const declared: string[][] = [];
     let n = 0;
     const model = new MockLanguageModelV4({
       doGenerate: async (options) => {
         prompts.push(JSON.stringify(options.prompt));
+        declared.push((options.tools ?? []).map((t) => t.name));
         return (
           n++ === 0 ? finalReplyResult("   ") : finalReplyResult("Real answer.")
         ) as never;
@@ -964,18 +969,24 @@ describe("executeAgentTurn — forced final_reply", () => {
       forcedCfg(session, model)
     );
 
+    // Two steps of one call, not two calls: the SDK rejects the input against the
+    // tool's own schema and feeds the model its error on the next step.
     expect(prompts).toHaveLength(2);
-    // The rejection is shown to the model as a failed tool result…
+    // Still a working step, work tools and all — not the ending-only salvage call,
+    // which would also have fixed the reply and hidden a loop that stopped on the
+    // rejected call instead of handing it back.
+    expect(declared[1]).toContain("work");
     expect(prompts[1]).toContain("final_reply");
+    expect(prompts[1]).toContain("Invalid input for tool");
     expect(prompts[1]).toContain("must not be blank");
-    // …and the blank reply never reaches the user.
+    // The blank reply never reaches the user.
     expect(partsText(expectTerminalReply(bus)?.parts)).toBe("Real answer.");
-    // The repair exchange is ephemeral — history keeps only the ending it landed on.
+    // The repair is ephemeral — history keeps only the ending it landed on.
     expect(session.messages.map((m) => m.role)).toEqual(["user", "assistant"]);
     expect(sessionText(session.messages[1])).toBe("Real answer.");
   });
 
-  it("forces a final round when the turn spends every step on work", async () => {
+  it("reserves the last step for the ending when the turn spends every other one", async () => {
     const session = new FakeSession();
     const declared: string[][] = [];
     const model = new MockLanguageModelV4({
@@ -998,13 +1009,132 @@ describe("executeAgentTurn — forced final_reply", () => {
       forcedCfg(session, model)
     );
 
-    // The last call is the final round: nothing on the table but the reply.
+    // The ending is the last step of the one call, not an eleventh call after it.
+    expect(declared).toHaveLength(10);
     expect(declared.at(-1)).toEqual(["final_reply"]);
     // The user gets the real summary, not an apology for an outage that never happened.
     expect(partsText(expectTerminalReply(bus)?.parts)).toBe(
       "Here is what I managed."
     );
     expect(publishedText(bus)).not.toMatch(/temporarily unavailable/i);
+  });
+
+  it("shows the ending step the work it is being asked to report", async () => {
+    // The capability the separate final round did not have: it restarted from
+    // history, so it answered for work it could not read.
+    const session = new FakeSession();
+    const prompts: string[] = [];
+    const model = new MockLanguageModelV4({
+      doGenerate: async (options) => {
+        prompts.push(JSON.stringify(options.prompt));
+        return (
+          (options.tools ?? []).some((t) => t.name === "work")
+            ? narratedToolCall("still going", "work", {})
+            : finalReplyResult("Here is what I managed.")
+        ) as never;
+      }
+    });
+    const bus = fakeEventBus();
+
+    await executeAgentTurn(
+      fakeRequestContext("do a lot"),
+      bus.eventBus,
+      forcedCfg(session, model)
+    );
+
+    // The tenth call is the loop's own ending step. An eleventh would be the salvage,
+    // which also reads the run — and would pass this for the wrong reason.
+    expect(prompts).toHaveLength(10);
+    const ending = prompts.at(-1) ?? "";
+    expect(ending).toContain('"toolName":"work"');
+    expect(ending).toContain('"ok":true');
+  });
+
+  it("salvages a reply when the model narrates instead of ending", async () => {
+    // `toolChoice: "required"` is advisory on Workers AI — it fails open into prose.
+    // One more call with the ending *named* is the enforced form, and the work the
+    // turn did comes back instead of being buried under an apology.
+    const session = new FakeSession();
+    const declared: string[][] = [];
+    let n = 0;
+    const model = new MockLanguageModelV4({
+      doGenerate: async (options) => {
+        declared.push((options.tools ?? []).map((t) => t.name));
+        return (
+          n++ === 0
+            ? okResult("Feito! ✅ I updated the endpoint.")
+            : finalReplyResult("I could not do that, and here is why.")
+        ) as never;
+      }
+    });
+    const bus = fakeEventBus();
+
+    await executeAgentTurn(
+      fakeRequestContext("update the endpoint"),
+      bus.eventBus,
+      forcedCfg(session, model)
+    );
+
+    expect(declared).toHaveLength(2);
+    expect(declared[1]).toEqual(["final_reply"]);
+    expect(partsText(expectTerminalReply(bus)?.parts)).toBe(
+      "I could not do that, and here is why."
+    );
+    // A turn that answered is completed, not failed — nothing went down.
+    expect(publishedStates(bus).at(-1)).toBe(TaskState.TASK_STATE_COMPLETED);
+    // The narrated claim still never reaches the user or history.
+    expect(publishedText(bus)).not.toContain("Feito!");
+  });
+
+  it("salvages an ending the last step got wrong, with no budget left to repair it", async () => {
+    const session = new FakeSession();
+    let endings = 0;
+    const model = new MockLanguageModelV4({
+      doGenerate: async (options) => {
+        if ((options.tools ?? []).some((t) => t.name === "work")) {
+          return narratedToolCall("still going", "work", {}) as never;
+        }
+        // The first ending-only call is step 10: a blank reply there is rejected
+        // with no step left to fix it. The second is the salvage.
+        return (
+          endings++ === 0
+            ? finalReplyResult("   ")
+            : finalReplyResult("Salvaged answer.")
+        ) as never;
+      }
+    });
+    const bus = fakeEventBus();
+
+    await executeAgentTurn(
+      fakeRequestContext("do a lot"),
+      bus.eventBus,
+      forcedCfg(session, model)
+    );
+
+    expect(endings).toBe(2);
+    expect(partsText(expectTerminalReply(bus)?.parts)).toBe("Salvaged answer.");
+    expect(sessionText(session.messages[1])).toBe("Salvaged answer.");
+  });
+
+  it("lets a 🛑 out-rank the salvage: a stopped turn spends no more calls", async () => {
+    const session = new FakeSession();
+    let calls = 0;
+    const model = new MockLanguageModelV4({
+      doGenerate: async () => {
+        calls++;
+        return okResult("narrating instead of ending") as never;
+      }
+    });
+    const bus = fakeEventBus();
+
+    await executeAgentTurn(
+      fakeRequestContext("update the endpoint"),
+      bus.eventBus,
+      forcedCfg(session, model, { isCanceled: async () => true })
+    );
+
+    expect(calls).toBe(1);
+    expect(publishedStates(bus).at(-1)).toBe(TaskState.TASK_STATE_CANCELED);
   });
 
   it("publishes intermediate narration but not the final_reply step's text", async () => {
