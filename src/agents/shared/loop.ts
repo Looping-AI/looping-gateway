@@ -37,6 +37,7 @@ import {
   finalReplyInputSchema,
   finalReplyTool
 } from "./final-reply";
+import { ASK_USER_TOOL_NAME } from "./ask-user";
 import {
   answeredCall,
   hitlRequestOf,
@@ -375,6 +376,10 @@ export async function executeAgentTurn(
     // An answer with no open call left to settle (asked before open calls existed,
     // or already settled) is an ordinary message.
     const answer = humanAnswerOf(userMessage, metadata.user?.displayName);
+    // Read off the answer rather than the settled record: a timeout for a question
+    // asked before open calls existed has no record to settle, and that turn must
+    // not be free to ask again either.
+    const timedOut = answer?.answer.kind === "timed-out";
     const settled =
       answer && cfg.openCalls
         ? await cfg.openCalls.settle(answer.requestId, async (call) => {
@@ -507,16 +512,39 @@ export async function executeAgentTurn(
             instructions: instructions + FINAL_ROUND_CONTRACT
           };
 
+    // `final_reply` is declared *first*: tool order is part of the prompt, and
+    // reaching an ending is the thing every turn has to do.
+    // Typed as `ToolSet` rather than inferred: the ternary would otherwise infer a
+    // union of two shapes, and `activeTools` is keyed to the tool names, which in
+    // one branch narrows to `final_reply` alone.
+    const turnTools: ToolSet = required
+      ? { [FINAL_REPLY_TOOL_NAME]: finalReplyTool, ...workTools }
+      : workTools;
+
+    /**
+     * A turn a timeout resumed may not ask again.
+     *
+     * Nobody answered for the whole TTL, and a turn still holding `ask_user` can
+     * park on a fresh one, expire, and ask again — a task that never ends, putting
+     * the same question to a human who let the last one sit for a week. Withholding
+     * the tool leaves one way out: say what happened and finish. Everything else
+     * stays on the table, so that ending can still report the work the turn did
+     * before it stopped to ask.
+     *
+     * The gatekeeper cancels the other way out itself: a 🛑 resolves the open rows
+     * and never hands the task back, so a stopped question reaches no model at all.
+     */
+    const withheld = timedOut
+      ? Object.keys(turnTools).filter((name) => name !== ASK_USER_TOOL_NAME)
+      : undefined;
+
     const runTurn = () =>
       generateText({
         model: cfg.model,
         instructions,
         messages,
-        // `final_reply` is declared *first*: tool order is part of the prompt, and
-        // reaching an ending is the thing every turn has to do.
-        tools: required
-          ? { [FINAL_REPLY_TOOL_NAME]: finalReplyTool, ...workTools }
-          : workTools,
+        tools: turnTools,
+        ...(withheld ? { activeTools: withheld } : {}),
         // Every ending is a `final_reply` call, so the model must always call
         // something. Work tools stay freely available — `required` constrains the
         // *shape* of a step's output, not which tool is chosen.

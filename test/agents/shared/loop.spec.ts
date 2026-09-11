@@ -1649,6 +1649,54 @@ describe("executeAgentTurn — ask_user", () => {
     });
   });
 
+  it("withholds ask_user from the turn a timeout resumed", async () => {
+    // Nobody answered for a week. A turn free to ask again would park on a fresh
+    // deadline and time out again, forever — so this one can only end.
+    const session = new FakeSession();
+    const openCalls = new MemoryOpenCalls();
+    await openCalls.put(heldQuestion());
+    const offered: string[][] = [];
+    const model = new MockLanguageModelV4({
+      doGenerate: async (options) => {
+        offered.push((options.tools ?? []).map((t) => t.name));
+        return finalReplyResult("No answer came back, so I left it.") as never;
+      }
+    });
+
+    await executeAgentTurn(
+      resumeContext(buildHitlTimeoutParts("req-1")),
+      fakeEventBus().eventBus,
+      askingCfg(session, model, { openCalls })
+    );
+
+    expect(offered[0]).not.toContain("ask_user");
+    // Only the question is withheld: the ending still has the turn's work to report.
+    expect(offered[0]).toEqual(expect.arrayContaining(["final_reply", "work"]));
+  });
+
+  it("leaves ask_user on the table when a human did answer", async () => {
+    // The human is present and engaged; a follow-up question costs them one click,
+    // not another week of silence.
+    const session = new FakeSession();
+    const openCalls = new MemoryOpenCalls();
+    await openCalls.put(heldQuestion());
+    const offered: string[][] = [];
+    const model = new MockLanguageModelV4({
+      doGenerate: async (options) => {
+        offered.push((options.tools ?? []).map((t) => t.name));
+        return finalReplyResult("Using prod.") as never;
+      }
+    });
+
+    await executeAgentTurn(
+      resumeContext(answered("prod")),
+      fakeEventBus().eventBus,
+      askingCfg(session, model, { openCalls })
+    );
+
+    expect(offered[0]).toContain("ask_user");
+  });
+
   it("treats an answer with no open call as an ordinary message", async () => {
     // A question asked before open calls existed has nothing to take.
     const session = new FakeSession();
