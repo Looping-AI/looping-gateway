@@ -25,6 +25,7 @@ import type { AgentTurnMetadata } from "@/agents/dispatch";
 import type { SessionLike } from "./session";
 import {
   assistantSessionMessage,
+  replayedCallMessage,
   toModelMessages,
   userSessionMessage,
   type ToolRecord
@@ -36,6 +37,14 @@ import {
   finalReplyInputSchema,
   finalReplyTool
 } from "./final-reply";
+import {
+  answeredCall,
+  hitlRequestOf,
+  notAsked,
+  openPromptOf,
+  promptAnswerOf,
+  type OpenPromptStore
+} from "./open-prompt";
 
 /**
  * How many model calls one turn may spend.
@@ -191,6 +200,13 @@ export interface AgentTurnConfig {
    * this one claimed. Off by default. See {@link assistantSessionMessage}.
    */
   recordToolCalls?: boolean;
+  /**
+   * Where a turn that stops to ask a human keeps the call it paused on, until the
+   * answer resumes it — see {@link file://./open-prompt.ts open-prompt.ts}. Needed
+   * by any agent whose tools include `ask_user`: a turn that has to pause without
+   * one fails, because the question it would raise could never be answered.
+   */
+  openPrompts?: OpenPromptStore;
 }
 
 function agentMessage(
@@ -309,6 +325,11 @@ export async function executeAgentTurn(
   // a human instead of publishing a terminal reply. Held on an object so the
   // closure assignment in `turn.park` is visible to control-flow narrowing.
   const hitl: { request: HitlRequest | null } = { request: null };
+  // The call a human's answer resumed, now carrying that answer as its result. Held
+  // out here for the outer catch: once taken from the open-prompt store the answer
+  // lives nowhere but history, so even a turn that fails has to record it.
+  let resumed:
+    { session: SessionLike; call: ToolRecord; recorded: boolean } | undefined;
   // Tracks the text of the most recent non-terminal step published below, so the
   // terminal reply isn't posted twice when it is that same text.
   let lastStepText = "";
@@ -348,13 +369,37 @@ export async function executeAgentTurn(
       tools: extraTools
     } = await cfg.prepare(text, metadata, turn);
 
-    // `text` already carries its `<turn>` provenance wrapper (applied by the
-    // Gatekeeper in dispatch); persist it verbatim.
-    await session.appendMessage(userSessionMessage(text));
+    // An answer to a question this agent asked resumes that call rather than opening
+    // a new exchange: take the prompt it answers, and put the call — with the answer
+    // as its result — where the model left off. No user turn is added; the answer
+    // *is* the result. An answer with no prompt left to take (asked before open
+    // prompts existed, or a second delivery of the same click) is an ordinary message.
+    const answer = promptAnswerOf(userMessage, metadata.user?.displayName);
+    const prompt =
+      answer && cfg.openPrompts
+        ? await cfg.openPrompts.take(answer.requestId)
+        : null;
+    if (answer && prompt) {
+      resumed = {
+        session,
+        call: answeredCall(prompt, answer.answer),
+        recorded: false
+      };
+      console.info("[agent-loop] resuming an answered question", {
+        requestId: prompt.requestId,
+        contextId: requestContext.contextId
+      });
+    } else {
+      // `text` already carries its `<turn>` provenance wrapper (applied by the
+      // Gatekeeper in dispatch); persist it verbatim.
+      await session.appendMessage(userSessionMessage(text));
+    }
     const history = await session.getHistory();
     const soul = (await session.refreshSystemPrompt()) + systemSuffix;
     const workTools = { ...(await session.tools()), ...extraTools };
-    const messages = await toModelMessages(history);
+    const messages = await toModelMessages(
+      resumed ? [...history, replayedCallMessage(resumed.call)] : history
+    );
     const required = cfg.requireFinalReply === true;
 
     // Every tool call this turn actually executed, across every attempt — the
@@ -365,6 +410,23 @@ export async function executeAgentTurn(
     // `final_reply` never appears here. It has no `execute`, so it produces no
     // result to record — its text is the message body, not an action.
     const actions: ToolRecord[] = [];
+
+    // Every exit that writes history goes through here, so a resumed turn's answered
+    // call is always the first thing recorded — ahead of the work it led to — and is
+    // recorded once.
+    const recordTurn = async (
+      body: string,
+      extra: ToolRecord[] = []
+    ): Promise<void> => {
+      await session.appendMessage(
+        assistantSessionMessage(body, [
+          ...(resumed ? [resumed.call] : []),
+          ...actions,
+          ...extra
+        ])
+      );
+      if (resumed) resumed.recorded = true;
+    };
 
     const onStepEnd: GenerateTextOnStepEndCallback<ToolSet> = (step) => {
       if (cfg.recordToolCalls) {
@@ -534,9 +596,13 @@ export async function executeAgentTurn(
       });
     }
 
-    // A 🛑 or a park out-ranks the reply and ends the turn here: neither is a reason
-    // to spend another call.
-    const interrupted = (await checkCanceled()) || hitl.request !== null;
+    // The question the last step stopped on, if it stopped on one.
+    const pause = result ? openPromptOf(result.finalStep) : undefined;
+
+    // A 🛑, a park, or a question out-ranks the reply and ends the turn here: none
+    // of them is a reason to spend another call.
+    const interrupted =
+      (await checkCanceled()) || hitl.request !== null || pause !== undefined;
 
     if (required && reply === undefined && !interrupted) {
       console.warn("[agent-loop] no ending; asking once more with none else", {
@@ -585,9 +651,7 @@ export async function executeAgentTurn(
         model: modelId
       });
       publishTerminal("", TaskState.TASK_STATE_CANCELED);
-      await session.appendMessage(
-        assistantSessionMessage(CANCELED_NOTE, actions)
-      );
+      await recordTurn(CANCELED_NOTE);
       return;
     }
 
@@ -596,13 +660,37 @@ export async function executeAgentTurn(
     // asked), then end in `input-required` — no terminal reply.
     if (hitl.request) {
       completed = true;
-      await session.appendMessage(
-        assistantSessionMessage(hitl.request.prompt, actions)
+      // A question asked in the same step never reached anyone; say so.
+      await recordTurn(
+        hitl.request.prompt,
+        pause ? [notAsked(pause.prompt), ...pause.notRaised] : []
       );
       publishInputRequired(
         eventBus,
         requestContext,
         hitl.request,
+        `${userMessage.messageId}:hitl`
+      );
+      return;
+    }
+
+    // The model asked the human something. Record the question as what this turn
+    // said, keep the call until someone answers it, and only then raise the prompt:
+    // a click that beat the record would find nothing to resume.
+    if (pause) {
+      if (!cfg.openPrompts) {
+        throw new Error(
+          `[agent-loop] ${pause.prompt.toolName} was called, but this agent has nowhere to keep an open prompt`
+        );
+      }
+      const request = hitlRequestOf(pause.prompt);
+      await recordTurn(request.prompt, pause.notRaised);
+      await cfg.openPrompts.put(pause.prompt);
+      completed = true;
+      publishInputRequired(
+        eventBus,
+        requestContext,
+        request,
         `${userMessage.messageId}:hitl`
       );
       return;
@@ -617,17 +705,13 @@ export async function executeAgentTurn(
         contextId: requestContext.contextId
       });
       // The apology is not persisted — it says nothing true about the workspace —
-      // but any calls that ran are.
-      if (actions.length > 0) {
-        await session.appendMessage(
-          assistantSessionMessage(NO_REPLY_NOTE, actions)
-        );
-      }
+      // but any calls that ran are, and so is an answer this turn resumed with.
+      if (resumed || actions.length > 0) await recordTurn(NO_REPLY_NOTE);
       publishTerminal(TRANSIENT_REPLY);
       return;
     }
 
-    await session.appendMessage(assistantSessionMessage(reply, actions));
+    await recordTurn(reply);
     publishTerminal(reply);
   } catch (err) {
     console.error("[agent-loop] turn failed", {
@@ -636,6 +720,20 @@ export async function executeAgentTurn(
       err: String(err),
       stack: err instanceof Error ? err.stack : undefined
     });
+    // A resumed turn took its answer out of the open-prompt store. If it failed
+    // before recording it, history is the last place left to keep it.
+    if (resumed && !resumed.recorded) {
+      try {
+        await resumed.session.appendMessage(
+          assistantSessionMessage(NO_REPLY_NOTE, [resumed.call])
+        );
+      } catch (recordErr) {
+        console.error("[agent-loop] could not record a resumed answer", {
+          contextId: requestContext.contextId,
+          err: String(recordErr)
+        });
+      }
+    }
     // A transient blip is a turn that completed by saying "try again" — the work
     // is recoverable and nothing is broken. An unexpected error is a real
     // failure, so report it as one: `failed` is what makes the delivery boundary

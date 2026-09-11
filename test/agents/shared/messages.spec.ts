@@ -10,6 +10,7 @@ import {
   slackTsToIso,
   sessionText,
   toModelMessages,
+  replayedCallMessage,
   MAX_TOOL_RECORD_CHARS,
   type TurnContext
 } from "@/agents/shared/messages";
@@ -365,6 +366,63 @@ describe("assistantSessionMessage", () => {
       }
     ]);
     expect(sessionText(m)).toBe("the reply");
+  });
+});
+
+describe("toModelMessages — assistant messages in a row", () => {
+  it("folds a text-only assistant message into the one after it", async () => {
+    // What a resumed turn leaves behind: the question it paused on, then the reply
+    // it resumed into, with no user turn between them.
+    const messages = await toModelMessages([
+      userSessionMessage("set up an agent"),
+      assistantSessionMessage("Which environment?"),
+      assistantSessionMessage("Using prod.")
+    ]);
+
+    expect(messages.map((m) => m.role)).toEqual(["user", "assistant"]);
+    expect(messages[1].content).toEqual([
+      { type: "text", text: "Which environment?" },
+      { type: "text", text: "Using prod." }
+    ]);
+  });
+
+  it("folds the question into the replayed call that answers it", async () => {
+    const messages = await toModelMessages([
+      assistantSessionMessage("Which environment?"),
+      replayedCallMessage({
+        toolCallId: "tc-ask",
+        toolName: "ask_user",
+        input: { question: "Which environment?" },
+        output: { answer: "prod" }
+      })
+    ]);
+
+    expect(messages.map((m) => m.role)).toEqual(["assistant", "tool"]);
+    expect(messages[0].content).toEqual([
+      { type: "text", text: "Which environment?" },
+      expect.objectContaining({ type: "tool-call", toolCallId: "tc-ask" })
+    ]);
+  });
+
+  it("leaves a turn that made calls as call, result, then reply", async () => {
+    const messages = await toModelMessages([
+      userSessionMessage("list agents"),
+      assistantSessionMessage("None yet.", [
+        {
+          toolCallId: "tc1",
+          toolName: "agents_read",
+          input: {},
+          output: { agents: [] }
+        }
+      ])
+    ]);
+
+    expect(messages.map((m) => m.role)).toEqual([
+      "user",
+      "assistant",
+      "tool",
+      "assistant"
+    ]);
   });
 });
 

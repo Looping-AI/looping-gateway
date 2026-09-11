@@ -6,6 +6,7 @@ import type { TaskState } from "@a2a-js/sdk";
 import { partsText } from "@/a2a/parts";
 import { EMBED_MODEL_ID } from "@/config";
 import type { SessionLike } from "@/agents/shared/session";
+import type { OpenPrompt, OpenPromptStore } from "@/agents/shared/open-prompt";
 import { userMessage } from "./a2a";
 
 /**
@@ -33,6 +34,22 @@ export class FakeSession implements SessionLike {
   }
   async getCompactions() {
     return this.compactions;
+  }
+}
+
+/**
+ * A Map-backed `OpenPromptStore`: `held` lets a spec seed a question a turn asked
+ * earlier, or check what a pausing turn kept.
+ */
+export class MemoryOpenPrompts implements OpenPromptStore {
+  held = new Map<string, OpenPrompt>();
+  async put(prompt: OpenPrompt) {
+    this.held.set(prompt.requestId, prompt);
+  }
+  async take(requestId: string) {
+    const prompt = this.held.get(requestId) ?? null;
+    this.held.delete(requestId);
+    return prompt;
   }
 }
 

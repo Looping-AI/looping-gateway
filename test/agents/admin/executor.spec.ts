@@ -14,6 +14,7 @@ import type { GatedAction } from "@/agents/admin/approvals";
 import { getAgent, registerAgent } from "@/db/models/agents";
 import {
   FakeSession,
+  MemoryOpenPrompts,
   fakeRecallEnv,
   finalReplyResult,
   okResult,
@@ -281,8 +282,53 @@ describe("AdminAgentExecutor — HITL approval resume", () => {
     expect(await getAgent("resume-keep")).not.toBeNull();
   });
 
-  it("treats an answer with no pending action as a normal turn (ask_user)", async () => {
-    const store = fakeStore(); // empty — an ask_user answer has no stored action
+  it("resumes an ask_user answer from its open prompt, as the call's result", async () => {
+    const session = new FakeSession();
+    const openPrompts = new MemoryOpenPrompts();
+    await openPrompts.put({
+      requestId: "q-1",
+      toolCallId: "tc-ask",
+      toolName: "ask_user",
+      input: {
+        question: "Which environment?",
+        options: [{ label: "staging" }]
+      },
+      createdAt: Date.now()
+    });
+    const model = new MockLanguageModelV4({
+      doGenerate: async () => finalReplyResult("Great, using staging.") as never
+    });
+    const exec = new AdminAgentExecutor(sqlHost, {
+      model,
+      createSession: () => session,
+      ...fakeStore(),
+      openPrompts
+    });
+
+    const t = resumeRequest(
+      buildHitlResponseParts({
+        requestId: "q-1",
+        optionId: "opt_0",
+        answeredBy: "U1",
+        humanText: "staging"
+      }),
+      0
+    );
+    await exec.execute(t.requestContext, t.eventBus);
+
+    expect(terminalTaskText(t.published)).toBe("Great, using staging.");
+    // The answer is the call's result, recorded ahead of the reply — not a user turn.
+    expect(session.messages.map((m) => m.role)).toEqual(["assistant"]);
+    expect(session.messages[0].parts[0]).toMatchObject({
+      type: "tool-ask_user",
+      output: { answer: "staging", answeredBy: "Tester" }
+    });
+    expect(openPrompts.held.size).toBe(0);
+  });
+
+  it("treats an answer with nothing to resume as a normal turn", async () => {
+    // Neither store holds this id: a question asked before open prompts existed.
+    const store = fakeStore();
     const session = new FakeSession();
     const model = new MockLanguageModelV4({
       doGenerate: async () => finalReplyResult("Great, using staging.") as never

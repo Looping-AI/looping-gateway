@@ -20,8 +20,8 @@ import { z } from "zod";
  * for a small model than picking between prose and a tool, which is what the
  * chat models here kept getting wrong.
  *
- * Two other endings already exist and out-rank this one: a 🛑 cancel, and a HITL
- * park (`ask_user`, or the `agents_delete` approval). See
+ * Two other endings already exist and out-rank this one: a 🛑 cancel, and a pause
+ * for a human (an `ask_user` question, or the `agents_delete` approval). See
  * {@link file://./loop.ts loop.ts} for the precedence.
  */
 

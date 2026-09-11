@@ -1,4 +1,4 @@
-import type { ModelMessage, UIMessage } from "ai";
+import type { AssistantModelMessage, ModelMessage, UIMessage } from "ai";
 import { convertToModelMessages } from "ai";
 import type {
   SessionMessage,
@@ -312,6 +312,22 @@ export function assistantSessionMessage(
   };
 }
 
+/**
+ * One recorded call as an assistant message of its own.
+ *
+ * Not something a turn persists — {@link assistantSessionMessage} is. This is how a
+ * resumed turn puts the call it paused on, now answered, at the end of the history
+ * the model reads: the call and its result, where the model left off.
+ */
+export function replayedCallMessage(record: ToolRecord): SessionMessage {
+  return {
+    id: crypto.randomUUID(),
+    role: "assistant",
+    createdAt: new Date(),
+    parts: [toolPart(record)]
+  };
+}
+
 /** Concatenate the text parts of a stored session message. */
 export function sessionText(m: SessionMessage): string {
   return m.parts
@@ -342,5 +358,51 @@ export async function toModelMessages(
       // Same shape, narrower declaration — see {@link toolPart}.
       parts: m.parts as UIMessage["parts"]
     }));
-  return convertToModelMessages(messages, { ignoreIncompleteToolCalls: true });
+  return foldAssistantRuns(
+    await convertToModelMessages(messages, { ignoreIncompleteToolCalls: true })
+  );
+}
+
+/**
+ * Merge an assistant message that made no tool calls into the assistant message
+ * right after it.
+ *
+ * Two assistant messages in a row are not something a model produces, but history
+ * can hold them: a turn resumed by a human's answer adds no user turn of its own,
+ * so the question it paused on and the reply it resumes into sit side by side. The
+ * provider would send each as its own `assistant` message, and whether a chat
+ * template accepts that is the template's business — one that refused would fail
+ * every later turn, since history is replayed on each. Folded, the transcript is
+ * the shape the model itself would have written.
+ *
+ * A message *with* tool calls is followed by their results, never by another
+ * assistant message, so it is left alone.
+ */
+function foldAssistantRuns(messages: ModelMessage[]): ModelMessage[] {
+  const folded: ModelMessage[] = [];
+  for (const message of messages) {
+    const previous = folded.at(-1);
+    if (
+      message.role === "assistant" &&
+      previous?.role === "assistant" &&
+      !asContent(previous.content).some((p) => p.type === "tool-call")
+    ) {
+      folded[folded.length - 1] = {
+        ...previous,
+        content: [...asContent(previous.content), ...asContent(message.content)]
+      };
+    } else {
+      folded.push(message);
+    }
+  }
+  return folded;
+}
+
+type AssistantParts = Exclude<AssistantModelMessage["content"], string>;
+
+/** An assistant message's content as parts; the converter never emits a bare string. */
+function asContent(content: AssistantModelMessage["content"]): AssistantParts {
+  return typeof content === "string"
+    ? [{ type: "text", text: content }]
+    : content;
 }
