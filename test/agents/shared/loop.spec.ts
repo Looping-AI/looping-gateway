@@ -989,10 +989,12 @@ describe("executeAgentTurn — forced final_reply", () => {
   it("reserves the last step for the ending when the turn spends every other one", async () => {
     const session = new FakeSession();
     const declared: string[][] = [];
+    const choices: unknown[] = [];
     const model = new MockLanguageModelV4({
       doGenerate: async (options) => {
         const names = (options.tools ?? []).map((t) => t.name);
         declared.push(names);
+        choices.push(options.toolChoice);
         // Keep working for as long as there is anything to work with.
         return (
           names.includes("work")
@@ -1012,6 +1014,12 @@ describe("executeAgentTurn — forced final_reply", () => {
     // The ending is the last step of the one call, not an eleventh call after it.
     expect(declared).toHaveLength(10);
     expect(declared.at(-1)).toEqual(["final_reply"]);
+    // Named, not merely `required`. With one tool on the table the two would pick
+    // the same call here, but only the named form is enforced server-side — the
+    // advisory one is what fails open into prose, and it is exactly what the working
+    // steps before it keep.
+    expect(choices.at(-1)).toEqual({ type: "tool", toolName: "final_reply" });
+    expect(choices[0]).toEqual({ type: "required" });
     // The user gets the real summary, not an apology for an outage that never happened.
     expect(partsText(expectTerminalReply(bus)?.parts)).toBe(
       "Here is what I managed."
@@ -1056,10 +1064,12 @@ describe("executeAgentTurn — forced final_reply", () => {
     // turn did comes back instead of being buried under an apology.
     const session = new FakeSession();
     const declared: string[][] = [];
+    const choices: unknown[] = [];
     let n = 0;
     const model = new MockLanguageModelV4({
       doGenerate: async (options) => {
         declared.push((options.tools ?? []).map((t) => t.name));
+        choices.push(options.toolChoice);
         return (
           n++ === 0
             ? okResult("Feito! ✅ I updated the endpoint.")
@@ -1077,6 +1087,10 @@ describe("executeAgentTurn — forced final_reply", () => {
 
     expect(declared).toHaveLength(2);
     expect(declared[1]).toEqual(["final_reply"]);
+    // The salvage's whole reason to exist is the stronger form. Asking again with the
+    // advisory `required` that just failed open would be the same ask, repeated.
+    expect(choices[0]).toEqual({ type: "required" });
+    expect(choices[1]).toEqual({ type: "tool", toolName: "final_reply" });
     expect(partsText(expectTerminalReply(bus)?.parts)).toBe(
       "I could not do that, and here is why."
     );
