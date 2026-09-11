@@ -2,7 +2,7 @@ import type { AgentCard } from "@a2a-js/sdk";
 import type { AgentExecutor } from "@a2a-js/sdk/server";
 import { buildAgentCard } from "@/a2a/card";
 import { HITL_REQUEST_TTL_SECONDS } from "@/config";
-import { DurableOpenPrompts } from "@/agents/shared/open-prompt-store";
+import { DurableOpenCalls } from "@/agents/shared/open-call-store";
 import { A2AAgent } from "../base";
 import { AdminAgentExecutor } from "./executor";
 import type { GatedAction } from "./approvals";
@@ -75,7 +75,7 @@ export class AdminAgent extends A2AAgent {
       storePendingAction: (requestId, action) =>
         this.putPendingAction(requestId, action),
       takePendingAction: (requestId) => this.takePendingAction(requestId),
-      openPrompts: new DurableOpenPrompts(this.ctx.storage)
+      openCalls: new DurableOpenCalls(this.ctx.storage)
     });
   }
 

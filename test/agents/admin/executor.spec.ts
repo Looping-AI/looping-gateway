@@ -14,7 +14,7 @@ import type { GatedAction } from "@/agents/admin/approvals";
 import { getAgent, registerAgent } from "@/db/models/agents";
 import {
   FakeSession,
-  MemoryOpenPrompts,
+  MemoryOpenCalls,
   fakeRecallEnv,
   finalReplyResult,
   okResult,
@@ -282,10 +282,10 @@ describe("AdminAgentExecutor — HITL approval resume", () => {
     expect(await getAgent("resume-keep")).not.toBeNull();
   });
 
-  it("resumes an ask_user answer from its open prompt, as the call's result", async () => {
+  it("resumes an ask_user answer from its open call, as the call's result", async () => {
     const session = new FakeSession();
-    const openPrompts = new MemoryOpenPrompts();
-    await openPrompts.put({
+    const openCalls = new MemoryOpenCalls();
+    await openCalls.put({
       requestId: "q-1",
       toolCallId: "tc-ask",
       toolName: "ask_user",
@@ -302,7 +302,7 @@ describe("AdminAgentExecutor — HITL approval resume", () => {
       model,
       createSession: () => session,
       ...fakeStore(),
-      openPrompts
+      openCalls
     });
 
     const t = resumeRequest(
@@ -326,11 +326,11 @@ describe("AdminAgentExecutor — HITL approval resume", () => {
       type: "tool-ask_user",
       output: { answer: "staging", answeredBy: "Tester" }
     });
-    expect(openPrompts.held.size).toBe(0);
+    expect(openCalls.held.size).toBe(0);
   });
 
   it("treats an answer with nothing to resume as a normal turn", async () => {
-    // Neither store holds this id: a question asked before open prompts existed.
+    // Neither store holds this id: a question asked before open calls existed.
     const store = fakeStore();
     const session = new FakeSession();
     const model = new MockLanguageModelV4({

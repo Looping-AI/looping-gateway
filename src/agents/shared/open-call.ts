@@ -22,6 +22,11 @@ import type { ToolRecord } from "./messages";
  * there to find by the time anyone answers it. A record nothing compacts has none of
  * that problem.
  *
+ * This is the agent's own copy, and it holds what only the agent needs: which call
+ * the answer belongs to. The human-facing half — prompt text, options, status,
+ * deadline — is the gatekeeper's `hitl_requests` row, and the two meet on the
+ * `requestId` alone.
+ *
  * On the way back the answered call is written to the *end* of history, as the call
  * plus its result, and no user turn is added: the model asked a question, and what
  * it gets back is the answer to that question. The record is forgotten only once
@@ -30,43 +35,43 @@ import type { ToolRecord } from "./messages";
  */
 
 /** A tool call a turn paused on, kept until a human answers it. */
-export interface OpenPrompt {
+export interface OpenCall {
   /** The HITL correlation key the gatekeeper renders and answers with. */
   requestId: string;
   toolCallId: string;
   toolName: string;
   /** The call's input, as the SDK validated it. */
   input: unknown;
-  /** Epoch ms — a prompt stopped with 🛑 is never answered, so it has to age out. */
+  /** Epoch ms — a call stopped with 🛑 is never answered, so it has to age out. */
   createdAt: number;
 }
 
-/** Where open prompts wait. Implemented over DO storage by `DurableOpenPrompts`. */
-export interface OpenPromptStore {
-  /** Keep a prompt until it is answered. Also drops prompts past the HITL TTL. */
-  put(prompt: OpenPrompt): Promise<void>;
+/** Where open calls wait. Implemented over DO storage by `DurableOpenCalls`. */
+export interface OpenCallStore {
+  /** Keep a call until it is answered. Also drops calls past the HITL TTL. */
+  put(call: OpenCall): Promise<void>;
   /**
-   * Hand the prompt `requestId` answers to `record`, then forget it — only after
+   * Hand the call `requestId` answers to `record`, then forget it — only after
    * `record` has finished, and not at all if it throws. Null, with `record` never
-   * called, when there is no such prompt: never asked, or already settled.
+   * called, when there is no such call: never asked, or already settled.
    */
   settle(
     requestId: string,
-    record: (prompt: OpenPrompt) => Promise<void>
-  ): Promise<OpenPrompt | null>;
+    record: (call: OpenCall) => Promise<void>
+  ): Promise<OpenCall | null>;
 }
 
 /**
  * Recorded for a call that would have paused the turn but was not raised. One
- * prompt is open per turn, so the rest never reached anyone — and a later turn
+ * call is open per turn, so the rest never reached anyone — and a later turn
  * should be able to see that they were not asked, rather than guess.
  */
 export const NOT_ASKED_NOTE =
   "Not asked: only one question can be open at a time. Ask again once this one is answered.";
 
-/** The prompt a step paused on, plus the calls it could not also raise. */
+/** The call a step paused on, plus the calls it could not also raise. */
 export interface Pause {
-  prompt: OpenPrompt;
+  call: OpenCall;
   notRaised: ToolRecord[];
 }
 
@@ -87,7 +92,7 @@ export function notAsked(call: CallLike): ToolRecord {
 }
 
 /**
- * The prompt a turn's last step paused on, or `undefined` if it did not pause.
+ * The call a turn's last step paused on, or `undefined` if it did not pause.
  *
  * Reads `staticToolCalls`, which holds only calls whose input passed the tool's
  * schema — a malformed question was already handed back to the model as a failed
@@ -97,7 +102,7 @@ export function notAsked(call: CallLike): ToolRecord {
  * ids come in whatever shape and length the provider chooses, and this id ends up
  * inside a Slack action id, which Slack caps.
  */
-export function openPromptOf(
+export function openCallOf(
   step: { staticToolCalls: readonly CallLike[] },
   now = Date.now()
 ): Pause | undefined {
@@ -106,7 +111,7 @@ export function openPromptOf(
   );
   if (!first) return undefined;
   return {
-    prompt: {
+    call: {
       requestId: crypto.randomUUID(),
       toolCallId: first.toolCallId,
       toolName: first.toolName,
@@ -118,18 +123,15 @@ export function openPromptOf(
 }
 
 /**
- * The HITL request a prompt renders as. Parsed rather than cast: the input was
+ * The HITL request a call renders as. Parsed rather than cast: the input was
  * validated when the model made the call, but it has since been through storage.
  */
-export function hitlRequestOf(prompt: OpenPrompt): HitlRequest {
-  return askUserRequest(
-    prompt.requestId,
-    askUserInputSchema.parse(prompt.input)
-  );
+export function hitlRequestOf(call: OpenCall): HitlRequest {
+  return askUserRequest(call.requestId, askUserInputSchema.parse(call.input));
 }
 
-/** What came back for an open prompt. */
-export type PromptAnswer =
+/** What came back for an open call. */
+export type HumanAnswer =
   { kind: "answered"; text: string; by: string } | { kind: "timed-out" };
 
 /**
@@ -139,10 +141,10 @@ export type PromptAnswer =
  * own text part, which the gatekeeper fills with the chosen label or the typed
  * answer.
  */
-export function promptAnswerOf(
+export function humanAnswerOf(
   message: Message,
   answerer: string | null | undefined
-): { requestId: string; answer: PromptAnswer } | null {
+): { requestId: string; answer: HumanAnswer } | null {
   const response = parseHitlResponse(message);
   if (response) {
     return {
@@ -168,14 +170,11 @@ export function promptAnswerOf(
  * arguments and try again", and asking the same question again a week later is not
  * what an unanswered question calls for.
  */
-export function answeredCall(
-  prompt: OpenPrompt,
-  answer: PromptAnswer
-): ToolRecord {
+export function answeredCall(call: OpenCall, answer: HumanAnswer): ToolRecord {
   return {
-    toolCallId: prompt.toolCallId,
-    toolName: prompt.toolName,
-    input: prompt.input,
+    toolCallId: call.toolCallId,
+    toolName: call.toolName,
+    input: call.input,
     output:
       answer.kind === "answered"
         ? { answer: answer.text, answeredBy: answer.by }

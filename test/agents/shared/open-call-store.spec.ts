@@ -2,8 +2,8 @@ import { describe, it, expect } from "vitest";
 import { env } from "cloudflare:workers";
 import { runInDurableObject } from "cloudflare:test";
 import { HITL_REQUEST_TTL_SECONDS } from "@/config";
-import type { OpenPrompt } from "@/agents/shared/open-prompt";
-import { DurableOpenPrompts } from "@/agents/shared/open-prompt-store";
+import type { OpenCall } from "@/agents/shared/open-call";
+import { DurableOpenCalls } from "@/agents/shared/open-call-store";
 
 /**
  * Run against a real Durable Object's storage, one fresh instance per case so
@@ -13,12 +13,12 @@ let instances = 0;
 function withStorage<T>(
   fn: (storage: DurableObjectStorage) => Promise<T>
 ): Promise<T> {
-  const name = `admin:open-prompts-${instances++}`;
+  const name = `admin:open-calls-${instances++}`;
   const stub = env.AdminAgent.get(env.AdminAgent.idFromName(name));
   return runInDurableObject(stub, (_agent, state) => fn(state.storage));
 }
 
-function prompt(requestId: string, createdAt = Date.now()): OpenPrompt {
+function prompt(requestId: string, createdAt = Date.now()): OpenCall {
   return {
     requestId,
     toolCallId: `tc-${requestId}`,
@@ -30,15 +30,15 @@ function prompt(requestId: string, createdAt = Date.now()): OpenPrompt {
 
 const ignore = async () => {};
 
-describe("DurableOpenPrompts", () => {
-  it("hands a prompt to a later instance over the same storage", async () => {
+describe("DurableOpenCalls", () => {
+  it("hands a call to a later instance over the same storage", async () => {
     await withStorage(async (storage) => {
       const kept = prompt("r1");
-      await new DurableOpenPrompts(storage).put(kept);
+      await new DurableOpenCalls(storage).put(kept);
 
       // The human answers days later, on an isolate that never saw the question.
-      const recorded: OpenPrompt[] = [];
-      const settled = await new DurableOpenPrompts(storage).settle(
+      const recorded: OpenCall[] = [];
+      const settled = await new DurableOpenCalls(storage).settle(
         "r1",
         async (p) => {
           recorded.push(p);
@@ -49,9 +49,9 @@ describe("DurableOpenPrompts", () => {
     });
   });
 
-  it("forgets a prompt only once it has been recorded", async () => {
+  it("forgets a call only once it has been recorded", async () => {
     await withStorage(async (storage) => {
-      const store = new DurableOpenPrompts(storage);
+      const store = new DurableOpenCalls(storage);
       await store.put(prompt("r1"));
 
       // Still there while the answer is being written — a reset at this point must
@@ -66,9 +66,9 @@ describe("DurableOpenPrompts", () => {
     });
   });
 
-  it("keeps a prompt whose recording failed", async () => {
+  it("keeps a call whose recording failed", async () => {
     await withStorage(async (storage) => {
-      const store = new DurableOpenPrompts(storage);
+      const store = new DurableOpenCalls(storage);
       await store.put(prompt("r1"));
 
       await expect(
@@ -81,9 +81,9 @@ describe("DurableOpenPrompts", () => {
     });
   });
 
-  it("settles a prompt once: a second answer finds nothing and records nothing", async () => {
+  it("settles a call once: a second answer finds nothing and records nothing", async () => {
     await withStorage(async (storage) => {
-      const store = new DurableOpenPrompts(storage);
+      const store = new DurableOpenCalls(storage);
       await store.put(prompt("r1"));
       let records = 0;
       const record = async () => {
@@ -99,20 +99,20 @@ describe("DurableOpenPrompts", () => {
   it("finds nothing for an id it never held", async () => {
     await withStorage(async (storage) => {
       expect(
-        await new DurableOpenPrompts(storage).settle("nope", ignore)
+        await new DurableOpenCalls(storage).settle("nope", ignore)
       ).toBeNull();
     });
   });
 
-  it("drops prompts past the HITL TTL when it keeps another", async () => {
+  it("drops calls past the HITL TTL when it keeps another", async () => {
     await withStorage(async (storage) => {
-      // A prompt stopped with 🛑 is never answered, so nothing else removes it.
+      // A call stopped with 🛑 is never answered, so nothing else removes it.
       const stale = prompt(
         "stale",
         Date.now() - (HITL_REQUEST_TTL_SECONDS + 60) * 1000
       );
       await storage.put(`hitl:open:${stale.requestId}`, stale);
-      const store = new DurableOpenPrompts(storage);
+      const store = new DurableOpenCalls(storage);
 
       await store.put(prompt("fresh"));
 

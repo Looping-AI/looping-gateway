@@ -10,7 +10,7 @@ import {
   type SessionLike
 } from "@/agents/shared/session";
 import { executeAgentTurn } from "@/agents/shared/loop";
-import type { OpenPromptStore } from "@/agents/shared/open-prompt";
+import type { OpenCallStore } from "@/agents/shared/open-call";
 import { isCancelRequested } from "@/db/models/agent-tasks";
 import { archiveMessages } from "@/agents/shared/recall";
 import { recallTools } from "@/agents/shared/recall-tool";
@@ -67,7 +67,7 @@ export interface AdminExecutorOptions extends ModelOverrides {
    * the answer resumes it. Bound to the admin DO storage by {@link AdminAgent};
    * absent in unit tests that never ask.
    */
-  openPrompts?: OpenPromptStore;
+  openCalls?: OpenCallStore;
 }
 
 /**
@@ -134,7 +134,7 @@ export class AdminAgentExecutor implements AgentExecutor {
       // later turn can see what happened instead of re-confirming a claim.
       requireFinalReply: true,
       recordToolCalls: true,
-      openPrompts: this.options.openPrompts,
+      openCalls: this.options.openCalls,
       prepare: async (_text, metadata, turn) => {
         // Validate the deserialized wire metadata at this boundary. Both the
         // workspace id and the Slack user are guaranteed preconditions (the
@@ -224,7 +224,7 @@ export class AdminAgentExecutor implements AgentExecutor {
    * / timeout / an unauthorized approver, then return a new {@link RequestContext}
    * whose text states the outcome for the model to confirm. Returns the original
    * context unchanged for every other message (including `ask_user` answers, which
-   * the turn resumes from its open-prompt store).
+   * the turn resumes from its open-call store).
    */
   private async applyPendingApproval(
     rc: RequestContext

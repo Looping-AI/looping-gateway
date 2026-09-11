@@ -10,7 +10,7 @@ import { HITL_REQUEST_TYPE, type HitlRequest } from "@/a2a/hitl";
  * never gets one, so the loop halts on it by itself. No flag, no stop condition.
  * The turn then reads the question off the step, parks the call until someone
  * answers, and the answer comes back on a later invocation as *this call's result*
- * — see {@link file://./open-prompt.ts open-prompt.ts} for the round trip.
+ * — see {@link file://./open-call.ts open-call.ts} for the round trip.
  *
  * It lives here rather than among one agent's tools because the turn has to
  * recognize it by name, the same way it recognizes `final_reply`.

@@ -41,10 +41,10 @@ import {
   answeredCall,
   hitlRequestOf,
   notAsked,
-  openPromptOf,
-  promptAnswerOf,
-  type OpenPromptStore
-} from "./open-prompt";
+  openCallOf,
+  humanAnswerOf,
+  type OpenCallStore
+} from "./open-call";
 
 /**
  * How many model calls one turn may spend.
@@ -202,11 +202,11 @@ export interface AgentTurnConfig {
   recordToolCalls?: boolean;
   /**
    * Where a turn that stops to ask a human keeps the call it paused on, until the
-   * answer resumes it — see {@link file://./open-prompt.ts open-prompt.ts}. Needed
+   * answer resumes it — see {@link file://./open-call.ts open-call.ts}. Needed
    * by any agent whose tools include `ask_user`: a turn that has to pause without
    * one fails, because the question it would raise could never be answered.
    */
-  openPrompts?: OpenPromptStore;
+  openCalls?: OpenCallStore;
 }
 
 function agentMessage(
@@ -372,17 +372,17 @@ export async function executeAgentTurn(
     // go of its copy. The gatekeeper has already marked the answer as given and will
     // not send it again, so a turn that recorded it only on the way out could lose it
     // to anything that ends the turn early — a failure, or a reset of this object.
-    // An answer with no prompt left to settle (asked before open prompts existed, or
-    // already settled) is an ordinary message.
-    const answer = promptAnswerOf(userMessage, metadata.user?.displayName);
+    // An answer with no open call left to settle (asked before open calls existed,
+    // or already settled) is an ordinary message.
+    const answer = humanAnswerOf(userMessage, metadata.user?.displayName);
     const settled =
-      answer && cfg.openPrompts
-        ? await cfg.openPrompts.settle(answer.requestId, async (prompt) => {
+      answer && cfg.openCalls
+        ? await cfg.openCalls.settle(answer.requestId, async (call) => {
             await session.appendMessage(
               toolCallSessionMessage(
-                answeredCall(prompt, answer.answer),
-                // Fixed per prompt, so recording the same answer twice stores it once.
-                `answer:${prompt.requestId}`
+                answeredCall(call, answer.answer),
+                // Fixed per call, so recording the same answer twice stores it once.
+                `answer:${call.requestId}`
               )
             );
           })
@@ -581,7 +581,7 @@ export async function executeAgentTurn(
     }
 
     // The question the last step stopped on, if it stopped on one.
-    const pause = result ? openPromptOf(result.finalStep) : undefined;
+    const pause = result ? openCallOf(result.finalStep) : undefined;
 
     // A 🛑, a park, or a question out-ranks the reply and ends the turn here: none
     // of them is a reason to spend another call.
@@ -650,7 +650,7 @@ export async function executeAgentTurn(
       await session.appendMessage(
         assistantSessionMessage(hitl.request.prompt, [
           ...actions,
-          ...(pause ? [notAsked(pause.prompt), ...pause.notRaised] : [])
+          ...(pause ? [notAsked(pause.call), ...pause.notRaised] : [])
         ])
       );
       publishInputRequired(
@@ -666,19 +666,19 @@ export async function executeAgentTurn(
     // said, keep the call until someone answers it, and only then raise the prompt:
     // a click that beat the record would find nothing to resume.
     if (pause) {
-      if (!cfg.openPrompts) {
+      if (!cfg.openCalls) {
         throw new Error(
-          `[agent-loop] ${pause.prompt.toolName} was called, but this agent has nowhere to keep an open prompt`
+          `[agent-loop] ${pause.call.toolName} was called, but this agent has nowhere to keep an open call`
         );
       }
-      const request = hitlRequestOf(pause.prompt);
+      const request = hitlRequestOf(pause.call);
       await session.appendMessage(
         assistantSessionMessage(request.prompt, [
           ...actions,
           ...pause.notRaised
         ])
       );
-      await cfg.openPrompts.put(pause.prompt);
+      await cfg.openCalls.put(pause.call);
       completed = true;
       publishInputRequired(
         eventBus,

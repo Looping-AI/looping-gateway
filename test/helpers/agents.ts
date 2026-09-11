@@ -6,7 +6,7 @@ import type { TaskState } from "@a2a-js/sdk";
 import { partsText } from "@/a2a/parts";
 import { EMBED_MODEL_ID } from "@/config";
 import type { SessionLike } from "@/agents/shared/session";
-import type { OpenPrompt, OpenPromptStore } from "@/agents/shared/open-prompt";
+import type { OpenCall, OpenCallStore } from "@/agents/shared/open-call";
 import { userMessage } from "./a2a";
 
 /**
@@ -38,23 +38,20 @@ export class FakeSession implements SessionLike {
 }
 
 /**
- * A Map-backed `OpenPromptStore`: `held` lets a spec seed a question a turn asked
+ * A Map-backed `OpenCallStore`: `held` lets a spec seed a question a turn asked
  * earlier, or check what a pausing turn kept.
  */
-export class MemoryOpenPrompts implements OpenPromptStore {
-  held = new Map<string, OpenPrompt>();
-  async put(prompt: OpenPrompt) {
-    this.held.set(prompt.requestId, prompt);
+export class MemoryOpenCalls implements OpenCallStore {
+  held = new Map<string, OpenCall>();
+  async put(call: OpenCall) {
+    this.held.set(call.requestId, call);
   }
-  async settle(
-    requestId: string,
-    record: (prompt: OpenPrompt) => Promise<void>
-  ) {
-    const prompt = this.held.get(requestId) ?? null;
-    if (!prompt) return null;
-    await record(prompt);
+  async settle(requestId: string, record: (call: OpenCall) => Promise<void>) {
+    const call = this.held.get(requestId) ?? null;
+    if (!call) return null;
+    await record(call);
     this.held.delete(requestId);
-    return prompt;
+    return call;
   }
 }
 

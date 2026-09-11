@@ -10,10 +10,10 @@ import {
   answeredCall,
   hitlRequestOf,
   NOT_ASKED_NOTE,
-  openPromptOf,
-  promptAnswerOf,
-  type OpenPrompt
-} from "@/agents/shared/open-prompt";
+  openCallOf,
+  humanAnswerOf,
+  type OpenCall
+} from "@/agents/shared/open-call";
 
 const question = {
   question: "Which environment?",
@@ -33,7 +33,7 @@ const call = (
   input
 });
 
-const held: OpenPrompt = {
+const held: OpenCall = {
   requestId: "req-1",
   toolCallId: "tc-ask",
   toolName: "ask_user",
@@ -51,15 +51,15 @@ function message(parts: Message["parts"]): Message {
   });
 }
 
-describe("openPromptOf", () => {
+describe("openCallOf", () => {
   it("is undefined for a step that asked nothing", () => {
     expect(
-      openPromptOf({ staticToolCalls: [call("work", "tc1", {})] })
+      openCallOf({ staticToolCalls: [call("work", "tc1", {})] })
     ).toBeUndefined();
   });
 
   it("pauses on the first question and records the rest as not asked", () => {
-    const pause = openPromptOf(
+    const pause = openCallOf(
       {
         staticToolCalls: [
           call("work", "tc1", {}),
@@ -70,7 +70,7 @@ describe("openPromptOf", () => {
       42
     );
 
-    expect(pause?.prompt).toMatchObject({
+    expect(pause?.call).toMatchObject({
       toolCallId: "tc-a",
       toolName: "ask_user",
       input: question,
@@ -90,12 +90,12 @@ describe("openPromptOf", () => {
     // The shape Workers AI hands back: its own id, a marker, and a random suffix.
     // The request id ends up inside a Slack action id, which Slack caps.
     const providerId = `chatcmpl-tool-${"f".repeat(32)}::cf-wai-tool-call::a1b2c3d4e5f6g7h8`;
-    const pause = openPromptOf({
+    const pause = openCallOf({
       staticToolCalls: [call("ask_user", providerId)]
     });
 
-    expect(pause?.prompt.toolCallId).toBe(providerId);
-    expect(pause?.prompt.requestId).toMatch(
+    expect(pause?.call.toolCallId).toBe(providerId);
+    expect(pause?.call.requestId).toMatch(
       /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
     );
   });
@@ -122,7 +122,7 @@ describe("hitlRequestOf", () => {
   });
 });
 
-describe("promptAnswerOf", () => {
+describe("humanAnswerOf", () => {
   const button = buildHitlResponseParts({
     requestId: "req-1",
     optionId: "opt_1",
@@ -131,26 +131,26 @@ describe("promptAnswerOf", () => {
   });
 
   it("reads a button answer: the label, and who gave it", () => {
-    expect(promptAnswerOf(message(button), "Grace")).toEqual({
+    expect(humanAnswerOf(message(button), "Grace")).toEqual({
       requestId: "req-1",
       answer: { kind: "answered", text: "prod", by: "Grace" }
     });
   });
 
   it("names the answerer by Slack id when no display name is known", () => {
-    expect(promptAnswerOf(message(button), null)?.answer).toMatchObject({
+    expect(humanAnswerOf(message(button), null)?.answer).toMatchObject({
       by: "U9"
     });
   });
 
   it("reads a timeout", () => {
     expect(
-      promptAnswerOf(message(buildHitlTimeoutParts("req-1")), "Grace")
+      humanAnswerOf(message(buildHitlTimeoutParts("req-1")), "Grace")
     ).toEqual({ requestId: "req-1", answer: { kind: "timed-out" } });
   });
 
   it("is null for an ordinary message", () => {
-    expect(promptAnswerOf(message([textPart("hello")]), "Grace")).toBeNull();
+    expect(humanAnswerOf(message([textPart("hello")]), "Grace")).toBeNull();
   });
 });
 

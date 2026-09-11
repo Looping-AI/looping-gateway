@@ -18,7 +18,7 @@ import {
   type AgentTurnConfig
 } from "@/agents/shared/loop";
 import { askUserTool } from "@/agents/shared/ask-user";
-import { NOT_ASKED_NOTE } from "@/agents/shared/open-prompt";
+import { NOT_ASKED_NOTE } from "@/agents/shared/open-call";
 import {
   assistantSessionMessage,
   sessionText,
@@ -26,7 +26,7 @@ import {
 } from "@/agents/shared/messages";
 import {
   FakeSession,
-  MemoryOpenPrompts,
+  MemoryOpenCalls,
   finalReplyResult,
   okResult,
   lengthResult,
@@ -1277,7 +1277,7 @@ describe("executeAgentTurn — forced final_reply", () => {
 
 // ---------------------------------------------------------------------------
 // ask_user — a control tool with no handler. The turn pauses on the call itself,
-// keeps it as an open prompt, and a human's answer resumes it as the call's result.
+// keeps it as an open call, and a human's answer resumes it as the call's result.
 // ---------------------------------------------------------------------------
 
 describe("executeAgentTurn — ask_user", () => {
@@ -1347,7 +1347,7 @@ describe("executeAgentTurn — ask_user", () => {
 
   it("pauses on the question and keeps the call until someone answers", async () => {
     const session = new FakeSession();
-    const prompts = new MemoryOpenPrompts();
+    const openCalls = new MemoryOpenCalls();
     let calls = 0;
     const model = new MockLanguageModelV4({
       doGenerate: async () => {
@@ -1360,7 +1360,7 @@ describe("executeAgentTurn — ask_user", () => {
     await executeAgentTurn(
       fakeRequestContext("set up an agent"),
       bus.eventBus,
-      askingCfg(session, model, { openPrompts: prompts })
+      askingCfg(session, model, { openCalls })
     );
 
     // The call has no handler, so the loop stopped on it without being told to.
@@ -1383,7 +1383,7 @@ describe("executeAgentTurn — ask_user", () => {
     // Kept under the id Slack answers with — minted, never the provider's call id.
     const requestId = request?.requestId as string;
     expect(requestId).not.toBe("tc1");
-    expect(prompts.held.get(requestId)).toMatchObject({
+    expect(openCalls.held.get(requestId)).toMatchObject({
       toolCallId: "tc1",
       toolName: "ask_user",
       input: question
@@ -1397,7 +1397,7 @@ describe("executeAgentTurn — ask_user", () => {
 
   it("keeps the question before raising it, so a fast answer finds it", async () => {
     const session = new FakeSession();
-    const prompts = new MemoryOpenPrompts();
+    const openCalls = new MemoryOpenCalls();
     const model = new MockLanguageModelV4({
       doGenerate: async () => toolCallResult("ask_user", question) as never
     });
@@ -1410,14 +1410,14 @@ describe("executeAgentTurn — ask_user", () => {
         event.kind === "statusUpdate" &&
         event.data.status?.state === TaskState.TASK_STATE_INPUT_REQUIRED
       ) {
-        keptWhenRaised = prompts.held.size;
+        keptWhenRaised = openCalls.held.size;
       }
     });
 
     await executeAgentTurn(
       fakeRequestContext("set up an agent"),
       bus.eventBus,
-      askingCfg(session, model, { openPrompts: prompts })
+      askingCfg(session, model, { openCalls })
     );
 
     // The prompt reaches Slack the moment it is published, and a click that beat
@@ -1427,7 +1427,7 @@ describe("executeAgentTurn — ask_user", () => {
 
   it("lets a 🛑 out-rank a question: nothing is raised or kept", async () => {
     const session = new FakeSession();
-    const prompts = new MemoryOpenPrompts();
+    const openCalls = new MemoryOpenCalls();
     const model = new MockLanguageModelV4({
       doGenerate: async () => toolCallResult("ask_user", question) as never
     });
@@ -1437,7 +1437,7 @@ describe("executeAgentTurn — ask_user", () => {
       fakeRequestContext("set up an agent"),
       bus.eventBus,
       askingCfg(session, model, {
-        openPrompts: prompts,
+        openCalls,
         isCanceled: async () => true
       })
     );
@@ -1446,12 +1446,12 @@ describe("executeAgentTurn — ask_user", () => {
     expect(publishedStates(bus)).not.toContain(
       TaskState.TASK_STATE_INPUT_REQUIRED
     );
-    expect(prompts.held.size).toBe(0);
+    expect(openCalls.held.size).toBe(0);
   });
 
   it("lets a question out-rank a final_reply in the same step", async () => {
     const session = new FakeSession();
-    const prompts = new MemoryOpenPrompts();
+    const openCalls = new MemoryOpenCalls();
     const model = new MockLanguageModelV4({
       doGenerate: async () =>
         ({
@@ -1477,7 +1477,7 @@ describe("executeAgentTurn — ask_user", () => {
     await executeAgentTurn(
       fakeRequestContext("set up an agent"),
       bus.eventBus,
-      askingCfg(session, model, { openPrompts: prompts })
+      askingCfg(session, model, { openCalls })
     );
 
     // Asking is the more committal act: the answer it would have given is dropped.
@@ -1485,7 +1485,7 @@ describe("executeAgentTurn — ask_user", () => {
       TaskState.TASK_STATE_INPUT_REQUIRED
     );
     expect(publishedText(bus)).not.toContain("Using dev.");
-    expect(prompts.held.size).toBe(1);
+    expect(openCalls.held.size).toBe(1);
   });
 
   it("keeps the calls that ran before the question", async () => {
@@ -1501,7 +1501,7 @@ describe("executeAgentTurn — ask_user", () => {
     await executeAgentTurn(
       fakeRequestContext("set it up"),
       fakeEventBus().eventBus,
-      askingCfg(session, model, { openPrompts: new MemoryOpenPrompts() })
+      askingCfg(session, model, { openCalls: new MemoryOpenCalls() })
     );
 
     expect(persistedActions(session).map((p) => p.type)).toEqual(["tool-work"]);
@@ -1510,7 +1510,7 @@ describe("executeAgentTurn — ask_user", () => {
 
   it("records a second question in the same step as not asked", async () => {
     const session = new FakeSession();
-    const prompts = new MemoryOpenPrompts();
+    const openCalls = new MemoryOpenCalls();
     const other = { question: "And which region?", options: [{ label: "eu" }] };
     const model = new MockLanguageModelV4({
       doGenerate: async () =>
@@ -1536,11 +1536,11 @@ describe("executeAgentTurn — ask_user", () => {
     await executeAgentTurn(
       fakeRequestContext("set it up"),
       fakeEventBus().eventBus,
-      askingCfg(session, model, { openPrompts: prompts })
+      askingCfg(session, model, { openCalls })
     );
 
-    // One prompt is open per turn. The other reached nobody, and history says so.
-    expect([...prompts.held.values()].map((p) => p.toolCallId)).toEqual([
+    // One call is open per turn. The other reached nobody, and history says so.
+    expect([...openCalls.held.values()].map((p) => p.toolCallId)).toEqual([
       "tc-a"
     ]);
     expect(persistedActions(session)).toEqual([
@@ -1579,8 +1579,8 @@ describe("executeAgentTurn — ask_user", () => {
       userSessionMessage("set up an agent"),
       assistantSessionMessage("Which environment?")
     );
-    const prompts = new MemoryOpenPrompts();
-    await prompts.put(heldQuestion());
+    const openCalls = new MemoryOpenCalls();
+    await openCalls.put(heldQuestion());
     const seen: string[] = [];
     const model = new MockLanguageModelV4({
       doGenerate: async (options) => {
@@ -1593,7 +1593,7 @@ describe("executeAgentTurn — ask_user", () => {
     await executeAgentTurn(
       resumeContext(answered("prod"), { user: { displayName: "Grace" } }),
       bus.eventBus,
-      askingCfg(session, model, { openPrompts: prompts })
+      askingCfg(session, model, { openCalls })
     );
 
     expect(publishedStates(bus).at(-1)).toBe(TaskState.TASK_STATE_COMPLETED);
@@ -1609,7 +1609,7 @@ describe("executeAgentTurn — ask_user", () => {
       "assistant",
       "assistant"
     ]);
-    expect(prompts.held.size).toBe(0);
+    expect(openCalls.held.size).toBe(0);
     // The answered call is recorded as a message of its own, ahead of the reply.
     expect(session.messages[2].parts).toEqual([
       expect.objectContaining({
@@ -1625,8 +1625,8 @@ describe("executeAgentTurn — ask_user", () => {
   it("resumes a question nobody answered as unanswered", async () => {
     const session = new FakeSession();
     session.messages.push(assistantSessionMessage("Which environment?"));
-    const prompts = new MemoryOpenPrompts();
-    await prompts.put(heldQuestion());
+    const openCalls = new MemoryOpenCalls();
+    await openCalls.put(heldQuestion());
     const seen: string[] = [];
     const model = new MockLanguageModelV4({
       doGenerate: async (options) => {
@@ -1638,7 +1638,7 @@ describe("executeAgentTurn — ask_user", () => {
     await executeAgentTurn(
       resumeContext(buildHitlTimeoutParts("req-1")),
       fakeEventBus().eventBus,
-      askingCfg(session, model, { openPrompts: prompts })
+      askingCfg(session, model, { openCalls })
     );
 
     expect(seen[0]).toContain('"answered":false');
@@ -1649,8 +1649,8 @@ describe("executeAgentTurn — ask_user", () => {
     });
   });
 
-  it("treats an answer with no open prompt as an ordinary message", async () => {
-    // A question asked before open prompts existed has nothing to take.
+  it("treats an answer with no open call as an ordinary message", async () => {
+    // A question asked before open calls existed has nothing to take.
     const session = new FakeSession();
     const seen: string[] = [];
     const model = new MockLanguageModelV4({
@@ -1663,7 +1663,7 @@ describe("executeAgentTurn — ask_user", () => {
     await executeAgentTurn(
       resumeContext(answered("prod")),
       fakeEventBus().eventBus,
-      askingCfg(session, model, { openPrompts: new MemoryOpenPrompts() })
+      askingCfg(session, model, { openCalls: new MemoryOpenCalls() })
     );
 
     expect(seen[0]).toContain('"role":"user"');
@@ -1671,11 +1671,11 @@ describe("executeAgentTurn — ask_user", () => {
     expect(sessionText(session.messages[0])).toBe("prod");
   });
 
-  it("settles a prompt once: a second delivery is an ordinary message", async () => {
+  it("settles a call once: a second delivery is an ordinary message", async () => {
     const session = new FakeSession();
     session.messages.push(assistantSessionMessage("Which environment?"));
-    const prompts = new MemoryOpenPrompts();
-    await prompts.put(heldQuestion());
+    const openCalls = new MemoryOpenCalls();
+    await openCalls.put(heldQuestion());
     const model = new MockLanguageModelV4({
       doGenerate: async () => finalReplyResult("Using prod.") as never
     });
@@ -1684,7 +1684,7 @@ describe("executeAgentTurn — ask_user", () => {
       await executeAgentTurn(
         resumeContext(answered("prod")),
         fakeEventBus().eventBus,
-        askingCfg(session, model, { openPrompts: prompts })
+        askingCfg(session, model, { openCalls })
       );
     }
 
@@ -1700,8 +1700,8 @@ describe("executeAgentTurn — ask_user", () => {
   it("records the answer before the model runs, so no ending can lose it", async () => {
     const session = new FakeSession();
     session.messages.push(assistantSessionMessage("Which environment?"));
-    const prompts = new MemoryOpenPrompts();
-    await prompts.put(heldQuestion());
+    const openCalls = new MemoryOpenCalls();
+    await openCalls.put(heldQuestion());
     let recordedBeforeModel = false;
     const model = new MockLanguageModelV4({
       doGenerate: async () => {
@@ -1717,7 +1717,7 @@ describe("executeAgentTurn — ask_user", () => {
     await executeAgentTurn(
       resumeContext(answered("prod")),
       bus.eventBus,
-      askingCfg(session, model, { openPrompts: prompts })
+      askingCfg(session, model, { openCalls })
     );
 
     // The gatekeeper has marked this answer as given and will not send it again,
