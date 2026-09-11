@@ -46,8 +46,13 @@ export class MemoryOpenPrompts implements OpenPromptStore {
   async put(prompt: OpenPrompt) {
     this.held.set(prompt.requestId, prompt);
   }
-  async take(requestId: string) {
+  async settle(
+    requestId: string,
+    record: (prompt: OpenPrompt) => Promise<void>
+  ) {
     const prompt = this.held.get(requestId) ?? null;
+    if (!prompt) return null;
+    await record(prompt);
     this.held.delete(requestId);
     return prompt;
   }

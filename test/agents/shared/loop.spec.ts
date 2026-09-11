@@ -1602,21 +1602,24 @@ describe("executeAgentTurn — ask_user", () => {
     expect(seen[0]).toContain('"role":"tool"');
     expect(seen[0]).toContain('"answer":"prod"');
     expect(seen[0]).toContain('"answeredBy":"Grace"');
-    // No user turn was added for the answer, and it was taken, not copied.
+    // No user turn was added for the answer, and it was settled, not copied.
     expect(session.messages.map((m) => m.role)).toEqual([
       "user",
+      "assistant",
       "assistant",
       "assistant"
     ]);
     expect(prompts.held.size).toBe(0);
-    // The resumed turn records the answered call ahead of its reply.
-    expect(session.messages[2].parts[0]).toMatchObject({
-      type: "tool-ask_user",
-      toolCallId: "tc-ask",
-      state: "output-available",
-      output: { answer: "prod", answeredBy: "Grace" }
-    });
-    expect(sessionText(session.messages[2])).toBe("Using prod.");
+    // The answered call is recorded as a message of its own, ahead of the reply.
+    expect(session.messages[2].parts).toEqual([
+      expect.objectContaining({
+        type: "tool-ask_user",
+        toolCallId: "tc-ask",
+        state: "output-available",
+        output: { answer: "prod", answeredBy: "Grace" }
+      })
+    ]);
+    expect(sessionText(session.messages[3])).toBe("Using prod.");
   });
 
   it("resumes a question nobody answered as unanswered", async () => {
@@ -1639,7 +1642,7 @@ describe("executeAgentTurn — ask_user", () => {
     );
 
     expect(seen[0]).toContain('"answered":false');
-    expect(session.messages.at(-1)?.parts[0]).toMatchObject({
+    expect(session.messages[1].parts[0]).toMatchObject({
       type: "tool-ask_user",
       state: "output-available",
       output: { answered: false }
@@ -1668,7 +1671,7 @@ describe("executeAgentTurn — ask_user", () => {
     expect(sessionText(session.messages[0])).toBe("prod");
   });
 
-  it("takes a prompt at most once: a second delivery is an ordinary message", async () => {
+  it("settles a prompt once: a second delivery is an ordinary message", async () => {
     const session = new FakeSession();
     session.messages.push(assistantSessionMessage("Which environment?"));
     const prompts = new MemoryOpenPrompts();
@@ -1694,13 +1697,18 @@ describe("executeAgentTurn — ask_user", () => {
     ).toEqual(["prod"]);
   });
 
-  it("keeps the answer even when the resumed turn fails", async () => {
+  it("records the answer before the model runs, so no ending can lose it", async () => {
     const session = new FakeSession();
     session.messages.push(assistantSessionMessage("Which environment?"));
     const prompts = new MemoryOpenPrompts();
     await prompts.put(heldQuestion());
+    let recordedBeforeModel = false;
     const model = new MockLanguageModelV4({
       doGenerate: async () => {
+        recordedBeforeModel = session.messages.some((m) =>
+          m.parts.some((p) => p.type === "tool-ask_user")
+        );
+        // An ending that writes nothing on its way out: the turn fails outright.
         throw new Error("model exploded");
       }
     });
@@ -1712,9 +1720,11 @@ describe("executeAgentTurn — ask_user", () => {
       askingCfg(session, model, { openPrompts: prompts })
     );
 
-    // Taken from the store means gone from the store: history is all that is left.
+    // The gatekeeper has marked this answer as given and will not send it again,
+    // so it has to be in history before anything can end the turn.
+    expect(recordedBeforeModel).toBe(true);
     expect(publishedStates(bus).at(-1)).toBe(TaskState.TASK_STATE_FAILED);
-    expect(session.messages.at(-1)?.parts[0]).toMatchObject({
+    expect(session.messages[1].parts[0]).toMatchObject({
       type: "tool-ask_user",
       output: { answer: "prod" }
     });

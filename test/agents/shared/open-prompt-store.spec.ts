@@ -28,6 +28,8 @@ function prompt(requestId: string, createdAt = Date.now()): OpenPrompt {
   };
 }
 
+const ignore = async () => {};
+
 describe("DurableOpenPrompts", () => {
   it("hands a prompt to a later instance over the same storage", async () => {
     await withStorage(async (storage) => {
@@ -35,23 +37,70 @@ describe("DurableOpenPrompts", () => {
       await new DurableOpenPrompts(storage).put(kept);
 
       // The human answers days later, on an isolate that never saw the question.
-      expect(await new DurableOpenPrompts(storage).take("r1")).toEqual(kept);
+      const recorded: OpenPrompt[] = [];
+      const settled = await new DurableOpenPrompts(storage).settle(
+        "r1",
+        async (p) => {
+          recorded.push(p);
+        }
+      );
+      expect(settled).toEqual(kept);
+      expect(recorded).toEqual([kept]);
     });
   });
 
-  it("gives a prompt out once: a second take of the same answer finds nothing", async () => {
+  it("forgets a prompt only once it has been recorded", async () => {
     await withStorage(async (storage) => {
       const store = new DurableOpenPrompts(storage);
       await store.put(prompt("r1"));
 
-      expect(await store.take("r1")).not.toBeNull();
-      expect(await store.take("r1")).toBeNull();
+      // Still there while the answer is being written — a reset at this point must
+      // not have lost the only copy.
+      let heldWhileRecording: unknown;
+      await store.settle("r1", async () => {
+        heldWhileRecording = await storage.get("hitl:open:r1");
+      });
+
+      expect(heldWhileRecording).toBeDefined();
+      expect(await storage.get("hitl:open:r1")).toBeUndefined();
+    });
+  });
+
+  it("keeps a prompt whose recording failed", async () => {
+    await withStorage(async (storage) => {
+      const store = new DurableOpenPrompts(storage);
+      await store.put(prompt("r1"));
+
+      await expect(
+        store.settle("r1", async () => {
+          throw new Error("history is unavailable");
+        })
+      ).rejects.toThrow("history is unavailable");
+
+      expect(await store.settle("r1", ignore)).not.toBeNull();
+    });
+  });
+
+  it("settles a prompt once: a second answer finds nothing and records nothing", async () => {
+    await withStorage(async (storage) => {
+      const store = new DurableOpenPrompts(storage);
+      await store.put(prompt("r1"));
+      let records = 0;
+      const record = async () => {
+        records++;
+      };
+
+      expect(await store.settle("r1", record)).not.toBeNull();
+      expect(await store.settle("r1", record)).toBeNull();
+      expect(records).toBe(1);
     });
   });
 
   it("finds nothing for an id it never held", async () => {
     await withStorage(async (storage) => {
-      expect(await new DurableOpenPrompts(storage).take("nope")).toBeNull();
+      expect(
+        await new DurableOpenPrompts(storage).settle("nope", ignore)
+      ).toBeNull();
     });
   });
 
@@ -67,8 +116,8 @@ describe("DurableOpenPrompts", () => {
 
       await store.put(prompt("fresh"));
 
-      expect(await store.take("stale")).toBeNull();
-      expect(await store.take("fresh")).not.toBeNull();
+      expect(await store.settle("stale", ignore)).toBeNull();
+      expect(await store.settle("fresh", ignore)).not.toBeNull();
     });
   });
 });

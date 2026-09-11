@@ -19,13 +19,14 @@ import type { ToolRecord } from "./messages";
  * the HITL `requestId`. Keeping it in history as a pending tool part looks simpler
  * and does not survive use: compaction folds older messages into a summary once
  * history passes its threshold, so a question asked a few turns ago stops being
- * there to find by the time anyone answers it. A record nothing compacts, taken
- * exactly once, has none of that problem — and taking it is also what makes an
- * answer count at most once.
+ * there to find by the time anyone answers it. A record nothing compacts has none of
+ * that problem.
  *
- * On the way back the answered call is put at the *end* of the history the model
- * reads, as the call plus its result, and no user turn is added: the model asked a
- * question, and what it gets back is the answer to that question.
+ * On the way back the answered call is written to the *end* of history, as the call
+ * plus its result, and no user turn is added: the model asked a question, and what
+ * it gets back is the answer to that question. The record is forgotten only once
+ * that write has landed — the gatekeeper will not send the answer twice, so the
+ * record is the last copy until history holds it.
  */
 
 /** A tool call a turn paused on, kept until a human answers it. */
@@ -44,8 +45,15 @@ export interface OpenPrompt {
 export interface OpenPromptStore {
   /** Keep a prompt until it is answered. Also drops prompts past the HITL TTL. */
   put(prompt: OpenPrompt): Promise<void>;
-  /** Read-and-delete: a prompt is answered at most once. */
-  take(requestId: string): Promise<OpenPrompt | null>;
+  /**
+   * Hand the prompt `requestId` answers to `record`, then forget it — only after
+   * `record` has finished, and not at all if it throws. Null, with `record` never
+   * called, when there is no such prompt: never asked, or already settled.
+   */
+  settle(
+    requestId: string,
+    record: (prompt: OpenPrompt) => Promise<void>
+  ): Promise<OpenPrompt | null>;
 }
 
 /**

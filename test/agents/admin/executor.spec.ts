@@ -318,7 +318,10 @@ describe("AdminAgentExecutor — HITL approval resume", () => {
 
     expect(terminalTaskText(t.published)).toBe("Great, using staging.");
     // The answer is the call's result, recorded ahead of the reply — not a user turn.
-    expect(session.messages.map((m) => m.role)).toEqual(["assistant"]);
+    expect(session.messages.map((m) => m.role)).toEqual([
+      "assistant",
+      "assistant"
+    ]);
     expect(session.messages[0].parts[0]).toMatchObject({
       type: "tool-ask_user",
       output: { answer: "staging", answeredBy: "Tester" }

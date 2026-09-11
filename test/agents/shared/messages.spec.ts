@@ -10,7 +10,7 @@ import {
   slackTsToIso,
   sessionText,
   toModelMessages,
-  replayedCallMessage,
+  toolCallSessionMessage,
   MAX_TOOL_RECORD_CHARS,
   type TurnContext
 } from "@/agents/shared/messages";
@@ -386,10 +386,10 @@ describe("toModelMessages — assistant messages in a row", () => {
     ]);
   });
 
-  it("folds the question into the replayed call that answers it", async () => {
+  it("folds the question into the recorded call that answers it", async () => {
     const messages = await toModelMessages([
       assistantSessionMessage("Which environment?"),
-      replayedCallMessage({
+      toolCallSessionMessage({
         toolCallId: "tc-ask",
         toolName: "ask_user",
         input: { question: "Which environment?" },

@@ -26,14 +26,23 @@ export class DurableOpenPrompts implements OpenPromptStore {
   }
 
   /**
-   * Read-and-delete, so an answer counts at most once. The read and the delete
-   * are both storage operations with no outgoing I/O between them, so the input
-   * gate keeps a second delivery of the same answer from reading in between.
+   * Hand the prompt `requestId` answers to `record`, and forget it only once
+   * `record` has finished.
+   *
+   * The order is the point. Deleting first opens a window in which a reset of this
+   * object loses an answer the gatekeeper has already marked as given and will not
+   * send again. Recording first means the worst a reset can leave behind is a prompt
+   * that was already answered, which the TTL prune removes. A `record` that throws
+   * leaves the prompt where it was.
    */
-  async take(requestId: string): Promise<OpenPrompt | null> {
+  async settle(
+    requestId: string,
+    record: (prompt: OpenPrompt) => Promise<void>
+  ): Promise<OpenPrompt | null> {
     const key = promptKey(requestId);
     const prompt = await this.storage.get<OpenPrompt>(key);
     if (!prompt) return null;
+    await record(prompt);
     await this.storage.delete(key);
     return prompt;
   }

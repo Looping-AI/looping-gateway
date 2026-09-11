@@ -315,13 +315,17 @@ export function assistantSessionMessage(
 /**
  * One recorded call as an assistant message of its own.
  *
- * Not something a turn persists — {@link assistantSessionMessage} is. This is how a
- * resumed turn puts the call it paused on, now answered, at the end of the history
- * the model reads: the call and its result, where the model left off.
+ * How a resumed turn records the call it paused on, now answered: written the moment
+ * the answer arrives, ahead of anything the turn goes on to do, so the call and its
+ * result sit where the model left off. `id` lets the caller make that write
+ * repeatable — the Session stores a message id once.
  */
-export function replayedCallMessage(record: ToolRecord): SessionMessage {
+export function toolCallSessionMessage(
+  record: ToolRecord,
+  id: string = crypto.randomUUID()
+): SessionMessage {
   return {
-    id: crypto.randomUUID(),
+    id,
     role: "assistant",
     createdAt: new Date(),
     parts: [toolPart(record)]
