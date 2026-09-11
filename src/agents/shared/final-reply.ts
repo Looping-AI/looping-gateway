@@ -29,12 +29,14 @@ export const FINAL_REPLY_TOOL_NAME = "final_reply";
 
 /**
  * The call's input, exported as the zod schema rather than only as the tool's
- * `inputSchema`, because the turn has to run it itself.
+ * `inputSchema`, so the turn can read a call back with a type.
  *
- * A tool with no `execute` never has its input validated by the SDK — the loop
- * halts on the call and nothing checks it. That is what would let a blank `text`
- * through to Slack as an empty message. The turn parses every control call with
- * this schema before using it, and hands a failure back to the model to repair.
+ * The SDK validates against it on the way in. Every tool call is parsed against its
+ * `inputSchema` — an `execute`-less control tool included — and a call that fails
+ * comes back to the model on the next step as a failed tool result carrying the
+ * reason, which is how a blank `text` gets fixed instead of reaching Slack as an
+ * empty message. The turn never re-checks what the SDK already rejected: it reads
+ * the ending off `staticToolCalls`, which holds only the calls that passed.
  */
 export const finalReplyInputSchema = z.object({
   text: z
@@ -96,6 +98,9 @@ complete, and never invent an outcome for work that did not run.`;
  * It names the budget on purpose. "You cannot use tools" reads as a capability to
  * route around; "you have used this turn's steps" reads as a fact, and the only
  * sensible response to it is the answer.
+ *
+ * Two places reach it, both in {@link file://./loop.ts loop.ts}: the loop's last
+ * step, and the one salvage call for a turn that came back with no ending at all.
  */
 export const FINAL_ROUND_CONTRACT = `
 

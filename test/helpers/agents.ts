@@ -72,9 +72,9 @@ export function stubAgentAi(text = "stubbed agent reply") {
     }
     // An agent running with `requireFinalReply` cannot end a turn in prose, so
     // the stub has to answer the way the real contract does. Replying with text
-    // would fail every attempt — and the turn would then burn both models plus a
-    // final round, outliving the test that stubbed this binding and rejecting
-    // against the real one on its detached promise.
+    // would make the turn spend its whole step budget and then a salvage call,
+    // outliving the test that stubbed this binding and rejecting against the real
+    // one on its detached promise.
     const requiresFinalReply = (inputs?.tools ?? []).some(
       (t) => t?.function?.name === "final_reply"
     );
@@ -88,8 +88,9 @@ export function stubAgentAi(text = "stubbed agent reply") {
 }
 
 // Minimal valid generate result. The shape is the v4 one the provider actually
-// speaks (`finishReason` as an object, structured `usage`) — `MockLanguageModelV3`
-// only spoofs a version marker, so what a spec returns here is what the SDK reads.
+// speaks — `finishReason` as an object, structured `usage` — and `MockLanguageModelV4`
+// declares that same spec, so what a spec returns here is what the SDK reads with
+// nothing converting in between.
 export function okResult(text: string) {
   return {
     content: [{ type: "text", text }],

@@ -12,21 +12,21 @@ import { isRecord, jsonOf } from "@/util/json";
  * crashes rendering it on `glm-4.7-flash` (`'str object' has no attribute 'items'`,
  * the chat template calling `.items()` on a `str`).
  *
- * Three things upstream can put a non-object there, and only the first is ours to
- * fix at the source:
+ * What can put a non-object there is a **durable record capped past the size
+ * ceiling** — fixed at the source in `capInput`
+ * ({@link file://./shared/messages.ts messages.ts}), but records written before that
+ * fix live in Sessions and replay on every later turn. Nothing but time removes
+ * them, so this is the only place that can.
  *
- *  1. A recorded call capped past the size ceiling — fixed in `capInput`
- *     ({@link file://./shared/messages.ts messages.ts}), but records written before
- *     that fix are durable and replay on every later turn.
- *  2. A tool call the SDK could not parse, which it hands back as the raw arguments
- *     string (`invalid: true`) and then replays into its own next step.
- *  3. `repairExchange` ({@link file://./shared/loop.ts loop.ts}) echoing a rejected
- *     `final_reply` call back to the model so it can fix it.
+ * The SDK's own replay is no longer a second cause. A tool call it could not parse
+ * is handed back as the raw arguments string, but it substitutes `{}` before
+ * building the message that replays it (`to-response-messages.ts`), so the
+ * malformed `final_reply` that the loop now repairs in place never reaches the wire
+ * as a string. Belt and braces: this still catches it if that ever changes.
  *
- * A middleware catches all three at the last boundary before serialization, which
- * is also the only place that can repair history already sitting in a Session. It
- * warns rather than repairing silently: a poisoned record should stay visible in
- * the logs until it ages out of history.
+ * A middleware sits at the last boundary before serialization, which is what lets
+ * it reach history the turn itself cannot. It warns rather than repairing silently:
+ * a poisoned record should stay visible in the logs until it ages out.
  */
 
 type TransformParams = NonNullable<LanguageModelMiddleware["transformParams"]>;

@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach, vi } from "vitest";
-import { MockLanguageModelV3 } from "ai/test";
+import { MockLanguageModelV4 } from "ai/test";
 import { AdminAgentExecutor, type SessionHost } from "@/agents/admin/executor";
 import type { UserAuthContext } from "@/auth";
 import { Role, type Message } from "@a2a-js/sdk";
@@ -50,7 +50,7 @@ afterEach(() => vi.restoreAllMocks());
 describe("AdminAgentExecutor", () => {
   it("runs the loop and completes an A2A task with the model's reply", async () => {
     const session = new FakeSession();
-    const model = new MockLanguageModelV3({
+    const model = new MockLanguageModelV4({
       doGenerate: async () => finalReplyResult("Here are your agents.") as never
     });
     const exec = new AdminAgentExecutor(sqlHost, {
@@ -76,7 +76,7 @@ describe("AdminAgentExecutor", () => {
         throw new Error("memory boom");
       }
     }
-    const model = new MockLanguageModelV3({
+    const model = new MockLanguageModelV4({
       doGenerate: async () => okResult("unused") as never
     });
     const exec = new AdminAgentExecutor(sqlHost, {
@@ -95,7 +95,7 @@ describe("AdminAgentExecutor", () => {
   it("withholds the recall tool before the first compaction", async () => {
     const session = new FakeSession([]); // no compactions → hasArchive=false
     let capturedToolNames: string[] = [];
-    const model = new MockLanguageModelV3({
+    const model = new MockLanguageModelV4({
       doGenerate: async (options) => {
         capturedToolNames = (options.tools ?? []).map((t) => t.name);
         return finalReplyResult("done") as never;
@@ -117,7 +117,7 @@ describe("AdminAgentExecutor", () => {
     const session = new FakeSession([{ id: "c1" }]); // hasArchive=true
     const { query } = fakeRecallEnv();
     let call = 0;
-    const model = new MockLanguageModelV3({
+    const model = new MockLanguageModelV4({
       doGenerate: async () =>
         (call++ === 0
           ? toolCallResult("recall", {
@@ -216,7 +216,7 @@ describe("AdminAgentExecutor — HITL approval resume", () => {
     const store = fakeStore({
       "req-1": { kind: "unregister_agent", name: "resume-del", wsId }
     });
-    const model = new MockLanguageModelV3({
+    const model = new MockLanguageModelV4({
       doGenerate: async () => finalReplyResult("Done — I deleted it.") as never
     });
     const exec = new AdminAgentExecutor(sqlHost, {
@@ -256,7 +256,7 @@ describe("AdminAgentExecutor — HITL approval resume", () => {
     const store = fakeStore({
       "req-2": { kind: "unregister_agent", name: "resume-keep", wsId }
     });
-    const model = new MockLanguageModelV3({
+    const model = new MockLanguageModelV4({
       doGenerate: async () =>
         finalReplyResult("Okay, I won't delete it.") as never
     });
@@ -284,7 +284,7 @@ describe("AdminAgentExecutor — HITL approval resume", () => {
   it("treats an answer with no pending action as a normal turn (ask_user)", async () => {
     const store = fakeStore(); // empty — an ask_user answer has no stored action
     const session = new FakeSession();
-    const model = new MockLanguageModelV3({
+    const model = new MockLanguageModelV4({
       doGenerate: async () => finalReplyResult("Great, using staging.") as never
     });
     const exec = new AdminAgentExecutor(sqlHost, {
