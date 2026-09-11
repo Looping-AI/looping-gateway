@@ -4,7 +4,7 @@ import {
   wrapLanguageModel,
   type LanguageModelMiddleware
 } from "ai";
-import { MockLanguageModelV3 } from "ai/test";
+import { MockLanguageModelV4 } from "ai/test";
 import { normalizeToolInputMiddleware } from "@/agents/model-middleware";
 import { okResult } from "../helpers/agents";
 
@@ -187,7 +187,7 @@ describe("normalizeToolInputMiddleware — wired into a model", () => {
     let seen: unknown;
 
     const model = wrapLanguageModel({
-      model: new MockLanguageModelV3({
+      model: new MockLanguageModelV4({
         doGenerate: async (options) => {
           seen = options.prompt;
           return okResult("done") as never;

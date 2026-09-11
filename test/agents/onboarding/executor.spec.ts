@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach, vi } from "vitest";
-import { MockLanguageModelV3 } from "ai/test";
+import { MockLanguageModelV4 } from "ai/test";
 import { OnboardingAgentExecutor } from "@/agents/onboarding/executor";
 import type { SessionHost } from "@/agents/shared/session";
 import type { UserAuthContext } from "@/auth";
@@ -38,7 +38,7 @@ afterEach(() => vi.restoreAllMocks());
 describe("OnboardingAgentExecutor", () => {
   it("runs the loop and completes an A2A task with the model's reply", async () => {
     const session = new FakeSession();
-    const model = new MockLanguageModelV3({
+    const model = new MockLanguageModelV4({
       doGenerate: async () =>
         okResult("Dynamic Agents routes work through Slack.") as never
     });
@@ -65,7 +65,7 @@ describe("OnboardingAgentExecutor", () => {
         throw new Error("memory boom");
       }
     }
-    const model = new MockLanguageModelV3({
+    const model = new MockLanguageModelV4({
       doGenerate: async () => okResult("unused") as never
     });
     const exec = new OnboardingAgentExecutor(sqlHost, {
@@ -88,7 +88,7 @@ describe("OnboardingAgentExecutor", () => {
     const session = new FakeSession([{ id: "c1" }]); // hasArchive=true
     const { query } = fakeRecallEnv();
     let call = 0;
-    const model = new MockLanguageModelV3({
+    const model = new MockLanguageModelV4({
       doGenerate: async () =>
         (call++ === 0
           ? toolCallResult("recall", { query: "what did I set up before?" })
@@ -113,7 +113,7 @@ describe("OnboardingAgentExecutor", () => {
   it("errors at the boundary when caller context is absent (no null path)", async () => {
     const session = new FakeSession([{ id: "c1" }]);
     let modelCalled = false;
-    const model = new MockLanguageModelV3({
+    const model = new MockLanguageModelV4({
       doGenerate: async () => {
         modelCalled = true;
         return okResult("unused") as never;
