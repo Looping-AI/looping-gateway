@@ -6,6 +6,7 @@ import type { TaskState } from "@a2a-js/sdk";
 import { partsText } from "@/a2a/parts";
 import { EMBED_MODEL_ID } from "@/config";
 import type { SessionLike } from "@/agents/shared/session";
+import type { OpenCall, OpenCallStore } from "@/agents/shared/open-call";
 import { userMessage } from "./a2a";
 
 /**
@@ -33,6 +34,24 @@ export class FakeSession implements SessionLike {
   }
   async getCompactions() {
     return this.compactions;
+  }
+}
+
+/**
+ * A Map-backed `OpenCallStore`: `held` lets a spec seed a question a turn asked
+ * earlier, or check what a pausing turn kept.
+ */
+export class MemoryOpenCalls implements OpenCallStore {
+  held = new Map<string, OpenCall>();
+  async put(call: OpenCall) {
+    this.held.set(call.requestId, call);
+  }
+  async settle(requestId: string, record: (call: OpenCall) => Promise<void>) {
+    const call = this.held.get(requestId) ?? null;
+    if (!call) return null;
+    await record(call);
+    this.held.delete(requestId);
+    return call;
   }
 }
 

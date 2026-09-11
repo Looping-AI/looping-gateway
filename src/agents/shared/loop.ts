@@ -26,6 +26,7 @@ import type { SessionLike } from "./session";
 import {
   assistantSessionMessage,
   toModelMessages,
+  toolCallSessionMessage,
   userSessionMessage,
   type ToolRecord
 } from "./messages";
@@ -36,6 +37,15 @@ import {
   finalReplyInputSchema,
   finalReplyTool
 } from "./final-reply";
+import { ASK_USER_TOOL_NAME } from "./ask-user";
+import {
+  answeredCall,
+  hitlRequestOf,
+  notAsked,
+  openCallOf,
+  humanAnswerOf,
+  type OpenCallStore
+} from "./open-call";
 
 /**
  * How many model calls one turn may spend.
@@ -191,6 +201,13 @@ export interface AgentTurnConfig {
    * this one claimed. Off by default. See {@link assistantSessionMessage}.
    */
   recordToolCalls?: boolean;
+  /**
+   * Where a turn that stops to ask a human keeps the call it paused on, until the
+   * answer resumes it — see {@link file://./open-call.ts open-call.ts}. Needed
+   * by any agent whose tools include `ask_user`: a turn that has to pause without
+   * one fails, because the question it would raise could never be answered.
+   */
+  openCalls?: OpenCallStore;
 }
 
 function agentMessage(
@@ -348,9 +365,43 @@ export async function executeAgentTurn(
       tools: extraTools
     } = await cfg.prepare(text, metadata, turn);
 
-    // `text` already carries its `<turn>` provenance wrapper (applied by the
-    // Gatekeeper in dispatch); persist it verbatim.
-    await session.appendMessage(userSessionMessage(text));
+    // An answer to a question this agent asked resumes that call rather than opening
+    // a new exchange: the call, with the answer as its result, goes where the model
+    // left off, and no user turn is added — the answer *is* the result.
+    //
+    // It is written to history first, before the model runs and before the store lets
+    // go of its copy. The gatekeeper has already marked the answer as given and will
+    // not send it again, so a turn that recorded it only on the way out could lose it
+    // to anything that ends the turn early — a failure, or a reset of this object.
+    // An answer with no open call left to settle (asked before open calls existed,
+    // or already settled) is an ordinary message.
+    const answer = humanAnswerOf(userMessage, metadata.user?.displayName);
+    // Read off the answer rather than the settled record: a timeout for a question
+    // asked before open calls existed has no record to settle, and that turn must
+    // not be free to ask again either.
+    const timedOut = answer?.answer.kind === "timed-out";
+    const settled =
+      answer && cfg.openCalls
+        ? await cfg.openCalls.settle(answer.requestId, async (call) => {
+            await session.appendMessage(
+              toolCallSessionMessage(
+                answeredCall(call, answer.answer),
+                // Fixed per call, so recording the same answer twice stores it once.
+                `answer:${call.requestId}`
+              )
+            );
+          })
+        : null;
+    if (settled) {
+      console.info("[agent-loop] resuming an answered question", {
+        requestId: settled.requestId,
+        contextId: requestContext.contextId
+      });
+    } else {
+      // `text` already carries its `<turn>` provenance wrapper (applied by the
+      // Gatekeeper in dispatch); persist it verbatim.
+      await session.appendMessage(userSessionMessage(text));
+    }
     const history = await session.getHistory();
     const soul = (await session.refreshSystemPrompt()) + systemSuffix;
     const workTools = { ...(await session.tools()), ...extraTools };
@@ -461,16 +512,39 @@ export async function executeAgentTurn(
             instructions: instructions + FINAL_ROUND_CONTRACT
           };
 
+    // `final_reply` is declared *first*: tool order is part of the prompt, and
+    // reaching an ending is the thing every turn has to do.
+    // Typed as `ToolSet` rather than inferred: the ternary would otherwise infer a
+    // union of two shapes, and `activeTools` is keyed to the tool names, which in
+    // one branch narrows to `final_reply` alone.
+    const turnTools: ToolSet = required
+      ? { [FINAL_REPLY_TOOL_NAME]: finalReplyTool, ...workTools }
+      : workTools;
+
+    /**
+     * A turn a timeout resumed may not ask again.
+     *
+     * Nobody answered for the whole TTL, and a turn still holding `ask_user` can
+     * park on a fresh one, expire, and ask again — a task that never ends, putting
+     * the same question to a human who let the last one sit for a week. Withholding
+     * the tool leaves one way out: say what happened and finish. Everything else
+     * stays on the table, so that ending can still report the work the turn did
+     * before it stopped to ask.
+     *
+     * The gatekeeper cancels the other way out itself: a 🛑 resolves the open rows
+     * and never hands the task back, so a stopped question reaches no model at all.
+     */
+    const withheld = timedOut
+      ? Object.keys(turnTools).filter((name) => name !== ASK_USER_TOOL_NAME)
+      : undefined;
+
     const runTurn = () =>
       generateText({
         model: cfg.model,
         instructions,
         messages,
-        // `final_reply` is declared *first*: tool order is part of the prompt, and
-        // reaching an ending is the thing every turn has to do.
-        tools: required
-          ? { [FINAL_REPLY_TOOL_NAME]: finalReplyTool, ...workTools }
-          : workTools,
+        tools: turnTools,
+        ...(withheld ? { activeTools: withheld } : {}),
         // Every ending is a `final_reply` call, so the model must always call
         // something. Work tools stay freely available — `required` constrains the
         // *shape* of a step's output, not which tool is chosen.
@@ -534,9 +608,13 @@ export async function executeAgentTurn(
       });
     }
 
-    // A 🛑 or a park out-ranks the reply and ends the turn here: neither is a reason
-    // to spend another call.
-    const interrupted = (await checkCanceled()) || hitl.request !== null;
+    // The question the last step stopped on, if it stopped on one.
+    const pause = result ? openCallOf(result.finalStep) : undefined;
+
+    // A 🛑, a park, or a question out-ranks the reply and ends the turn here: none
+    // of them is a reason to spend another call.
+    const interrupted =
+      (await checkCanceled()) || hitl.request !== null || pause !== undefined;
 
     if (required && reply === undefined && !interrupted) {
       console.warn("[agent-loop] no ending; asking once more with none else", {
@@ -596,13 +674,44 @@ export async function executeAgentTurn(
     // asked), then end in `input-required` — no terminal reply.
     if (hitl.request) {
       completed = true;
+      // A question asked in the same step never reached anyone; say so.
       await session.appendMessage(
-        assistantSessionMessage(hitl.request.prompt, actions)
+        assistantSessionMessage(hitl.request.prompt, [
+          ...actions,
+          ...(pause ? [notAsked(pause.call), ...pause.notRaised] : [])
+        ])
       );
       publishInputRequired(
         eventBus,
         requestContext,
         hitl.request,
+        `${userMessage.messageId}:hitl`
+      );
+      return;
+    }
+
+    // The model asked the human something. Record the question as what this turn
+    // said, keep the call until someone answers it, and only then raise the prompt:
+    // a click that beat the record would find nothing to resume.
+    if (pause) {
+      if (!cfg.openCalls) {
+        throw new Error(
+          `[agent-loop] ${pause.call.toolName} was called, but this agent has nowhere to keep an open call`
+        );
+      }
+      const request = hitlRequestOf(pause.call);
+      await session.appendMessage(
+        assistantSessionMessage(request.prompt, [
+          ...actions,
+          ...pause.notRaised
+        ])
+      );
+      await cfg.openCalls.put(pause.call);
+      completed = true;
+      publishInputRequired(
+        eventBus,
+        requestContext,
+        request,
         `${userMessage.messageId}:hitl`
       );
       return;

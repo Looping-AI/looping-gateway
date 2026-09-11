@@ -2,18 +2,31 @@ import { describe, it, expect, vi } from "vitest";
 import { MockLanguageModelV4 } from "ai/test";
 import { APICallError, RetryError, tool, type LanguageModel } from "ai";
 import { z } from "zod";
-import { TaskState, type TaskStatusUpdateEvent } from "@a2a-js/sdk";
+import {
+  Role,
+  TaskState,
+  type Message,
+  type TaskStatusUpdateEvent
+} from "@a2a-js/sdk";
 import type { AgentExecutionEvent } from "@a2a-js/sdk/server";
-import { dataOf, partsText } from "@/a2a/parts";
+import { buildMessage, dataOf, partsText } from "@/a2a/parts";
+import { buildHitlResponseParts, buildHitlTimeoutParts } from "@/a2a/hitl";
 import type { SessionLike } from "@/agents/shared/session";
 import {
   isTransientAiError,
   executeAgentTurn,
   type AgentTurnConfig
 } from "@/agents/shared/loop";
-import { sessionText } from "@/agents/shared/messages";
+import { askUserTool } from "@/agents/shared/ask-user";
+import { NOT_ASKED_NOTE } from "@/agents/shared/open-call";
+import {
+  assistantSessionMessage,
+  sessionText,
+  userSessionMessage
+} from "@/agents/shared/messages";
 import {
   FakeSession,
+  MemoryOpenCalls,
   finalReplyResult,
   okResult,
   lengthResult,
@@ -1259,6 +1272,510 @@ describe("executeAgentTurn — forced final_reply", () => {
 
     expect(calls).toBe(1);
     expect(publishedStates(bus).at(-1)).toBe(TaskState.TASK_STATE_CANCELED);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ask_user — a control tool with no handler. The turn pauses on the call itself,
+// keeps it as an open call, and a human's answer resumes it as the call's result.
+// ---------------------------------------------------------------------------
+
+describe("executeAgentTurn — ask_user", () => {
+  const question = {
+    question: "Which environment?",
+    options: [{ label: "dev" }, { label: "prod" }]
+  };
+
+  function askingCfg(
+    session: SessionLike,
+    model: LanguageModel,
+    overrides: Partial<AgentTurnConfig> = {}
+  ): AgentTurnConfig {
+    return forcedCfg(session, model, {
+      prepare: async () => ({
+        session,
+        systemSuffix: "",
+        tools: { work: workTool, ask_user: askUserTool }
+      }),
+      ...overrides
+    });
+  }
+
+  /** The gatekeeper handing a human's answer back onto the parked task. */
+  function resumeContext(
+    parts: Message["parts"],
+    metadata: Record<string, unknown> = {}
+  ) {
+    return {
+      contextId: "ctx-1",
+      taskId: "task-1",
+      userMessage: buildMessage({
+        messageId: "m2",
+        role: Role.ROLE_USER,
+        parts,
+        contextId: "ctx-1",
+        taskId: "task-1",
+        metadata
+      })
+    } as never;
+  }
+
+  /** A button answer to `req-1`, as the gatekeeper sends it. */
+  const answered = (humanText: string) =>
+    buildHitlResponseParts({
+      requestId: "req-1",
+      optionId: "opt_1",
+      answeredBy: "U9",
+      humanText
+    });
+
+  /** The question as the pausing turn kept it. */
+  const heldQuestion = () => ({
+    requestId: "req-1",
+    toolCallId: "tc-ask",
+    toolName: "ask_user",
+    input: question,
+    createdAt: Date.now()
+  });
+
+  /** The HITL request data part on the last event published. */
+  function raisedRequest(bus: { published: PublishedEvent[] }) {
+    return (statusEventAt(bus, -1).status?.message?.parts ?? [])
+      .map((p) => dataOf(p) as Record<string, unknown> | undefined)
+      .find((d) => d?.type === "io.da.hitl.request");
+  }
+
+  it("pauses on the question and keeps the call until someone answers", async () => {
+    const session = new FakeSession();
+    const openCalls = new MemoryOpenCalls();
+    let calls = 0;
+    const model = new MockLanguageModelV4({
+      doGenerate: async () => {
+        calls++;
+        return toolCallResult("ask_user", question) as never;
+      }
+    });
+    const bus = fakeEventBus();
+
+    await executeAgentTurn(
+      fakeRequestContext("set up an agent"),
+      bus.eventBus,
+      askingCfg(session, model, { openCalls })
+    );
+
+    // The call has no handler, so the loop stopped on it without being told to.
+    expect(calls).toBe(1);
+    expect(bus.finished).toHaveBeenCalledTimes(1);
+    expect(statusEventAt(bus, -1)).toMatchObject({
+      status: {
+        state: TaskState.TASK_STATE_INPUT_REQUIRED,
+        message: { messageId: "m1:hitl" }
+      }
+    });
+    const request = raisedRequest(bus);
+    expect(request).toMatchObject({
+      requestKind: "choice",
+      prompt: "Which environment?",
+      allowFreeform: true
+    });
+    expect(request?.options).toHaveLength(2);
+
+    // Kept under the id Slack answers with — minted, never the provider's call id.
+    const requestId = request?.requestId as string;
+    expect(requestId).not.toBe("tc1");
+    expect(openCalls.held.get(requestId)).toMatchObject({
+      toolCallId: "tc1",
+      toolName: "ask_user",
+      input: question
+    });
+
+    // No reply went out, and the question is what the turn is recorded as saying.
+    expect(publishedStates(bus)).not.toContain(TaskState.TASK_STATE_COMPLETED);
+    expect(session.messages.map((m) => m.role)).toEqual(["user", "assistant"]);
+    expect(sessionText(session.messages[1])).toBe("Which environment?");
+  });
+
+  it("keeps the question before raising it, so a fast answer finds it", async () => {
+    const session = new FakeSession();
+    const openCalls = new MemoryOpenCalls();
+    const model = new MockLanguageModelV4({
+      doGenerate: async () => toolCallResult("ask_user", question) as never
+    });
+    const bus = fakeEventBus();
+    let keptWhenRaised: number | undefined;
+    bus.publish.mockImplementation((e: unknown) => {
+      bus.published.push(e as never);
+      const event = e as PublishedEvent;
+      if (
+        event.kind === "statusUpdate" &&
+        event.data.status?.state === TaskState.TASK_STATE_INPUT_REQUIRED
+      ) {
+        keptWhenRaised = openCalls.held.size;
+      }
+    });
+
+    await executeAgentTurn(
+      fakeRequestContext("set up an agent"),
+      bus.eventBus,
+      askingCfg(session, model, { openCalls })
+    );
+
+    // The prompt reaches Slack the moment it is published, and a click that beat
+    // the record would resume nothing.
+    expect(keptWhenRaised).toBe(1);
+  });
+
+  it("lets a 🛑 out-rank a question: nothing is raised or kept", async () => {
+    const session = new FakeSession();
+    const openCalls = new MemoryOpenCalls();
+    const model = new MockLanguageModelV4({
+      doGenerate: async () => toolCallResult("ask_user", question) as never
+    });
+    const bus = fakeEventBus();
+
+    await executeAgentTurn(
+      fakeRequestContext("set up an agent"),
+      bus.eventBus,
+      askingCfg(session, model, {
+        openCalls,
+        isCanceled: async () => true
+      })
+    );
+
+    expect(publishedStates(bus).at(-1)).toBe(TaskState.TASK_STATE_CANCELED);
+    expect(publishedStates(bus)).not.toContain(
+      TaskState.TASK_STATE_INPUT_REQUIRED
+    );
+    expect(openCalls.held.size).toBe(0);
+  });
+
+  it("lets a question out-rank a final_reply in the same step", async () => {
+    const session = new FakeSession();
+    const openCalls = new MemoryOpenCalls();
+    const model = new MockLanguageModelV4({
+      doGenerate: async () =>
+        ({
+          ...toolCallResult("ask_user", question),
+          content: [
+            {
+              type: "tool-call",
+              toolCallId: "tc-ask",
+              toolName: "ask_user",
+              input: JSON.stringify(question)
+            },
+            {
+              type: "tool-call",
+              toolCallId: "fr1",
+              toolName: "final_reply",
+              input: JSON.stringify({ text: "Using dev." })
+            }
+          ]
+        }) as never
+    });
+    const bus = fakeEventBus();
+
+    await executeAgentTurn(
+      fakeRequestContext("set up an agent"),
+      bus.eventBus,
+      askingCfg(session, model, { openCalls })
+    );
+
+    // Asking is the more committal act: the answer it would have given is dropped.
+    expect(publishedStates(bus).at(-1)).toBe(
+      TaskState.TASK_STATE_INPUT_REQUIRED
+    );
+    expect(publishedText(bus)).not.toContain("Using dev.");
+    expect(openCalls.held.size).toBe(1);
+  });
+
+  it("keeps the calls that ran before the question", async () => {
+    const session = new FakeSession();
+    let n = 0;
+    const model = new MockLanguageModelV4({
+      doGenerate: async () =>
+        (n++ === 0
+          ? toolCallResult("work", {})
+          : toolCallResult("ask_user", question)) as never
+    });
+
+    await executeAgentTurn(
+      fakeRequestContext("set it up"),
+      fakeEventBus().eventBus,
+      askingCfg(session, model, { openCalls: new MemoryOpenCalls() })
+    );
+
+    expect(persistedActions(session).map((p) => p.type)).toEqual(["tool-work"]);
+    expect(sessionText(session.messages[1])).toBe("Which environment?");
+  });
+
+  it("records a second question in the same step as not asked", async () => {
+    const session = new FakeSession();
+    const openCalls = new MemoryOpenCalls();
+    const other = { question: "And which region?", options: [{ label: "eu" }] };
+    const model = new MockLanguageModelV4({
+      doGenerate: async () =>
+        ({
+          ...toolCallResult("ask_user", question),
+          content: [
+            {
+              type: "tool-call",
+              toolCallId: "tc-a",
+              toolName: "ask_user",
+              input: JSON.stringify(question)
+            },
+            {
+              type: "tool-call",
+              toolCallId: "tc-b",
+              toolName: "ask_user",
+              input: JSON.stringify(other)
+            }
+          ]
+        }) as never
+    });
+
+    await executeAgentTurn(
+      fakeRequestContext("set it up"),
+      fakeEventBus().eventBus,
+      askingCfg(session, model, { openCalls })
+    );
+
+    // One call is open per turn. The other reached nobody, and history says so.
+    expect([...openCalls.held.values()].map((p) => p.toolCallId)).toEqual([
+      "tc-a"
+    ]);
+    expect(persistedActions(session)).toEqual([
+      expect.objectContaining({
+        type: "tool-ask_user",
+        toolCallId: "tc-b",
+        state: "output-error",
+        errorText: NOT_ASKED_NOTE
+      })
+    ]);
+  });
+
+  it("fails the turn when the agent has nowhere to keep the question", async () => {
+    const session = new FakeSession();
+    const model = new MockLanguageModelV4({
+      doGenerate: async () => toolCallResult("ask_user", question) as never
+    });
+    const bus = fakeEventBus();
+
+    await executeAgentTurn(
+      fakeRequestContext("set it up"),
+      bus.eventBus,
+      askingCfg(session, model)
+    );
+
+    // A question nobody could ever answer is a wiring bug, not an outcome to park on.
+    expect(publishedStates(bus).at(-1)).toBe(TaskState.TASK_STATE_FAILED);
+    expect(publishedStates(bus)).not.toContain(
+      TaskState.TASK_STATE_INPUT_REQUIRED
+    );
+  });
+
+  it("resumes an answer as the call's result, not as a user turn", async () => {
+    const session = new FakeSession();
+    session.messages.push(
+      userSessionMessage("set up an agent"),
+      assistantSessionMessage("Which environment?")
+    );
+    const openCalls = new MemoryOpenCalls();
+    await openCalls.put(heldQuestion());
+    const seen: string[] = [];
+    const model = new MockLanguageModelV4({
+      doGenerate: async (options) => {
+        seen.push(JSON.stringify(options.prompt.at(-1)));
+        return finalReplyResult("Using prod.") as never;
+      }
+    });
+    const bus = fakeEventBus();
+
+    await executeAgentTurn(
+      resumeContext(answered("prod"), { user: { displayName: "Grace" } }),
+      bus.eventBus,
+      askingCfg(session, model, { openCalls })
+    );
+
+    expect(publishedStates(bus).at(-1)).toBe(TaskState.TASK_STATE_COMPLETED);
+    expect(publishedText(bus)).toContain("Using prod.");
+    // The model picks up where it left off: its prompt ends in the call's result.
+    expect(seen[0]).toContain('"role":"tool"');
+    expect(seen[0]).toContain('"answer":"prod"');
+    expect(seen[0]).toContain('"answeredBy":"Grace"');
+    // No user turn was added for the answer, and it was settled, not copied.
+    expect(session.messages.map((m) => m.role)).toEqual([
+      "user",
+      "assistant",
+      "assistant",
+      "assistant"
+    ]);
+    expect(openCalls.held.size).toBe(0);
+    // The answered call is recorded as a message of its own, ahead of the reply.
+    expect(session.messages[2].parts).toEqual([
+      expect.objectContaining({
+        type: "tool-ask_user",
+        toolCallId: "tc-ask",
+        state: "output-available",
+        output: { answer: "prod", answeredBy: "Grace" }
+      })
+    ]);
+    expect(sessionText(session.messages[3])).toBe("Using prod.");
+  });
+
+  it("resumes a question nobody answered as unanswered", async () => {
+    const session = new FakeSession();
+    session.messages.push(assistantSessionMessage("Which environment?"));
+    const openCalls = new MemoryOpenCalls();
+    await openCalls.put(heldQuestion());
+    const seen: string[] = [];
+    const model = new MockLanguageModelV4({
+      doGenerate: async (options) => {
+        seen.push(JSON.stringify(options.prompt.at(-1)));
+        return finalReplyResult("No answer came back, so I left it.") as never;
+      }
+    });
+
+    await executeAgentTurn(
+      resumeContext(buildHitlTimeoutParts("req-1")),
+      fakeEventBus().eventBus,
+      askingCfg(session, model, { openCalls })
+    );
+
+    expect(seen[0]).toContain('"answered":false');
+    expect(session.messages[1].parts[0]).toMatchObject({
+      type: "tool-ask_user",
+      state: "output-available",
+      output: { answered: false }
+    });
+  });
+
+  it("withholds ask_user from the turn a timeout resumed", async () => {
+    // Nobody answered for a week. A turn free to ask again would park on a fresh
+    // deadline and time out again, forever — so this one can only end.
+    const session = new FakeSession();
+    const openCalls = new MemoryOpenCalls();
+    await openCalls.put(heldQuestion());
+    const offered: string[][] = [];
+    const model = new MockLanguageModelV4({
+      doGenerate: async (options) => {
+        offered.push((options.tools ?? []).map((t) => t.name));
+        return finalReplyResult("No answer came back, so I left it.") as never;
+      }
+    });
+
+    await executeAgentTurn(
+      resumeContext(buildHitlTimeoutParts("req-1")),
+      fakeEventBus().eventBus,
+      askingCfg(session, model, { openCalls })
+    );
+
+    expect(offered[0]).not.toContain("ask_user");
+    // Only the question is withheld: the ending still has the turn's work to report.
+    expect(offered[0]).toEqual(expect.arrayContaining(["final_reply", "work"]));
+  });
+
+  it("leaves ask_user on the table when a human did answer", async () => {
+    // The human is present and engaged; a follow-up question costs them one click,
+    // not another week of silence.
+    const session = new FakeSession();
+    const openCalls = new MemoryOpenCalls();
+    await openCalls.put(heldQuestion());
+    const offered: string[][] = [];
+    const model = new MockLanguageModelV4({
+      doGenerate: async (options) => {
+        offered.push((options.tools ?? []).map((t) => t.name));
+        return finalReplyResult("Using prod.") as never;
+      }
+    });
+
+    await executeAgentTurn(
+      resumeContext(answered("prod")),
+      fakeEventBus().eventBus,
+      askingCfg(session, model, { openCalls })
+    );
+
+    expect(offered[0]).toContain("ask_user");
+  });
+
+  it("treats an answer with no open call as an ordinary message", async () => {
+    // A question asked before open calls existed has nothing to take.
+    const session = new FakeSession();
+    const seen: string[] = [];
+    const model = new MockLanguageModelV4({
+      doGenerate: async (options) => {
+        seen.push(JSON.stringify(options.prompt.at(-1)));
+        return finalReplyResult("Using prod.") as never;
+      }
+    });
+
+    await executeAgentTurn(
+      resumeContext(answered("prod")),
+      fakeEventBus().eventBus,
+      askingCfg(session, model, { openCalls: new MemoryOpenCalls() })
+    );
+
+    expect(seen[0]).toContain('"role":"user"');
+    expect(session.messages.map((m) => m.role)).toEqual(["user", "assistant"]);
+    expect(sessionText(session.messages[0])).toBe("prod");
+  });
+
+  it("settles a call once: a second delivery is an ordinary message", async () => {
+    const session = new FakeSession();
+    session.messages.push(assistantSessionMessage("Which environment?"));
+    const openCalls = new MemoryOpenCalls();
+    await openCalls.put(heldQuestion());
+    const model = new MockLanguageModelV4({
+      doGenerate: async () => finalReplyResult("Using prod.") as never
+    });
+
+    for (let i = 0; i < 2; i++) {
+      await executeAgentTurn(
+        resumeContext(answered("prod")),
+        fakeEventBus().eventBus,
+        askingCfg(session, model, { openCalls })
+      );
+    }
+
+    const answers = session.messages
+      .flatMap((m) => m.parts)
+      .filter((p) => p.type === "tool-ask_user");
+    expect(answers).toHaveLength(1);
+    expect(
+      session.messages.filter((m) => m.role === "user").map(sessionText)
+    ).toEqual(["prod"]);
+  });
+
+  it("records the answer before the model runs, so no ending can lose it", async () => {
+    const session = new FakeSession();
+    session.messages.push(assistantSessionMessage("Which environment?"));
+    const openCalls = new MemoryOpenCalls();
+    await openCalls.put(heldQuestion());
+    let recordedBeforeModel = false;
+    const model = new MockLanguageModelV4({
+      doGenerate: async () => {
+        recordedBeforeModel = session.messages.some((m) =>
+          m.parts.some((p) => p.type === "tool-ask_user")
+        );
+        // An ending that writes nothing on its way out: the turn fails outright.
+        throw new Error("model exploded");
+      }
+    });
+    const bus = fakeEventBus();
+
+    await executeAgentTurn(
+      resumeContext(answered("prod")),
+      bus.eventBus,
+      askingCfg(session, model, { openCalls })
+    );
+
+    // The gatekeeper has marked this answer as given and will not send it again,
+    // so it has to be in history before anything can end the turn.
+    expect(recordedBeforeModel).toBe(true);
+    expect(publishedStates(bus).at(-1)).toBe(TaskState.TASK_STATE_FAILED);
+    expect(session.messages[1].parts[0]).toMatchObject({
+      type: "tool-ask_user",
+      output: { answer: "prod" }
+    });
   });
 });
 

@@ -4,6 +4,7 @@ import { authorize, type UserAuthContext } from "@/auth";
 import { HITL_REQUEST_TYPE, type HitlRequest } from "@/a2a/hitl";
 import type { CardSigningPin, VerifiedAgentCard } from "@/a2a/card-verify";
 import type { GatedAction } from "./approvals";
+import { askUserTool } from "@/agents/shared/ask-user";
 import {
   type AgentRow,
   type NotifyOn,
@@ -86,10 +87,10 @@ export interface AdminToolDeps {
     name: string
   ) => Promise<{ key: string; contentType: string }>;
   /**
-   * Pause the current turn to ask the human (rendered as an interactive Slack
-   * prompt; the turn ends and resumes when they answer). Injected from the loop's
-   * turn controls. Absent ⇒ `ask_user` and destructive-action approval are
-   * unavailable (they report so at runtime rather than acting without a human).
+   * Pause the current turn for a destructive-action approval (rendered as an
+   * interactive Slack prompt; the turn ends and resumes when they answer). Injected
+   * from the loop's turn controls. Absent ⇒ approval is unavailable, and the gated
+   * tools report so at runtime rather than acting without a human.
    */
   park?: (request: HitlRequest) => void;
   /**
@@ -241,42 +242,10 @@ function ensureDomainsOrgAdmin(deps: AdminToolDeps): ToolResult | null {
 }
 
 // ---------------------------------------------------------------------------
-// Human-in-the-loop helpers — pause the turn for a human answer / approval.
+// Human-in-the-loop helper — pause the turn for a destructive-action approval.
+// (`ask_user` has no handler here: it is a control tool the turn itself pauses
+// on — see `shared/ask-user.ts`.)
 // ---------------------------------------------------------------------------
-
-export interface AskUserArgs {
-  question: string;
-  options: { label: string; description?: string }[];
-  allowFreeform?: boolean;
-}
-
-/**
- * Ask the human a clarifying question with a few tappable choices (plus an
- * optional free-text "Other"). Parks the turn; the answer arrives as the next
- * user turn, so nothing is stored — the model just continues the conversation.
- */
-export async function askUser(
-  deps: AdminToolDeps,
-  args: AskUserArgs
-): Promise<ToolResult> {
-  if (!deps.park) {
-    return { error: "Asking the user is unavailable in this context." };
-  }
-  deps.park({
-    type: HITL_REQUEST_TYPE,
-    requestId: crypto.randomUUID(),
-    requestKind: "choice",
-    prompt: args.question,
-    options: args.options.map((o, i) => ({
-      id: `opt_${i}`,
-      label: o.label,
-      description: o.description
-    })),
-    display: "buttons",
-    allowFreeform: args.allowFreeform ?? true
-  });
-  return { status: "awaiting_user", question: args.question };
-}
 
 /**
  * Raise an Approve/Reject prompt for a destructive action and pause the turn.
@@ -1066,35 +1035,9 @@ export function buildAdminTools(deps: AdminToolDeps): ToolSet {
       }),
       execute: (args) => selfSetDisplayName(deps, args)
     }),
-    ask_user: tool({
-      description:
-        "Ask the human a clarifying question when a detail is ambiguous, instead " +
-        "of guessing. Renders in Slack as tappable choices and pauses the " +
-        "conversation until they answer; their answer then continues this task. " +
-        "Give a few concrete options and keep `allowFreeform` on so they can also " +
-        "type their own answer.",
-      inputSchema: z.object({
-        question: z.string().describe("The question to ask the human"),
-        options: z
-          .array(
-            z.object({
-              label: z.string().describe("A short, tappable choice"),
-              description: z
-                .string()
-                .optional()
-                .describe("Optional one-line clarification of this choice")
-            })
-          )
-          .min(1)
-          .max(5)
-          .describe("The preset choices to offer (1–5)"),
-        allowFreeform: z
-          .boolean()
-          .optional()
-          .describe("Also offer a free-text 'Other' answer (default true)")
-      }),
-      execute: (args) => askUser(deps, args)
-    })
+    // A control tool with no handler: the turn pauses on the call itself and keeps
+    // it until the human answers — see `shared/ask-user.ts`.
+    ask_user: askUserTool
   };
 
   if (deps.wsId === ORG_WORKSPACE_ID) {

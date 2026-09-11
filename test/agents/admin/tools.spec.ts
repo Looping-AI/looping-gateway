@@ -11,7 +11,6 @@ import {
   agentsRegenerateAvatar,
   agentsDelete,
   agentsRepin,
-  askUser,
   workspaceRead,
   workspaceCreate,
   agentsDomainsList,
@@ -273,32 +272,6 @@ describe("admin tools — human-in-the-loop", () => {
     };
     return { d, parked, stored };
   }
-
-  it("ask_user parks a choice prompt with a freeform option and stores nothing", async () => {
-    const { d, parked, stored } = hitlDeps(1, ctx({ adminWorkspaces: [1] }));
-    const res = await askUser(d, {
-      question: "Which environment?",
-      options: [{ label: "dev" }, { label: "prod" }]
-    });
-
-    expect(res).toMatchObject({ status: "awaiting_user" });
-    expect(parked).toHaveLength(1);
-    expect(parked[0]).toMatchObject({
-      requestKind: "choice",
-      prompt: "Which environment?",
-      allowFreeform: true
-    });
-    expect(parked[0].options).toHaveLength(2);
-    expect(stored).toHaveLength(0);
-  });
-
-  it("ask_user reports unavailable when the turn can't be parked", async () => {
-    const res = await askUser(deps(1, ctx({ adminWorkspaces: [1] })), {
-      question: "hi?",
-      options: [{ label: "a" }]
-    });
-    expect(res).toHaveProperty("error");
-  });
 
   it("gates agents_delete behind an approval instead of deleting", async () => {
     const wsId = await freshWsId("tools-ws-gate");
@@ -784,6 +757,12 @@ describe("admin tools — buildAdminTools availability", () => {
     "agents_domains_add",
     "agents_domains_remove"
   ];
+
+  it("declares ask_user with no handler, so the turn pauses on the call itself", () => {
+    const tools = buildAdminTools(deps(3, ctx({ adminWorkspaces: [3] })));
+    expect(tools.ask_user).toBeDefined();
+    expect(tools.ask_user.execute).toBeUndefined();
+  });
 
   it("exposes the org-only tools only on the org instance", () => {
     const orgTools = buildAdminTools(deps(ORG_WORKSPACE_ID, orgAdmin));
