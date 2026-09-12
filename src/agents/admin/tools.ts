@@ -1,9 +1,7 @@
-import { tool, type ToolSet } from "ai";
+import { tool, type ToolApprovalConfiguration, type ToolSet } from "ai";
 import { z } from "zod";
 import { authorize, type UserAuthContext } from "@/auth";
-import { HITL_REQUEST_TYPE, type HitlRequest } from "@/a2a/hitl";
 import type { CardSigningPin, VerifiedAgentCard } from "@/a2a/card-verify";
-import type { GatedAction } from "./approvals";
 import { askUserTool } from "@/agents/shared/ask-user";
 import {
   type AgentRow,
@@ -14,6 +12,7 @@ import {
   listChannelsForAgents,
   registerAgent,
   updateAgent,
+  unregisterAgent,
   attachAgentChannel,
   detachAgentChannel
 } from "@/db/models/agents";
@@ -86,22 +85,6 @@ export interface AdminToolDeps {
     img: GeneratedImage,
     name: string
   ) => Promise<{ key: string; contentType: string }>;
-  /**
-   * Pause the current turn for a destructive-action approval (rendered as an
-   * interactive Slack prompt; the turn ends and resumes when they answer). Injected
-   * from the loop's turn controls. Absent ⇒ approval is unavailable, and the gated
-   * tools report so at runtime rather than acting without a human.
-   */
-  park?: (request: HitlRequest) => void;
-  /**
-   * Persist a destructive action behind its approval prompt, keyed by the HITL
-   * `requestId`, so the resumed turn can carry it out once approved. DO-storage-
-   * backed; injected by {@link AdminAgent}.
-   */
-  storePendingAction?: (
-    requestId: string,
-    action: GatedAction
-  ) => Promise<void>;
 }
 
 /** Verify a remote agent endpoint + signed card; resolves to pin and card-derived metadata. */
@@ -239,36 +222,6 @@ function ensureDomainsOrgAdmin(deps: AdminToolDeps): ToolResult | null {
   )
     return deny("remote agent domain management requires org admin");
   return null;
-}
-
-// ---------------------------------------------------------------------------
-// Human-in-the-loop helper — pause the turn for a destructive-action approval.
-// (`ask_user` has no handler here: it is a control tool the turn itself pauses
-// on — see `shared/ask-user.ts`.)
-// ---------------------------------------------------------------------------
-
-/**
- * Raise an Approve/Reject prompt for a destructive action and pause the turn.
- * The action is persisted keyed by the HITL `requestId`; the resumed turn carries
- * it out (via `runGatedAction`) only if the human approves. Replaces executing
- * the action inline — a tool's handler can never block awaiting the human.
- */
-async function requestApproval(
-  deps: AdminToolDeps,
-  input: { prompt: string; action: GatedAction }
-): Promise<ToolResult> {
-  if (!deps.park || !deps.storePendingAction) {
-    return { error: "Approval is unavailable in this context." };
-  }
-  const requestId = crypto.randomUUID();
-  await deps.storePendingAction(requestId, input.action);
-  deps.park({
-    type: HITL_REQUEST_TYPE,
-    requestId,
-    requestKind: "approval",
-    prompt: input.prompt
-  });
-  return { status: "awaiting_approval", prompt: input.prompt };
 }
 
 // ---------------------------------------------------------------------------
@@ -415,8 +368,9 @@ export async function agentsUpdate(
         error:
           `New endpoint for "${args.name}" is signed by a different key than the ` +
           `one pinned at registration. If the agent's signing identity changed ` +
-          `intentionally, use agents_repin — it re-reads the card and replaces the ` +
-          `pin behind a human approval, without unregistering the agent.`
+          `intentionally, call agents_repin to see the key the card now advertises, ` +
+          `then agents_repin_apply to write it behind a human approval — without ` +
+          `unregistering the agent.`
       };
     }
   }
@@ -520,6 +474,15 @@ export async function agentsRegenerateAvatar(
 
 export type AgentsDeleteArgs = { name: string };
 
+/**
+ * Delete a custom agent and its channel mappings.
+ *
+ * Destructive and irreversible, so it never runs on the model's say-so alone: the
+ * approval policy in {@link adminToolApproval} stops the call, a human approves it
+ * in Slack, and the SDK then carries out *that* call — re-validated and re-authorized
+ * against whoever approved it. The checks here run either way, because a policy is
+ * a gate and not a substitute for a tool knowing what it is allowed to do.
+ */
 export async function agentsDelete(
   deps: AdminToolDeps,
   args: AgentsDeleteArgs
@@ -529,20 +492,16 @@ export async function agentsDelete(
 
   const target = await requireWritableAgent(deps, args.name);
   if ("error" in target) return target;
-  // Destructive + irreversible: gate behind an explicit human approval rather
-  // than deleting inline. The actual delete runs on the resumed turn once the
-  // user clicks Approve (see runGatedAction).
-  return requestApproval(deps, {
-    prompt: `Delete agent *${args.name}*? This permanently removes it and its channel mappings, and cannot be undone.`,
-    action: { kind: "unregister_agent", name: args.name, wsId: deps.wsId }
-  });
+  await unregisterAgent(args.name);
+  return { ok: true, deleted: args.name };
 }
 
 export type AgentsRepinArgs = { name: string };
 
 /**
- * Re-read a custom agent's AgentCard and replace the pinned signing identity with
- * the one it now advertises.
+ * Re-read a custom agent's AgentCard and report the signing identity it now
+ * advertises, beside the one currently pinned. This call only reads; the write is
+ * {@link agentsRepinApply}.
  *
  * The deliberate hole in Trust-On-First-Use. TOFU is what makes a validly-signed
  * token from *any other* key a rejection rather than a login, so every other path
@@ -553,10 +512,12 @@ export type AgentsRepinArgs = { name: string };
  * it again — which drops its channel mappings and its avatar to fix a single
  * column.
  *
- * So the trust decision is handed to the one party that can actually make it. The
- * new key is verified, named in the prompt beside the old one, and written only
- * once a workspace admin approves it in Slack — the same gate `agents_delete` uses,
- * for the same reason.
+ * So the trust decision is handed to the one party that can actually make it, over
+ * two calls: this one reports the advertised key beside the pinned one, and
+ * {@link agentsRepinApply} writes the key it reported, pausing for a workspace
+ * admin's approval in Slack first — the same gate `agents_delete` uses, for the
+ * same reason. The split is what lets the approval name the exact key being
+ * written, rather than whatever the card says by the time anyone clicks.
  *
  * Nothing but the pin moves: the card is re-read at the endpoint and tenant already
  * on the row, so this cannot be used to re-point an agent somewhere else. A card
@@ -586,21 +547,163 @@ export async function agentsRepin(
   if (jku === target.cardSigningJku && kid === target.cardSigningKid) {
     return {
       ok: true,
+      changed: false,
       note:
         `"${args.name}" is already pinned to the key its card advertises ` +
         `(kid \`${kid}\`). Nothing to change.`
     };
   }
 
-  return requestApproval(deps, {
-    prompt:
-      `Re-pin agent *${args.name}* to a new signing key?\n` +
-      `Pinned: \`${target.cardSigningKid ?? "(none)"}\`\n` +
-      `Card now says: \`${kid}\`\n` +
-      `Approve only if you rotated this agent's signing key yourself — ` +
-      `re-pinning is what makes the gatekeeper trust it.`,
-    action: { kind: "repin_agent", name: args.name, wsId: deps.wsId, jku, kid }
+  return {
+    ok: true,
+    changed: true,
+    pinned: { jku: target.cardSigningJku, kid: target.cardSigningKid },
+    advertised: { jku, kid },
+    note:
+      `The card for "${args.name}" now advertises a different signing key. ` +
+      `To re-pin it, call agents_repin_apply with exactly this advertised jku ` +
+      `and kid — that call pauses for the user's approval before anything is ` +
+      `written.`
+  };
+}
+
+export type AgentsRepinApplyArgs = { name: string; jku: string; kid: string };
+
+/**
+ * Write the signing identity {@link agentsRepin} reported, once a human approves it.
+ *
+ * The key is taken from the *input* rather than re-derived, because the input is
+ * what the approval prompt put on screen — approving a re-pin means approving that
+ * key, not whatever the card happens to say when the click arrives. So the live card
+ * is read again and must still name it; a key that moved on in between is a
+ * different decision than the one that was made, and is refused rather than written.
+ */
+export async function agentsRepinApply(
+  deps: AdminToolDeps,
+  args: AgentsRepinApplyArgs
+): Promise<ToolResult> {
+  const denied = ensureAgentAdmin(deps);
+  if (denied) return denied;
+
+  const target = await requireWritableAgent(deps, args.name);
+  if ("error" in target) return target;
+
+  let verified: VerifiedAgentCard;
+  try {
+    verified = await deps.verifyEndpoint(target.a2aEndpoint, target.tenantId);
+  } catch (err) {
+    return {
+      error: `Could not re-read the card for "${args.name}": ${(err as Error).message}`
+    };
+  }
+
+  if (
+    verified.pin.cardSigningJku !== args.jku ||
+    verified.pin.cardSigningKid !== args.kid
+  ) {
+    return {
+      error:
+        `The signing key for "${args.name}" changed again since the approval ` +
+        `was raised, so nothing was re-pinned — call agents_repin again to ` +
+        `review the current key.`
+    };
+  }
+
+  await updateAgent(args.name, {
+    cardSigningJku: args.jku,
+    cardSigningKid: args.kid
   });
+  return {
+    ok: true,
+    note: `Re-pinned agent "${args.name}" to signing key "${args.kid}".`
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Which admin calls need a human's Approve before they run.
+//
+// The policy is resolved per call by the SDK, and — this is the point — resolved
+// *again* when the approved call is replayed on the resuming turn. `deps` is built
+// per turn from the caller, so on that second pass the caller is whoever clicked
+// Approve. A non-admin's approval is refused there, by the same function that
+// raised the prompt, rather than by a second copy of the rule written out by hand.
+// ---------------------------------------------------------------------------
+
+/** The reason a gate gave, as the policy's own refusal sentence. */
+function refusal(result: ToolResult): string {
+  return String(result.error);
+}
+
+/** Per-tool approval policy for one admin turn. See the note above. */
+export function adminToolApproval(
+  deps: AdminToolDeps
+): ToolApprovalConfiguration<ToolSet, unknown> {
+  return {
+    agents_delete: async (input: unknown) => {
+      const { name } = input as AgentsDeleteArgs;
+      const denied = ensureAgentAdmin(deps);
+      if (denied) return { type: "denied", reason: refusal(denied) };
+      const target = await requireWritableAgent(deps, name);
+      if ("error" in target) return { type: "denied", reason: refusal(target) };
+      return {
+        type: "user-approval",
+        reason:
+          `Delete agent *${name}*? This permanently removes it and its ` +
+          `channel mappings, and cannot be undone.`
+      };
+    },
+
+    agents_repin_apply: async (input: unknown) => {
+      const { name, jku, kid } = input as AgentsRepinApplyArgs;
+      const denied = ensureAgentAdmin(deps);
+      if (denied) return { type: "denied", reason: refusal(denied) };
+      const target = await requireWritableAgent(deps, name);
+      if ("error" in target) return { type: "denied", reason: refusal(target) };
+
+      // A no-op must never spend a human's attention on nothing.
+      if (target.cardSigningJku === jku && target.cardSigningKid === kid) {
+        return {
+          type: "denied",
+          reason: `"${name}" is already pinned to that key — nothing to change.`
+        };
+      }
+
+      let verified: VerifiedAgentCard;
+      try {
+        verified = await deps.verifyEndpoint(
+          target.a2aEndpoint,
+          target.tenantId
+        );
+      } catch (err) {
+        return {
+          type: "denied",
+          reason: `Could not re-read the card for "${name}": ${(err as Error).message}`
+        };
+      }
+      if (
+        verified.pin.cardSigningJku !== jku ||
+        verified.pin.cardSigningKid !== kid
+      ) {
+        return {
+          type: "denied",
+          reason:
+            `The card for "${name}" advertises kid ` +
+            `\`${verified.pin.cardSigningKid}\`, not the one this call names — ` +
+            `call agents_repin again to review it.`
+        };
+      }
+
+      return {
+        type: "user-approval",
+        reason:
+          `Re-pin agent *${name}* to a new signing key?\n` +
+          `Pinned: \`${target.cardSigningKid ?? "(none)"}\`\n` +
+          `Card now says: \`${kid}\`\n` +
+          `Approve only if you rotated this agent's signing key yourself — ` +
+          `re-pinning is what makes the gatekeeper trust it.`
+      };
+    }
+  };
 }
 
 export async function workspaceRead(
@@ -986,21 +1089,41 @@ export function buildAdminTools(deps: AdminToolDeps): ToolSet {
     }),
     agents_delete: tool({
       description:
-        "Delete a custom agent. Destructive — pauses for an explicit human " +
-        "approval in Slack before removing the agent and its channel mappings.",
+        "Delete a custom agent and its channel mappings. Destructive and " +
+        "irreversible — the conversation pauses on this call for an explicit " +
+        "human approval in Slack, and the agent is removed only if approved. " +
+        "Call it once; do not ask for confirmation yourself.",
       inputSchema: z.object({ name: z.string() }),
       execute: (args) => agentsDelete(deps, args)
     }),
     agents_repin: tool({
       description:
-        "Re-fetch a custom agent's AgentCard and re-pin the signing key it now " +
-        "advertises. Use when an agent's callbacks fail with \"callback token key " +
-        "does not match the agent's pinned signing key\" because its signing key " +
-        "was rotated. Nothing but the pin changes — the endpoint, tenant, channels " +
-        "and avatar are untouched. Pauses for a human approval when the key really " +
-        "has changed.",
+        "Re-fetch a custom agent's AgentCard and report the signing key it now " +
+        "advertises beside the pinned one. Use when an agent's callbacks fail " +
+        "with \"callback token key does not match the agent's pinned signing " +
+        'key" because its signing key was rotated. This only reads: when the ' +
+        "key has changed, pass the advertised jku and kid it reports to " +
+        "agents_repin_apply to write them.",
       inputSchema: z.object({ name: z.string() }),
       execute: (args) => agentsRepin(deps, args)
+    }),
+    agents_repin_apply: tool({
+      description:
+        "Write the signing key agents_repin reported, replacing the pinned one. " +
+        "Pass the advertised jku and kid from that call verbatim. Nothing but " +
+        "the pin changes — the endpoint, tenant, channels and avatar are " +
+        "untouched. The conversation pauses on this call for a human approval, " +
+        "and the key is written only if approved.",
+      inputSchema: z.object({
+        name: z.string(),
+        jku: z
+          .string()
+          .describe("The advertised jku, exactly as agents_repin reported it"),
+        kid: z
+          .string()
+          .describe("The advertised kid, exactly as agents_repin reported it")
+      }),
+      execute: (args) => agentsRepinApply(deps, args)
     }),
     workspace_read: tool({
       description:

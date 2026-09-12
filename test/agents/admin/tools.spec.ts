@@ -1,8 +1,7 @@
 import { describe, it, expect } from "vitest";
 import type { UserAuthContext } from "@/auth";
-import type { HitlRequest } from "@/a2a/hitl";
-import type { GatedAction } from "@/agents/admin/approvals";
 import {
+  adminToolApproval,
   agentsRead,
   agentsCreate,
   agentsUpdate,
@@ -11,6 +10,7 @@ import {
   agentsRegenerateAvatar,
   agentsDelete,
   agentsRepin,
+  agentsRepinApply,
   workspaceRead,
   workspaceCreate,
   agentsDomainsList,
@@ -258,176 +258,331 @@ describe("admin tools — agents_create / agents_read", () => {
   });
 });
 
-describe("admin tools — human-in-the-loop", () => {
-  /** deps that capture parked prompts + stored pending actions. */
-  function hitlDeps(wsId: number, c: UserAuthContext | null) {
-    const parked: HitlRequest[] = [];
-    const stored: { requestId: string; action: GatedAction }[] = [];
-    const d: AdminToolDeps = {
-      ...deps(wsId, c),
-      park: (req) => parked.push(req),
-      storePendingAction: async (requestId, action) => {
-        stored.push({ requestId, action });
-      }
-    };
-    return { d, parked, stored };
-  }
-
-  it("gates agents_delete behind an approval instead of deleting", async () => {
-    const wsId = await freshWsId("tools-ws-gate");
-    const { d, parked, stored } = hitlDeps(
-      wsId,
-      ctx({ adminWorkspaces: [wsId] })
-    );
-    await agentsCreate(d, {
-      name: "gate-agent",
-      a2aEndpoint: "https://example.com/gate-agent",
-      tenantId: "main",
-      notifyOn: "mention"
-    });
-
-    const res = await agentsDelete(d, { name: "gate-agent" });
-
-    expect(res).toMatchObject({ status: "awaiting_approval" });
-    // Not deleted yet — it awaits the human's approval.
-    expect(await getAgent("gate-agent")).not.toBeNull();
-    expect(parked).toHaveLength(1);
-    expect(parked[0].requestKind).toBe("approval");
-    // The pending action is stored under the same id the prompt carries.
-    expect(stored).toHaveLength(1);
-    expect(stored[0].action).toEqual({
-      kind: "unregister_agent",
-      name: "gate-agent",
-      wsId
-    });
-    expect(stored[0].requestId).toBe(parked[0].requestId);
-  });
-
-  it("still denies agents_delete for a reserved name before parking", async () => {
-    const { d, parked } = hitlDeps(ORG_WORKSPACE_ID, orgAdmin);
-    expect(await agentsDelete(d, { name: "admin" })).toHaveProperty("error");
-    expect(parked).toHaveLength(0);
-  });
-
-  /** hitlDeps whose verifier reports whatever `kid` the card is meant to name. */
-  function repinDeps(wsId: number, c: UserAuthContext | null, kid: string) {
-    const base = hitlDeps(wsId, c);
+describe("admin tools — destructive calls and their approval policy", () => {
+  /** deps whose verifier reports whatever `kid` the card is meant to name. */
+  function depsWithKid(
+    wsId: number,
+    c: UserAuthContext | null,
+    kid: string
+  ): AdminToolDeps {
     return {
-      ...base,
-      d: {
-        ...base.d,
-        verifyEndpoint: async (url: string) => ({
-          pin: {
-            cardSigningJku: `${new URL(url).origin}/.well-known/jwks.json`,
-            cardSigningKid: kid
-          },
-          displayName: "Stubbed Agent",
-          endpoint: url
-        })
-      } satisfies AdminToolDeps
+      ...deps(wsId, c),
+      verifyEndpoint: async (url: string) => ({
+        pin: {
+          cardSigningJku: `${new URL(url).origin}/.well-known/jwks.json`,
+          cardSigningKid: kid
+        },
+        displayName: "Stubbed Agent",
+        endpoint: url
+      })
     };
   }
 
-  it("agents_repin is a no-op when the card still names the pinned key", async () => {
-    const wsId = await freshWsId("tools-ws-repin-same");
-    // `deps` and `repinDeps` agree on the kid, so registration pins what the
-    // card will report on the re-read.
-    const { d, parked, stored } = repinDeps(
-      wsId,
-      ctx({ adminWorkspaces: [wsId] }),
-      "test-kid"
-    );
+  /** One gated tool's policy entry, as something a spec can call directly. */
+  function policyFor(d: AdminToolDeps, name: string) {
+    const policy = adminToolApproval(d) as unknown as Record<
+      string,
+      (
+        input: unknown,
+        options: unknown
+      ) => Promise<{ type: string; reason?: string }>
+    >;
+    return (input: unknown) => policy[name](input, {});
+  }
+
+  /** A custom agent, pinned to the default verifier's "test-kid". */
+  async function registerCustom(d: AdminToolDeps, name: string): Promise<void> {
     await agentsCreate(d, {
-      name: "repin-same",
-      a2aEndpoint: "https://example.com/repin-same",
+      name,
+      a2aEndpoint: `https://example.com/${name}`,
       tenantId: "main",
       notifyOn: "mention"
     });
+  }
 
-    const res = await agentsRepin(d, { name: "repin-same" });
+  const JKU = "https://example.com/.well-known/jwks.json";
 
-    expect(res).toMatchObject({ ok: true });
-    expect(res.note).toContain("already pinned");
-    // A no-op must not spend a human's approval.
-    expect(parked).toHaveLength(0);
-    expect(stored).toHaveLength(0);
+  // --- agents_delete acts for itself ---------------------------------------
+
+  it("agents_delete removes the agent", async () => {
+    const wsId = await freshWsId("del-ok");
+    const d = deps(wsId, ctx({ adminWorkspaces: [wsId] }));
+    await registerCustom(d, "del-ok");
+
+    expect(await agentsDelete(d, { name: "del-ok" })).toMatchObject({
+      ok: true,
+      deleted: "del-ok"
+    });
+    expect(await getAgent("del-ok")).toBeNull();
   });
 
-  it("agents_repin gates a changed key behind an approval and names both", async () => {
-    const wsId = await freshWsId("tools-ws-repin-new");
-    const admin = ctx({ adminWorkspaces: [wsId] });
-    // Registered against the default verifier ("test-kid")…
-    const registered = hitlDeps(wsId, admin);
-    await agentsCreate(registered.d, {
-      name: "repin-new",
-      a2aEndpoint: "https://example.com/repin-new",
-      tenantId: "main",
-      notifyOn: "mention"
+  it("agents_delete refuses a non-admin, and the agent survives", async () => {
+    // The policy gates the call, but the tool does not lean on it having run: an
+    // execute that trusted its caller would be one wiring mistake from deleting.
+    const wsId = await freshWsId("del-unauth");
+    await registerCustom(
+      deps(wsId, ctx({ adminWorkspaces: [wsId] })),
+      "del-unauth"
+    );
+
+    const d = deps(wsId, ctx({ adminWorkspaces: [wsId + 999] }));
+    expect(await agentsDelete(d, { name: "del-unauth" })).toHaveProperty(
+      "error"
+    );
+    expect(await getAgent("del-unauth")).not.toBeNull();
+  });
+
+  it("agents_delete refuses a built-in agent", async () => {
+    expect(
+      await agentsDelete(deps(ORG_WORKSPACE_ID, orgAdmin), { name: "admin" })
+    ).toHaveProperty("error");
+  });
+
+  // --- and the policy decides who may ask -----------------------------------
+
+  it("the delete policy asks a human, naming the agent", async () => {
+    const wsId = await freshWsId("del-policy");
+    const d = deps(wsId, ctx({ adminWorkspaces: [wsId] }));
+    await registerCustom(d, "del-policy");
+
+    const status = await policyFor(d, "agents_delete")({ name: "del-policy" });
+
+    expect(status.type).toBe("user-approval");
+    // The prompt is the whole basis for the decision, so it has to name the target.
+    expect(status.reason).toContain("del-policy");
+    expect(status.reason).toContain("cannot be undone");
+  });
+
+  it("the delete policy denies a non-admin, with no prompt raised", async () => {
+    // Denied, not user-approval: nobody should be asked to approve a call that
+    // would be refused whatever they answered.
+    const wsId = await freshWsId("del-policy-unauth");
+    await registerCustom(
+      deps(wsId, ctx({ adminWorkspaces: [wsId] })),
+      "del-policy-unauth"
+    );
+
+    const d = deps(wsId, ctx({ adminWorkspaces: [wsId + 999] }));
+    const status = await policyFor(
+      d,
+      "agents_delete"
+    )({
+      name: "del-policy-unauth"
     });
-    // …then the agent rotates its key.
-    const { d, parked, stored } = repinDeps(wsId, admin, "rotated-kid");
+    expect(status.type).toBe("denied");
+  });
+
+  it("the delete policy denies a built-in agent", async () => {
+    const status = await policyFor(
+      deps(ORG_WORKSPACE_ID, orgAdmin),
+      "agents_delete"
+    )({ name: "admin" });
+    expect(status.type).toBe("denied");
+  });
+
+  // --- agents_repin only reads ----------------------------------------------
+
+  it("agents_repin reports both keys when the card advertises a new one", async () => {
+    const wsId = await freshWsId("repin-new");
+    const admin = ctx({ adminWorkspaces: [wsId] });
+    await registerCustom(deps(wsId, admin), "repin-new");
+    const d = depsWithKid(wsId, admin, "rotated-kid");
 
     const res = await agentsRepin(d, { name: "repin-new" });
 
-    expect(res).toMatchObject({ status: "awaiting_approval" });
-    // Nothing is written until the human approves.
+    expect(res).toMatchObject({
+      ok: true,
+      changed: true,
+      pinned: { kid: "test-kid" },
+      advertised: { kid: "rotated-kid" }
+    });
+    // Reading must never write.
     expect((await getAgent("repin-new"))?.cardSigningKid).toBe("test-kid");
-    expect(parked).toHaveLength(1);
-    expect(parked[0].requestKind).toBe("approval");
-    // Both keys are on screen — that is the whole basis for the decision.
-    expect(parked[0].prompt).toContain("test-kid");
-    expect(parked[0].prompt).toContain("rotated-kid");
-    expect(stored).toHaveLength(1);
-    expect(stored[0].action).toEqual({
-      kind: "repin_agent",
-      name: "repin-new",
-      wsId,
-      jku: "https://example.com/.well-known/jwks.json",
-      kid: "rotated-kid"
-    });
-    expect(stored[0].requestId).toBe(parked[0].requestId);
   });
 
-  it("agents_repin refuses a built-in agent and a non-admin caller", async () => {
-    const wsId = await freshWsId("tools-ws-repin-deny");
-    const reserved = repinDeps(wsId, ctx({ adminWorkspaces: [wsId] }), "k");
-    expect(await agentsRepin(reserved.d, { name: "admin" })).toHaveProperty(
-      "error"
-    );
-    expect(reserved.parked).toHaveLength(0);
+  it("agents_repin says there is nothing to change when the key still matches", async () => {
+    const wsId = await freshWsId("repin-same");
+    const d = depsWithKid(wsId, ctx({ adminWorkspaces: [wsId] }), "test-kid");
+    await registerCustom(d, "repin-same");
 
-    const outsider = repinDeps(
-      wsId,
-      ctx({ adminWorkspaces: [wsId + 999] }),
-      "k"
-    );
-    expect(await agentsRepin(outsider.d, { name: "anything" })).toHaveProperty(
-      "error"
-    );
-    expect(outsider.parked).toHaveLength(0);
+    const res = await agentsRepin(d, { name: "repin-same" });
+
+    expect(res).toMatchObject({ ok: true, changed: false });
+    expect(String(res.note)).toContain("already pinned");
   });
 
-  it("agents_repin reports a card it cannot read, without parking", async () => {
-    const wsId = await freshWsId("tools-ws-repin-down");
+  it("agents_repin reports a card it cannot read", async () => {
+    const wsId = await freshWsId("repin-down");
     const admin = ctx({ adminWorkspaces: [wsId] });
-    const base = hitlDeps(wsId, admin);
-    await agentsCreate(base.d, {
-      name: "repin-down",
-      a2aEndpoint: "https://example.com/repin-down",
-      tenantId: "main",
-      notifyOn: "mention"
-    });
+    await registerCustom(deps(wsId, admin), "repin-down");
     const d: AdminToolDeps = {
-      ...base.d,
+      ...deps(wsId, admin),
       verifyEndpoint: async () => {
         throw new Error("card fetch failed");
       }
     };
 
     const res = await agentsRepin(d, { name: "repin-down" });
+    expect(String(res.error)).toContain("card fetch failed");
+  });
 
-    expect(res.error).toContain("card fetch failed");
-    expect(base.parked).toHaveLength(0);
+  it("agents_repin refuses a built-in agent and a non-admin caller", async () => {
+    const wsId = await freshWsId("repin-deny");
+    expect(
+      await agentsRepin(
+        depsWithKid(wsId, ctx({ adminWorkspaces: [wsId] }), "k"),
+        {
+          name: "admin"
+        }
+      )
+    ).toHaveProperty("error");
+    expect(
+      await agentsRepin(
+        depsWithKid(wsId, ctx({ adminWorkspaces: [wsId + 999] }), "k"),
+        { name: "anything" }
+      )
+    ).toHaveProperty("error");
+  });
+
+  // --- agents_repin_apply writes, and only what was approved -----------------
+
+  it("agents_repin_apply writes the key when the live card still names it", async () => {
+    const wsId = await freshWsId("apply-ok");
+    const admin = ctx({ adminWorkspaces: [wsId] });
+    await registerCustom(deps(wsId, admin), "apply-ok");
+    const d = depsWithKid(wsId, admin, "rotated-kid");
+
+    const res = await agentsRepinApply(d, {
+      name: "apply-ok",
+      jku: JKU,
+      kid: "rotated-kid"
+    });
+
+    expect(res).toMatchObject({ ok: true });
+    expect((await getAgent("apply-ok"))?.cardSigningKid).toBe("rotated-kid");
+  });
+
+  it("agents_repin_apply refuses a key that moved again since the approval", async () => {
+    // The human approved one key. Writing whatever the card says now would be a
+    // decision nobody made.
+    const wsId = await freshWsId("apply-moved");
+    const admin = ctx({ adminWorkspaces: [wsId] });
+    await registerCustom(deps(wsId, admin), "apply-moved");
+    const d = depsWithKid(wsId, admin, "newer-kid");
+
+    const res = await agentsRepinApply(d, {
+      name: "apply-moved",
+      jku: JKU,
+      kid: "rotated-kid"
+    });
+
+    expect(String(res.error)).toContain("changed again");
+    // Neither the approved key nor the surprise one is written.
+    expect((await getAgent("apply-moved"))?.cardSigningKid).toBe("test-kid");
+  });
+
+  it("agents_repin_apply refuses a non-admin", async () => {
+    const wsId = await freshWsId("apply-unauth");
+    await registerCustom(
+      deps(wsId, ctx({ adminWorkspaces: [wsId] })),
+      "apply-unauth"
+    );
+    const d = depsWithKid(
+      wsId,
+      ctx({ adminWorkspaces: [wsId + 999] }),
+      "rotated-kid"
+    );
+
+    expect(
+      await agentsRepinApply(d, {
+        name: "apply-unauth",
+        jku: JKU,
+        kid: "rotated-kid"
+      })
+    ).toHaveProperty("error");
+    expect((await getAgent("apply-unauth"))?.cardSigningKid).toBe("test-kid");
+  });
+
+  it("the apply policy asks a human, naming both keys", async () => {
+    const wsId = await freshWsId("apply-policy");
+    const admin = ctx({ adminWorkspaces: [wsId] });
+    await registerCustom(deps(wsId, admin), "apply-policy");
+    const d = depsWithKid(wsId, admin, "rotated-kid");
+
+    const status = await policyFor(
+      d,
+      "agents_repin_apply"
+    )({
+      name: "apply-policy",
+      jku: JKU,
+      kid: "rotated-kid"
+    });
+
+    expect(status.type).toBe("user-approval");
+    // Both keys on screen: that is the whole basis for the decision.
+    expect(status.reason).toContain("test-kid");
+    expect(status.reason).toContain("rotated-kid");
+  });
+
+  it("the apply policy denies a no-op rather than spending an approval", async () => {
+    const wsId = await freshWsId("apply-noop");
+    const d = depsWithKid(wsId, ctx({ adminWorkspaces: [wsId] }), "test-kid");
+    await registerCustom(d, "apply-noop");
+    const row = await getAgent("apply-noop");
+
+    const status = await policyFor(
+      d,
+      "agents_repin_apply"
+    )({
+      name: "apply-noop",
+      jku: row?.cardSigningJku,
+      kid: "test-kid"
+    });
+
+    expect(status.type).toBe("denied");
+    expect(status.reason).toContain("nothing to change");
+  });
+
+  it("the apply policy denies a key the live card does not advertise", async () => {
+    const wsId = await freshWsId("apply-stale");
+    const admin = ctx({ adminWorkspaces: [wsId] });
+    await registerCustom(deps(wsId, admin), "apply-stale");
+    const d = depsWithKid(wsId, admin, "newer-kid");
+
+    const status = await policyFor(
+      d,
+      "agents_repin_apply"
+    )({
+      name: "apply-stale",
+      jku: JKU,
+      kid: "rotated-kid"
+    });
+
+    expect(status.type).toBe("denied");
+    expect(status.reason).toContain("newer-kid");
+  });
+
+  it("the apply policy denies a non-admin, with no prompt raised", async () => {
+    const wsId = await freshWsId("apply-policy-unauth");
+    await registerCustom(
+      deps(wsId, ctx({ adminWorkspaces: [wsId] })),
+      "apply-policy-unauth"
+    );
+    const d = depsWithKid(
+      wsId,
+      ctx({ adminWorkspaces: [wsId + 999] }),
+      "rotated-kid"
+    );
+
+    const status = await policyFor(
+      d,
+      "agents_repin_apply"
+    )({
+      name: "apply-policy-unauth",
+      jku: JKU,
+      kid: "rotated-kid"
+    });
+    expect(status.type).toBe("denied");
   });
 });
 
@@ -778,12 +933,22 @@ describe("admin tools — buildAdminTools availability", () => {
         "agents_create",
         "agents_update",
         "agents_delete",
+        "agents_repin",
+        "agents_repin_apply",
         "agents_allow_channel",
         "agents_revoke_channel",
         "agents_regenerate_avatar",
         "workspace_read"
       ])
     );
+  });
+
+  it("declares the gated tools with real handlers", () => {
+    // They act for themselves now. What stops them acting unasked is the approval
+    // policy, not a missing implementation.
+    const tools = buildAdminTools(deps(3, ctx({ adminWorkspaces: [3] })));
+    expect(tools.agents_delete.execute).toBeDefined();
+    expect(tools.agents_repin_apply.execute).toBeDefined();
   });
 });
 

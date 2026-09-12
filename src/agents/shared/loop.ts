@@ -7,8 +7,10 @@ import type {
   GenerateTextOnStepEndCallback,
   LanguageModel,
   ModelMessage,
+  OnToolExecutionEndCallback,
   PrepareStepFunction,
   StopCondition,
+  ToolApprovalConfiguration,
   ToolSet
 } from "ai";
 import {
@@ -25,6 +27,7 @@ import type { AgentTurnMetadata } from "@/agents/dispatch";
 import type { SessionLike } from "./session";
 import {
   assistantSessionMessage,
+  replayToolCallMessage,
   toModelMessages,
   toolCallSessionMessage,
   userSessionMessage,
@@ -40,10 +43,15 @@ import {
 import { ASK_USER_TOOL_NAME } from "./ask-user";
 import {
   answeredCall,
+  approvedCall,
   hitlRequestOf,
-  notAsked,
   openCallOf,
   humanAnswerOf,
+  refusalReason,
+  refusedCall,
+  settledCall,
+  wasApproved,
+  withRefusal,
   type OpenCallStore
 } from "./open-call";
 
@@ -71,6 +79,13 @@ const CANCELED_NOTE = "(stopped by the user; reply was not delivered)";
  */
 const NO_REPLY_NOTE =
   "(no reply was produced for this turn; the actions above did run)";
+
+/** Recorded for an approved call a 🛑 reached before it could run. */
+const STOPPED_BEFORE_RUN =
+  "Not carried out: the turn was stopped before the approved call could run.";
+
+/** Recorded for an approved call that did not run, and left no reason why. */
+const NOT_CARRIED_OUT = "Not carried out.";
 
 /**
  * The reply a forced-ending call landed on, or `undefined` if it produced none.
@@ -113,6 +128,32 @@ function readPlainReply(result: {
 }
 
 /**
+ * The reason the SDK gave for refusing to carry out an approved call.
+ *
+ * A replayed approval whose policy now says `denied` never executes: the SDK writes
+ * an `execution-denied` result into the messages it puts *before* the first step,
+ * and no tool-execution event fires. That result carries the policy's own sentence,
+ * which is a better account of what happened than anything this layer could infer —
+ * the approver's permissions changed, the target moved, the key rotated again.
+ *
+ * Typed structurally: these are the SDK's own response messages, and reaching into
+ * them for one field does not warrant threading its generics through this layer.
+ */
+function deniedReason(result: {
+  responseMessages: readonly { role: string; content: unknown }[];
+}): string | undefined {
+  for (const message of result.responseMessages) {
+    if (message.role !== "tool" || !Array.isArray(message.content)) continue;
+    for (const part of message.content) {
+      const output = (part as { output?: { type?: string; reason?: string } })
+        .output;
+      if (output?.type === "execution-denied") return output.reason;
+    }
+  }
+  return undefined;
+}
+
+/**
  * Whether a failure is the service being briefly unavailable rather than a bug —
  * the difference between "try again in a moment" and an apology.
  *
@@ -146,17 +187,16 @@ export interface PreparedTurn {
   systemSuffix: string;
   /** Agent-specific tools merged over the session's own `set_context` tool. */
   tools: ToolSet;
-}
-
-/** Turn-scoped controls a tool can reach (via the deps its executor builds). */
-export interface TurnControls {
   /**
-   * Pause this turn to ask a human: the loop stops after the current tool step,
-   * ends the turn in `input-required` carrying `request` (the delivery boundary
-   * renders it in Slack and parks the task), and publishes no terminal reply. The
-   * human's answer resumes the agent on a later, separate invocation.
+   * Which calls need a human's Approve before they run, as a per-tool policy the
+   * SDK resolves on every call — see
+   * {@link file://../admin/tools.ts `adminToolApproval`}.
+   *
+   * Built per turn from the caller, so the SDK re-running it on the resuming turn
+   * re-checks the *approver's* permissions rather than the requester's. The tools
+   * it names are also the ones a timed-out turn may no longer call: see `withheld`.
    */
-  park(request: HitlRequest): void;
+  toolApproval?: ToolApprovalConfiguration<ToolSet, unknown>;
 }
 
 export interface AgentTurnConfig {
@@ -169,13 +209,11 @@ export interface AgentTurnConfig {
   /**
    * Assemble the session/tools/system for this turn. Runs *inside* the protected
    * body, so throwing here (e.g. missing required metadata) yields the friendly
-   * error reply rather than a crash. `turn` lets the assembled tools pause the
-   * turn for human input (agents that don't offer HITL simply ignore it).
+   * error reply rather than a crash.
    */
   prepare: (
     text: string,
-    metadata: Partial<AgentTurnMetadata>,
-    turn: TurnControls
+    metadata: Partial<AgentTurnMetadata>
   ) => Promise<PreparedTurn>;
   /** Friendly reply for an unexpected (non-transient) failure. */
   unexpectedReply: string;
@@ -202,10 +240,11 @@ export interface AgentTurnConfig {
    */
   recordToolCalls?: boolean;
   /**
-   * Where a turn that stops to ask a human keeps the call it paused on, until the
-   * answer resumes it — see {@link file://./open-call.ts open-call.ts}. Needed
-   * by any agent whose tools include `ask_user`: a turn that has to pause without
-   * one fails, because the question it would raise could never be answered.
+   * Where a turn that stops for a human keeps the call it paused on, until the
+   * answer resumes it — see {@link file://./open-call.ts open-call.ts}. Needed by
+   * any agent whose tools include `ask_user` or a tool behind an approval: a turn
+   * that has to pause without one fails, because the prompt it would raise could
+   * never be answered.
    */
   openCalls?: OpenCallStore;
 }
@@ -322,13 +361,15 @@ export async function executeAgentTurn(
   let completed = false;
   // Set by the stop condition below once a 🛑 is seen for this turn.
   let canceled = false;
-  // Set when a tool calls `turn.park`: the turn ends in `input-required` awaiting
-  // a human instead of publishing a terminal reply. Held on an object so the
-  // closure assignment in `turn.park` is visible to control-flow narrowing.
-  const hitl: { request: HitlRequest | null } = { request: null };
   // Tracks the text of the most recent non-terminal step published below, so the
   // terminal reply isn't posted twice when it is that same text.
   let lastStepText = "";
+  // Both hoisted out of the protected body so the outer catch can still record an
+  // approval this turn carried out. The call really ran, the store has already let
+  // it go, and the gatekeeper will not deliver the decision a second time — so a
+  // turn that failed afterwards is the last chance to say what happened.
+  let approvalAction: ToolRecord | undefined;
+  let openSession: SessionLike | undefined;
 
   publishSubmitted(eventBus, requestContext);
 
@@ -354,35 +395,44 @@ export async function executeAgentTurn(
   };
 
   try {
-    const turn: TurnControls = {
-      park: (request) => {
-        hitl.request = request;
-      }
-    };
     const {
       session,
       systemSuffix,
-      tools: extraTools
-    } = await cfg.prepare(text, metadata, turn);
+      tools: extraTools,
+      toolApproval
+    } = await cfg.prepare(text, metadata);
+    openSession = session;
 
-    // An answer to a question this agent asked resumes that call rather than opening
-    // a new exchange: the call, with the answer as its result, goes where the model
-    // left off, and no user turn is added — the answer *is* the result.
+    // An answer to a prompt this agent raised resumes that call rather than opening
+    // a new exchange: the call, with the human's answer against it, goes where the
+    // model left off, and no user turn is added — the answer *is* the result.
     //
-    // It is written to history first, before the model runs and before the store lets
-    // go of its copy. The gatekeeper has already marked the answer as given and will
-    // not send it again, so a turn that recorded it only on the way out could lose it
-    // to anything that ends the turn early — a failure, or a reset of this object.
-    // An answer with no open call left to settle (asked before open calls existed,
+    // A question's answer is written to history first, before the model runs and
+    // before the store lets go of its copy. The gatekeeper has already marked the
+    // answer as given and will not send it again, so a turn that recorded it only on
+    // the way out could lose it to anything that ends the turn early.
+    //
+    // An approval cannot be written that early, because the answer is not the
+    // outcome: the call still has to run, and history cannot amend a record it
+    // already holds. So the decision is carried here and recorded once, by whichever
+    // exit the turn takes — see {@link approvedCall}.
+    //
+    // A prompt with no open call left to settle (raised before open calls existed,
     // or already settled) is an ordinary message.
     const answer = humanAnswerOf(userMessage, metadata.user?.displayName);
-    // Read off the answer rather than the settled record: a timeout for a question
-    // asked before open calls existed has no record to settle, and that turn must
-    // not be free to ask again either.
+    // Read off the answer rather than the settled record: a timeout for a prompt
+    // raised before open calls existed has no record to settle, and that turn must
+    // not be free to raise the same one again either.
     const timedOut = answer?.answer.kind === "timed-out";
     const settled =
       answer && cfg.openCalls
         ? await cfg.openCalls.settle(answer.requestId, async (call) => {
+            if (call.approval) {
+              approvalAction = wasApproved(answer.answer)
+                ? approvedCall(call, answer.answer.by)
+                : refusedCall(call, refusalReason(answer.answer));
+              return;
+            }
             await session.appendMessage(
               toolCallSessionMessage(
                 answeredCall(call, answer.answer),
@@ -393,8 +443,9 @@ export async function executeAgentTurn(
           })
         : null;
     if (settled) {
-      console.info("[agent-loop] resuming an answered question", {
+      console.info("[agent-loop] resuming a settled prompt", {
         requestId: settled.requestId,
+        approval: settled.approval !== undefined,
         contextId: requestContext.contextId
       });
     } else {
@@ -405,8 +456,32 @@ export async function executeAgentTurn(
     const history = await session.getHistory();
     const soul = (await session.refreshSystemPrompt()) + systemSuffix;
     const workTools = { ...(await session.tools()), ...extraTools };
-    const messages = await toModelMessages(history);
     const required = cfg.requireFinalReply === true;
+
+    // Whether the approved call is still waiting to run. Only an approval that was
+    // granted replays; a refusal is already its own outcome.
+    const replaying = approvalAction?.approval?.approved === true;
+
+    /**
+     * History, plus the decision this turn is resuming.
+     *
+     * Every settled approval goes in, not only an approved one. An approved call
+     * replays as `assistant[tool-call, tool-approval-request]` then
+     * `tool[tool-approval-response]` — the shape the SDK collects a decision from —
+     * and a refusal replays as that call plus the denied result carrying its
+     * reason. A refusal the model never sees is one it will simply make again,
+     * which is the whole thing a rejection is supposed to prevent.
+     *
+     * It is folded in with the rest rather than appended afterwards, so the
+     * assistant run it continues is joined into one message the way any other
+     * turn's would be. And it goes in uncapped: what the SDK executes has to be
+     * what the human approved, to the character.
+     */
+    const messages = await toModelMessages(
+      approvalAction
+        ? [...history, replayToolCallMessage(approvalAction)]
+        : history
+    );
 
     // Every tool call this turn actually executed, across every attempt — the
     // primary's, a repair's, and the fallback's alike. All of them really ran and
@@ -416,6 +491,10 @@ export async function executeAgentTurn(
     // `final_reply` never appears here. It has no `execute`, so it produces no
     // result to record — its text is the message body, not an action.
     const actions: ToolRecord[] = [];
+
+    /** What this turn has to persist: the approval it settled, then its own calls. */
+    const persisted = (): ToolRecord[] =>
+      approvalAction ? [approvalAction, ...actions] : actions;
 
     const onStepEnd: GenerateTextOnStepEndCallback<ToolSet> = (step) => {
       if (cfg.recordToolCalls) {
@@ -458,6 +537,27 @@ export async function executeAgentTurn(
       );
     };
 
+    /**
+     * Settle the replayed call with what it produced.
+     *
+     * An approved call runs *before* the first step, into the messages the SDK puts
+     * ahead of it, so `onStepEnd` never sees it — this is the only callback that
+     * does. Everything else the turn calls is recorded there as usual.
+     */
+    const onToolExecutionEnd: OnToolExecutionEndCallback<ToolSet> = (event) => {
+      if (
+        !approvalAction ||
+        event.toolCall.toolCallId !== approvalAction.toolCallId
+      )
+        return;
+      approvalAction = settledCall(
+        approvalAction,
+        event.toolOutput.type === "tool-result"
+          ? { output: event.toolOutput.output }
+          : { errorText: String(event.toolOutput.error) }
+      );
+    };
+
     // The gatekeeper's 🛑 workflow runs on its own request and cannot reach into
     // this Durable Object mid-turn, so it records the stop on the task row and
     // the turn reads it back from there.
@@ -480,10 +580,24 @@ export async function executeAgentTurn(
     // A step's tool calls have already run and their results still reach the model.
     const stopIfCanceled: StopCondition<ToolSet> = () => checkCanceled();
 
-    // A tool called `turn.park`: stop right after this step so the turn can end in
-    // `input-required` instead of feeding the sentinel result back to the model.
-    const stopIfHitlRequested: StopCondition<ToolSet> = () =>
-      hitl.request !== null;
+    // A 🛑 has to be read *before* an approved call is replayed. The SDK runs it
+    // ahead of the first model call, so by the first step boundary the deletion has
+    // already happened — there is no later point at which stopping still means
+    // anything. The decision is recorded as not carried out, and no call is spent.
+    if (replaying && approvalAction && (await checkCanceled())) {
+      console.info("[agent-loop] stopped before an approved call ran", {
+        contextId: requestContext.contextId,
+        toolName: approvalAction.toolName
+      });
+      approvalAction = withRefusal(approvalAction, STOPPED_BEFORE_RUN);
+      // Recorded before the terminal is published: publishing marks the turn
+      // completed, and the outer catch stands its own recovery down once it is.
+      await session.appendMessage(
+        assistantSessionMessage(CANCELED_NOTE, persisted())
+      );
+      publishTerminal("", TaskState.TASK_STATE_CANCELED);
+      return;
+    }
 
     // The system prompt goes in `instructions`: `messages` rejects `role: "system"`
     // entries by default, which is fine because `toModelMessages` only ever emits
@@ -522,20 +636,28 @@ export async function executeAgentTurn(
       : workTools;
 
     /**
-     * A turn a timeout resumed may not ask again.
+     * A turn a timeout resumed may not raise the same kind of prompt again.
      *
      * Nobody answered for the whole TTL, and a turn still holding `ask_user` can
      * park on a fresh one, expire, and ask again — a task that never ends, putting
-     * the same question to a human who let the last one sit for a week. Withholding
-     * the tool leaves one way out: say what happened and finish. Everything else
-     * stays on the table, so that ending can still report the work the turn did
-     * before it stopped to ask.
+     * the same question to a human who let the last one sit for a week. A gated tool
+     * is the same loop wearing a different hat: call `agents_delete` again and it
+     * raises a new approval on a fresh seven-day deadline. So both are withheld, and
+     * one way out is left: say what happened and finish. Everything else stays on the
+     * table, so that ending can still report the work the turn did before it stopped.
      *
-     * The gatekeeper cancels the other way out itself: a 🛑 resolves the open rows
-     * and never hands the task back, so a stopped question reaches no model at all.
+     * The gatekeeper closes the other way out itself: a 🛑 resolves the open rows and
+     * never hands the task back, so a stopped prompt reaches no model at all.
      */
+    const gated = new Set(
+      toolApproval && typeof toolApproval === "object"
+        ? Object.keys(toolApproval)
+        : []
+    );
     const withheld = timedOut
-      ? Object.keys(turnTools).filter((name) => name !== ASK_USER_TOOL_NAME)
+      ? Object.keys(turnTools).filter(
+          (name) => name !== ASK_USER_TOOL_NAME && !gated.has(name)
+        )
       : undefined;
 
     const runTurn = () =>
@@ -544,6 +666,7 @@ export async function executeAgentTurn(
         instructions,
         messages,
         tools: turnTools,
+        ...(toolApproval ? { toolApproval } : {}),
         ...(withheld ? { activeTools: withheld } : {}),
         // Every ending is a `final_reply` call, so the model must always call
         // something. Work tools stay freely available — `required` constrains the
@@ -555,9 +678,11 @@ export async function executeAgentTurn(
         // a *rejected* call too, so it would halt the loop on a malformed ending
         // before the SDK could hand the model its own error to fix. A valid call ends
         // the loop without help — `final_reply` has no `execute`, so it produces no
-        // output, and the loop only continues once every call has one.
-        stopWhen: [isStepCount(MAX_STEPS), stopIfCanceled, stopIfHitlRequested],
+        // output, and the loop only continues once every call has one. A call waiting
+        // on an approval has no output either, and stops it the same way.
+        stopWhen: [isStepCount(MAX_STEPS), stopIfCanceled],
         onStepEnd,
+        onToolExecutionEnd,
         // `reasoning` and the telemetry opt-out travel together, shared with the
         // compaction summarizer so the two call sites cannot drift — see
         // {@link file://../model.ts model.ts}.
@@ -608,13 +733,28 @@ export async function executeAgentTurn(
       });
     }
 
-    // The question the last step stopped on, if it stopped on one.
+    // An approved call that produced no execution event never ran. The SDK's own
+    // `execution-denied` says why when the re-run policy refused it — the approver
+    // was not entitled to it, or what it named has since moved — and that sentence
+    // is a truer account than a guess from out here.
+    if (
+      replaying &&
+      approvalAction &&
+      !("output" in approvalAction) &&
+      approvalAction.errorText === undefined
+    ) {
+      approvalAction = withRefusal(
+        approvalAction,
+        (result ? deniedReason(result) : undefined) ?? NOT_CARRIED_OUT
+      );
+    }
+
+    // The prompt the last step stopped on, if it stopped on one.
     const pause = result ? openCallOf(result.finalStep) : undefined;
 
-    // A 🛑, a park, or a question out-ranks the reply and ends the turn here: none
-    // of them is a reason to spend another call.
-    const interrupted =
-      (await checkCanceled()) || hitl.request !== null || pause !== undefined;
+    // A 🛑 or a prompt out-ranks the reply and ends the turn here: neither is a
+    // reason to spend another call.
+    const interrupted = (await checkCanceled()) || pause !== undefined;
 
     if (required && reply === undefined && !interrupted) {
       console.warn("[agent-loop] no ending; asking once more with none else", {
@@ -625,11 +765,19 @@ export async function executeAgentTurn(
       try {
         // With a result there is a whole run to report, so hand it over. A violation
         // discards the run, leaving only history — which is all the round this
-        // replaces ever had.
-        const salvaged = await salvageEnding([
-          ...messages,
-          ...(result?.responseMessages ?? [])
-        ]);
+        // replaces ever had. What history must *not* still carry is an approval the
+        // SDK was never told the outcome of: seeded with that, the salvage collects
+        // the same decision again and sends the call on with no result at all. So the
+        // settled record is folded in instead.
+        const seed = result
+          ? [...messages, ...result.responseMessages]
+          : approvalAction
+            ? await toModelMessages([
+                ...history,
+                toolCallSessionMessage(approvalAction)
+              ])
+            : messages;
+        const salvaged = await salvageEnding(seed);
         reply = readFinalReply(salvaged);
       } catch (err) {
         if (!ToolChoiceViolationError.isInstance(err)) throw err;
@@ -640,8 +788,8 @@ export async function executeAgentTurn(
       }
     }
 
-    // Every exit below persists `actions` alongside whatever the turn managed to
-    // say. The tools ran and their side effects are real however the turn ended;
+    // Every exit below persists `persisted()` alongside whatever the turn managed
+    // to say. The tools ran and their side effects are real however the turn ended;
     // a side effect the transcript does not show is exactly how a later turn ends
     // up guessing at what happened.
 
@@ -662,37 +810,16 @@ export async function executeAgentTurn(
         contextId: requestContext.contextId,
         model: modelId
       });
+      await session.appendMessage(
+        assistantSessionMessage(CANCELED_NOTE, persisted())
+      );
       publishTerminal("", TaskState.TASK_STATE_CANCELED);
-      await session.appendMessage(
-        assistantSessionMessage(CANCELED_NOTE, actions)
-      );
       return;
     }
 
-    // A tool paused the turn for human input. Persist the prompt as the assistant's
-    // turn so the resumed turn has coherent context (the model "remembers" what it
-    // asked), then end in `input-required` — no terminal reply.
-    if (hitl.request) {
-      completed = true;
-      // A question asked in the same step never reached anyone; say so.
-      await session.appendMessage(
-        assistantSessionMessage(hitl.request.prompt, [
-          ...actions,
-          ...(pause ? [notAsked(pause.call), ...pause.notRaised] : [])
-        ])
-      );
-      publishInputRequired(
-        eventBus,
-        requestContext,
-        hitl.request,
-        `${userMessage.messageId}:hitl`
-      );
-      return;
-    }
-
-    // The model asked the human something. Record the question as what this turn
-    // said, keep the call until someone answers it, and only then raise the prompt:
-    // a click that beat the record would find nothing to resume.
+    // The model asked for something the human has to settle. Record the prompt as
+    // what this turn said, keep the call until someone answers it, and only then
+    // raise it: a click that beat the record would find nothing to resume.
     if (pause) {
       if (!cfg.openCalls) {
         throw new Error(
@@ -702,7 +829,7 @@ export async function executeAgentTurn(
       const request = hitlRequestOf(pause.call);
       await session.appendMessage(
         assistantSessionMessage(request.prompt, [
-          ...actions,
+          ...persisted(),
           ...pause.notRaised
         ])
       );
@@ -727,16 +854,17 @@ export async function executeAgentTurn(
       });
       // The apology is not persisted — it says nothing true about the workspace —
       // but any calls that ran are.
-      if (actions.length > 0) {
+      const records = persisted();
+      if (records.length > 0) {
         await session.appendMessage(
-          assistantSessionMessage(NO_REPLY_NOTE, actions)
+          assistantSessionMessage(NO_REPLY_NOTE, records)
         );
       }
       publishTerminal(TRANSIENT_REPLY);
       return;
     }
 
-    await session.appendMessage(assistantSessionMessage(reply, actions));
+    await session.appendMessage(assistantSessionMessage(reply, persisted()));
     publishTerminal(reply);
   } catch (err) {
     console.error("[agent-loop] turn failed", {
@@ -745,6 +873,32 @@ export async function executeAgentTurn(
       err: String(err),
       stack: err instanceof Error ? err.stack : undefined
     });
+    // An approval this turn settled is recorded here or nowhere. `completed` means
+    // an exit above already published, and so already persisted — writing again
+    // would put a second part under the same tool call id, which breaks the replay
+    // of every later turn. Best-effort: a failure here must not mask the real one.
+    if (!completed && approvalAction && openSession) {
+      // A failure before the call could run leaves the decision marked approved
+      // with no outcome, which reads as one still waiting to happen. Nothing is
+      // waiting: this turn is over and the store has already let the call go.
+      const unfinished =
+        approvalAction.approval?.approved === true &&
+        !("output" in approvalAction) &&
+        approvalAction.errorText === undefined;
+      const record = unfinished
+        ? withRefusal(approvalAction, NOT_CARRIED_OUT)
+        : approvalAction;
+      try {
+        await openSession.appendMessage(
+          assistantSessionMessage(NO_REPLY_NOTE, [record])
+        );
+      } catch (persistErr) {
+        console.error("[agent-loop] could not record a settled approval", {
+          contextId: requestContext.contextId,
+          err: String(persistErr)
+        });
+      }
+    }
     // A transient blip is a turn that completed by saying "try again" — the work
     // is recoverable and nothing is broken. An unexpected error is a real
     // failure, so report it as one: `failed` is what makes the delivery boundary

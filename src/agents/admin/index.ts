@@ -1,11 +1,9 @@
 import type { AgentCard } from "@a2a-js/sdk";
 import type { AgentExecutor } from "@a2a-js/sdk/server";
 import { buildAgentCard } from "@/a2a/card";
-import { HITL_REQUEST_TTL_SECONDS } from "@/config";
 import { DurableOpenCalls } from "@/agents/shared/open-call-store";
 import { A2AAgent } from "../base";
 import { AdminAgentExecutor } from "./executor";
-import type { GatedAction } from "./approvals";
 
 /** An avatar stored in this DO's key-value storage, served by `fetch`. */
 interface StoredIcon {
@@ -27,16 +25,12 @@ function iconKey(name: string, hash: string): string {
 function iconIndexKey(name: string): string {
   return `icon:${name}:index`;
 }
-/** A destructive action parked behind a HITL approval, keyed by its `requestId`. */
-interface PendingActionEntry {
-  action: GatedAction;
-  /** Epoch ms — used to prune entries whose prompt was cancelled and never resumed. */
-  createdAt: number;
-}
+/**
+ * Where destructive actions used to wait for their approval, before the SDK's own
+ * approvals replaced them. Nothing writes here any more — see
+ * {@link AdminAgent.clearRetiredApprovals}.
+ */
 const PENDING_ACTION_PREFIX = "hitl:pending:";
-function pendingActionKey(requestId: string): string {
-  return `${PENDING_ACTION_PREFIX}${requestId}`;
-}
 
 /** Avatars are immutable per content-hash key; cache for a year (new image = new URL). */
 const ICON_CACHE_CONTROL =
@@ -56,6 +50,9 @@ const ICON_PATH = /^\/icons\/\d+\/([a-z0-9_-]+)\/([^/]+?)(?:\.\w+)?$/;
  * Slack (and any A2A consumer) can fetch the agent's `iconUrl` over HTTP.
  */
 export class AdminAgent extends A2AAgent {
+  /** Whether this isolate has already cleared the retired approval store. */
+  private pendingCleared = false;
+
   protected card(): AgentCard {
     return buildAgentCard({
       name: "Admin Agent",
@@ -72,49 +69,43 @@ export class AdminAgent extends A2AAgent {
   protected executor(): AgentExecutor {
     return new AdminAgentExecutor(this, {
       storeIcon: (img, name) => this.putIcon(img.data, img.contentType, name),
-      storePendingAction: (requestId, action) =>
-        this.putPendingAction(requestId, action),
-      takePendingAction: (requestId) => this.takePendingAction(requestId),
       openCalls: new DurableOpenCalls(this.ctx.storage)
     });
   }
 
   /**
-   * Persist a destructive action behind its approval prompt, keyed by the HITL
-   * `requestId`, so the resumed turn can carry it out once approved. Also prunes
-   * entries older than the HITL TTL, so a 🛑-cancelled prompt (which never
-   * resumes to consume its entry) can't accumulate in storage.
+   * Drop the retired `hitl:pending:*` store.
+   *
+   * Destructive actions used to be re-described and persisted here while their
+   * approval waited, then carried out from the stored copy. The SDK's own approvals
+   * replay the model's actual call instead, so nothing writes these any more — but a
+   * prompt raised just before the deploy leaves one behind, and nothing else would
+   * ever collect it.
+   *
+   * **Remove this after one HITL TTL (7 days) past the deploy**, by which point no
+   * pre-deploy prompt can still be outstanding. Guarded per isolate like
+   * `sweepChecked`, and run on `waitUntil`, so it costs a warm instance nothing.
    */
-  async putPendingAction(
-    requestId: string,
-    action: GatedAction
-  ): Promise<void> {
-    await this.ctx.storage.put<PendingActionEntry>(
-      pendingActionKey(requestId),
-      {
-        action,
-        createdAt: Date.now()
-      }
-    );
-    await this.prunePendingActions();
-  }
-
-  /** Read-and-delete a pending action so it runs at most once. */
-  async takePendingAction(requestId: string): Promise<GatedAction | null> {
-    const key = pendingActionKey(requestId);
-    const entry = await this.ctx.storage.get<PendingActionEntry>(key);
-    if (!entry) return null;
-    await this.ctx.storage.delete(key);
-    return entry.action;
-  }
-
-  private async prunePendingActions(): Promise<void> {
-    const cutoff = Date.now() - HITL_REQUEST_TTL_SECONDS * 1000;
-    const entries = await this.ctx.storage.list<PendingActionEntry>({
-      prefix: PENDING_ACTION_PREFIX
-    });
-    for (const [key, entry] of entries) {
-      if (entry.createdAt < cutoff) await this.ctx.storage.delete(key);
+  private async clearRetiredApprovals(): Promise<void> {
+    try {
+      const keys = [
+        ...(
+          await this.ctx.storage.list({ prefix: PENDING_ACTION_PREFIX })
+        ).keys()
+      ];
+      if (keys.length === 0) return;
+      await this.ctx.storage.delete(keys);
+      console.info("[admin-agent] cleared retired approval entries", {
+        count: keys.length
+      });
+    } catch (err) {
+      // The guard exists to stop a warm isolate re-listing on every request, not
+      // to make one failure permanent — so let a later request try again. It also
+      // keeps this off `waitUntil` as an unhandled rejection.
+      this.pendingCleared = false;
+      console.error("[admin-agent] clearing retired approvals failed", {
+        error: err instanceof Error ? err.message : String(err)
+      });
     }
   }
 
@@ -163,6 +154,10 @@ export class AdminAgent extends A2AAgent {
    * protocol (card discovery + JSON-RPC) handled by the base class.
    */
   async fetch(request: Request): Promise<Response> {
+    if (!this.pendingCleared) {
+      this.pendingCleared = true;
+      this.ctx.waitUntil(this.clearRetiredApprovals());
+    }
     const match = new URL(request.url).pathname.match(ICON_PATH);
     if (request.method === "GET" && match) {
       const icon = await this.getIcon(match[1], match[2]);

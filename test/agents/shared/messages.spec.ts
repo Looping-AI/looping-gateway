@@ -11,6 +11,7 @@ import {
   sessionText,
   toModelMessages,
   toolCallSessionMessage,
+  replayToolCallMessage,
   MAX_TOOL_RECORD_CHARS,
   type TurnContext
 } from "@/agents/shared/messages";
@@ -366,6 +367,181 @@ describe("assistantSessionMessage", () => {
       }
     ]);
     expect(sessionText(m)).toBe("the reply");
+  });
+});
+
+describe("assistantSessionMessage — approvals", () => {
+  const gated = {
+    toolCallId: "tc-del",
+    toolName: "agents_delete",
+    input: { name: "arc-player" }
+  };
+
+  it("records an approved call with no result as the decision itself", () => {
+    const m = assistantSessionMessage("Deleting it.", [
+      {
+        ...gated,
+        approval: {
+          id: "aitxt-1",
+          approved: true,
+          reason: "Approved in Slack by Grace."
+        }
+      }
+    ]);
+    expect(m.parts[0]).toMatchObject({
+      type: "tool-agents_delete",
+      state: "approval-responded",
+      approval: { id: "aitxt-1", approved: true }
+    });
+  });
+
+  it("records a refusal as denied, carrying why", () => {
+    const m = assistantSessionMessage("I didn't delete it.", [
+      {
+        ...gated,
+        approval: {
+          id: "aitxt-1",
+          approved: false,
+          reason: "Rejected in Slack by Grace."
+        }
+      }
+    ]);
+    expect(m.parts[0]).toMatchObject({
+      state: "output-denied",
+      approval: { approved: false, reason: "Rejected in Slack by Grace." }
+    });
+  });
+
+  it("keeps the decision on a call that ran", () => {
+    const m = assistantSessionMessage("Deleted.", [
+      {
+        ...gated,
+        output: { ok: true },
+        approval: { id: "aitxt-1", approved: true }
+      }
+    ]);
+    expect(m.parts[0]).toMatchObject({
+      state: "output-available",
+      output: { ok: true },
+      approval: { id: "aitxt-1", approved: true }
+    });
+  });
+
+  it("counts a call that returned nothing as having run", () => {
+    // `undefined` is a result too. Reading it as "no outcome yet" would replay a
+    // finished call as a decision still waiting, and the SDK would run it again.
+    const m = assistantSessionMessage("Done.", [
+      {
+        ...gated,
+        output: undefined,
+        approval: { id: "aitxt-1", approved: true }
+      }
+    ]);
+    expect(m.parts[0]).toMatchObject({ state: "output-available" });
+  });
+});
+
+describe("toModelMessages — approvals", () => {
+  const approved = {
+    toolCallId: "tc-del",
+    toolName: "agents_delete",
+    input: { name: "arc-player" },
+    approval: {
+      id: "aitxt-1",
+      approved: true,
+      reason: "Approved in Slack by Grace."
+    }
+  };
+
+  it("replays an approved call as the pair the SDK collects a decision from", async () => {
+    // The whole approval resume rests on this exact shape:
+    // assistant[tool-call, tool-approval-request] then tool[tool-approval-response],
+    // with the tool message last, because that is the only message the SDK reads
+    // approvals out of. Get it wrong and the approved call silently never runs.
+    const messages = await toModelMessages([toolCallSessionMessage(approved)]);
+
+    expect(messages.map((m) => m.role)).toEqual(["assistant", "tool"]);
+    expect(messages[0].content).toEqual([
+      expect.objectContaining({
+        type: "tool-call",
+        toolCallId: "tc-del",
+        toolName: "agents_delete",
+        input: { name: "arc-player" }
+      }),
+      expect.objectContaining({
+        type: "tool-approval-request",
+        approvalId: "aitxt-1",
+        toolCallId: "tc-del"
+      })
+    ]);
+    expect(messages[1].content).toEqual([
+      expect.objectContaining({
+        type: "tool-approval-response",
+        approvalId: "aitxt-1",
+        approved: true
+      })
+    ]);
+  });
+
+  it("replays an approved call's input verbatim, however long", async () => {
+    // The premise of an approval is that what runs is what was approved. Capping an
+    // over-long property would hand the SDK a different call — and because the
+    // schema still accepts the truncated value, it would run it.
+    const long = "x".repeat(MAX_TOOL_RECORD_CHARS * 2);
+    const messages = await toModelMessages([
+      replayToolCallMessage({ ...approved, input: { name: long } })
+    ]);
+
+    const parts = messages[0].content as {
+      type: string;
+      input?: { name: string };
+    }[];
+    expect(parts.find((p) => p.type === "tool-call")?.input?.name).toBe(long);
+  });
+
+  it("still caps the same call when it is stored rather than replayed", () => {
+    // History is replayed on every later turn, so the ceiling stays where it is
+    // needed: one broad call must not crowd out the conversation.
+    const long = "x".repeat(MAX_TOOL_RECORD_CHARS * 2);
+    const m = toolCallSessionMessage({ ...approved, input: { name: long } });
+    expect((m.parts[0] as { input: { name: string } }).input.name).toContain(
+      "[truncated,"
+    );
+  });
+
+  it("replays a refusal as a result, not as a decision still pending", async () => {
+    const messages = await toModelMessages([
+      toolCallSessionMessage({
+        ...approved,
+        approval: {
+          id: "aitxt-1",
+          approved: false,
+          reason: "Rejected in Slack by Grace."
+        }
+      })
+    ]);
+
+    const last = messages.at(-1);
+    expect(last?.role).toBe("tool");
+    // The reason reaches the model in place of a result, so a later turn can see
+    // the call was refused rather than that it failed.
+    expect(JSON.stringify(last?.content)).toContain(
+      "Rejected in Slack by Grace."
+    );
+  });
+
+  it("replays an approved call that ran as an ordinary result", async () => {
+    const messages = await toModelMessages([
+      toolCallSessionMessage({ ...approved, output: { ok: true } })
+    ]);
+
+    const last = messages.at(-1);
+    expect(last?.role).toBe("tool");
+    expect(last?.content).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ type: "tool-result", toolCallId: "tc-del" })
+      ])
+    );
   });
 });
 
