@@ -26,6 +26,12 @@ import {
 } from "@/db/models/hitl-requests";
 import { _resetIssuerCacheForTest } from "@/agents/dispatch";
 import { buildAgentCard } from "@/a2a/card";
+import {
+  SLACK_FREEFORM_ACTION_ID,
+  SLACK_FREEFORM_BLOCK_ID,
+  SLACK_FREEFORM_CALLBACK_ID
+} from "@chat-adapter/slack/blocks";
+import { MAX_MESSAGE_TEXT_BYTES } from "@dynamicagents/g2a-protocol";
 import { HITL_RESPONSE_TYPE } from "@/a2a/hitl";
 import { dataOf, partsText } from "@/a2a/parts";
 import { agentMessage, makeTask } from "./helpers/a2a";
@@ -134,6 +140,28 @@ async function interactivityRequest(payload: unknown): Promise<Request> {
     },
     body
   });
+}
+
+/** A freeform-modal submission, as Slack posts it after the typed answer. */
+function freeformSubmission(requestId: string, text: string) {
+  return {
+    type: "view_submission",
+    user: { id: "U1" },
+    view: {
+      callback_id: SLACK_FREEFORM_CALLBACK_ID,
+      private_metadata: requestId,
+      state: {
+        values: {
+          [SLACK_FREEFORM_BLOCK_ID]: {
+            [SLACK_FREEFORM_ACTION_ID]: {
+              type: "plain_text_input",
+              value: text
+            }
+          }
+        }
+      }
+    }
+  };
 }
 
 function buttonAction(requestId: string, optionId: string) {
@@ -328,5 +356,100 @@ describe("handleSlackInteractivity", () => {
     expect(captured.slackReplies).toHaveLength(1);
     expect(captured.slackReplies[0].get("thread_ts")).toBe("1700.1");
     expect(captured.slackReplies[0].get("text")).toContain("remoteagent");
+  });
+});
+
+/**
+ * The size bound on a typed answer, enforced where it can still be corrected.
+ *
+ * The agent runtime refuses message text over `MAX_MESSAGE_TEXT_BYTES`. If the
+ * gatekeeper finds that out during the resume — which runs in `ctx.waitUntil`,
+ * after the response has gone — the prompt has already been claimed, so the
+ * answer is lost and the question can never be answered again. These two cases
+ * pin the boundary that keeps it correctable instead.
+ */
+describe("an over-long freeform answer", () => {
+  const emptyCapture = (): Captured => ({
+    slackUpdates: [],
+    slackEphemerals: [],
+    slackReplies: [],
+    resumeMessages: []
+  });
+
+  it("is refused with the modal left open, and leaves the prompt answerable", async () => {
+    await seedParkedRequest("req-long");
+    const captured = emptyCapture();
+    stub(captured);
+
+    const ctx = createExecutionContext();
+    const res = await handleSlackInteractivity(
+      await interactivityRequest(
+        freeformSubmission("req-long", "a".repeat(MAX_MESSAGE_TEXT_BYTES + 1))
+      ),
+      ctx
+    );
+    await waitOnExecutionContext(ctx);
+
+    // `response_action: "errors"` is what keeps the modal open with the typed
+    // text still in it; the block id is what puts the message under the input.
+    expect(await res.json()).toEqual({
+      response_action: "errors",
+      errors: {
+        [SLACK_FREEFORM_BLOCK_ID]: expect.stringContaining("too long")
+      }
+    });
+
+    // Nothing was consumed: no resume, no answered-state update, and — the one
+    // that matters — the prompt is still open for a shorter answer.
+    expect(captured.resumeMessages).toEqual([]);
+    expect(captured.slackUpdates).toEqual([]);
+    expect((await getHitlRequest("req-long"))?.status).toBe("awaiting");
+    expect((await getAgentTaskByToken("tok-1"))?.status).toBe("awaiting-input");
+  });
+
+  it("goes through at exactly the limit", async () => {
+    // The off-by-one that would make the check useful-looking and wrong.
+    await seedParkedRequest("req-exact");
+    const captured = emptyCapture();
+    stub(captured);
+
+    const answer = "a".repeat(MAX_MESSAGE_TEXT_BYTES);
+    const ctx = createExecutionContext();
+    const res = await handleSlackInteractivity(
+      await interactivityRequest(freeformSubmission("req-exact", answer)),
+      ctx
+    );
+    await waitOnExecutionContext(ctx);
+
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("");
+    expect(captured.resumeMessages).toHaveLength(1);
+    expect(partsText(captured.resumeMessages[0].parts)).toBe(answer);
+    expect((await getHitlRequest("req-exact"))?.status).toBe("answered");
+  });
+
+  it("measures bytes, not characters", async () => {
+    // The distinction the contract is explicit about. This answer is well under
+    // the limit in characters and one byte over it in UTF-8, so a length check
+    // would let it through to be refused by the agent, too late to fix.
+    await seedParkedRequest("req-utf8");
+    const captured = emptyCapture();
+    stub(captured);
+
+    const multibyte = "é".repeat(MAX_MESSAGE_TEXT_BYTES / 2) + "a";
+    expect(multibyte.length).toBeLessThan(MAX_MESSAGE_TEXT_BYTES);
+
+    const ctx = createExecutionContext();
+    const res = await handleSlackInteractivity(
+      await interactivityRequest(freeformSubmission("req-utf8", multibyte)),
+      ctx
+    );
+    await waitOnExecutionContext(ctx);
+
+    expect(res.status).toBe(200);
+    expect(
+      ((await res.json()) as { response_action?: string }).response_action
+    ).toBe("errors");
+    expect((await getHitlRequest("req-utf8"))?.status).toBe("awaiting");
   });
 });
