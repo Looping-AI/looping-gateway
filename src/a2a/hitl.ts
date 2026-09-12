@@ -4,15 +4,40 @@ import type {
   SlackInputOption,
   SlackInputRequest
 } from "@chat-adapter/slack/blocks";
+import {
+  HITL_APPROVE_OPTION_ID,
+  HITL_REJECT_OPTION_ID,
+  HITL_REQUEST_KINDS,
+  HITL_REQUEST_TYPE,
+  HITL_RESPONSE_TYPE,
+  HITL_TIMEOUT_TYPE,
+  type HitlOption,
+  type HitlRequestData,
+  type HitlResponseData,
+  type HitlTimeoutData
+} from "@dynamicagents/g2a-protocol";
 import { isRecord } from "@/util/json";
 import { dataOf, dataPart, textPart } from "@/a2a/parts";
 
 /**
- * The gatekeeper's human-in-the-loop (HITL) wire contract, carried inside A2A
- * `data` parts. A2A does not standardize a form schema (a part's `data` content
- * is arbitrary JSON), so we namespace our own `data.type` discriminators — this
- * is spec-compliant and lets a non-HITL-aware client still read the sibling
- * text part fallback.
+ * Human-in-the-loop (HITL) over A2A: how an agent asks a person something
+ * through this gatekeeper, and how the answer gets back.
+ *
+ * A2A carries the exchange but standardizes nothing inside it — a part's `data`
+ * is arbitrary JSON — so the two sides have to agree on what a `data` part holds
+ * and what its `type` is called. **That agreement is not ours to make alone**, so
+ * the names live in `@dynamicagents/g2a-protocol` and are re-exported here
+ * unchanged. `@dynamicagents/core` reads the same constants from the same
+ * package; a gatekeeper cannot import the agent runtime, and the contract
+ * package is the only thing both sides can hold.
+ *
+ * They are URIs on a host Dynamic Agents owns rather than bare words, because a
+ * `data.type` shares one flat namespace with every other party's. Until v0.4.0
+ * they were `io.da.*` — reverse-DNS for `da.io`, a domain that is not ours.
+ *
+ * What stays here is everything either side *enforces*. The protocol declares
+ * the shapes as types only; this module validates them with the schema library
+ * this side already carries, and maps them onto Slack.
  *
  * Flow:
  * - An agent that needs a human decision transitions its task to
@@ -26,16 +51,14 @@ import { dataOf, dataPart, textPart } from "@/a2a/parts";
  * covers both.
  */
 
-/** Data-part `type` for an agent → gatekeeper HITL request. */
-export const HITL_REQUEST_TYPE = "io.da.hitl.request";
-/** Data-part `type` for the gatekeeper → agent answer that resumes the task. */
-export const HITL_RESPONSE_TYPE = "io.da.hitl.response";
-/** Data-part `type` for the gatekeeper → agent timeout that ends the wait. */
-export const HITL_TIMEOUT_TYPE = "io.da.hitl.timeout";
-
-/** Canonical option ids used when an `approval` request omits its own options. */
-export const HITL_APPROVE_OPTION_ID = "approve";
-export const HITL_REJECT_OPTION_ID = "reject";
+export {
+  HITL_APPROVE_OPTION_ID,
+  HITL_REJECT_OPTION_ID,
+  HITL_REQUEST_TYPE,
+  HITL_RESPONSE_TYPE,
+  HITL_TIMEOUT_TYPE,
+  type HitlOption
+};
 
 const optionSchema = z.object({
   id: z.string().min(1),
@@ -50,7 +73,9 @@ export const hitlRequestSchema = z.object({
   type: z.literal(HITL_REQUEST_TYPE),
   /** Agent-chosen, unique per request — the Slack action + gatekeeper correlation key. */
   requestId: z.string().min(1),
-  requestKind: z.enum(["approval", "choice"]),
+  // Built from the protocol's tuple rather than spelled again: a kind added
+  // upstream widens this enum on the next install, instead of parsing as invalid.
+  requestKind: z.enum(HITL_REQUEST_KINDS),
   prompt: z.string().min(1),
   /** Omit for `approval` to accept the canonical Approve/Reject pair. */
   options: z.array(optionSchema).optional(),
@@ -59,8 +84,15 @@ export const hitlRequestSchema = z.object({
   allowFreeform: z.boolean().optional()
 });
 
-export type HitlRequest = z.infer<typeof hitlRequestSchema>;
-export type HitlOption = z.infer<typeof optionSchema>;
+/**
+ * The protocol's own shape, not `z.infer` of the schema above.
+ *
+ * Naming the contract type here is what makes {@link parseHitlRequest}'s return
+ * annotation a proof: the schema's output has to be assignable to it, so a field
+ * this validator drops, renames, or types differently from the contract fails
+ * `tsc` rather than surviving as a parse that quietly returns less.
+ */
+export type HitlRequest = HitlRequestData;
 
 /**
  * Find and validate a HITL request in an A2A message's parts. Returns `null`
@@ -85,6 +117,25 @@ export function approvalOptions(): SlackInputOption[] {
  * Map a validated {@link HitlRequest} onto the Slack SDK's `SlackInputRequest`,
  * filling the canonical Approve/Reject options when an `approval` omits its own.
  * The shapes are intentionally close, so this is mostly a rename plus defaulting.
+ *
+ * ## When there is nothing to click
+ *
+ * A `choice` can arrive with `options: []`, or with no `options` at all — both
+ * protocol-legal, and neither gets the Approve/Reject fill, which is for
+ * `approval` only. What reaches Slack then has an empty option set, and the
+ * adapter renders a freeform button for it **whether or not `allowFreeform` is
+ * set**.
+ *
+ * So the gatekeeper never posts a question nobody can answer, and the price is
+ * that `allowFreeform: false` is not honoured when there is nothing to offer
+ * instead. That is the right way round for a gatekeeper — the alternative is a
+ * prompt a person can only watch expire, and an agent that waits out the full
+ * TTL to learn nothing — but it is a decision, not an accident, which is why it
+ * is written down here.
+ *
+ * Nothing sends this shape today. If something does, the fix belongs in the
+ * contract — a request must offer at least one way to answer — rather than in a
+ * local refusal that leaves the other side guessing why its question vanished.
  */
 export function toSlackInputRequest(req: HitlRequest): SlackInputRequest {
   const options: SlackInputOption[] | undefined = req.options
@@ -117,34 +168,62 @@ export function optionLabel(
 }
 
 /**
+ * What a person actually gave back: a picked option, typed text, or an option
+ * with text alongside it — but never neither.
+ *
+ * The protocol says the same thing, and this is not a second copy of it: it is
+ * the protocol's union with `optionId?: undefined` in place of
+ * `optionId?: string` on the text-only member. That narrower spelling is what
+ * makes `input.optionId !== undefined` discriminate, so a builder can take the
+ * branch the compiler already proved instead of casting. It stays assignable to
+ * the protocol's union, which is the direction that matters.
+ *
+ * Carried from the Slack handler down to the resume, so the "one of the two is
+ * present" invariant holds at every step rather than being re-checked or
+ * papered over with an empty string at the end.
+ */
+export type HitlAnswerChoice =
+  { optionId: string; text?: string } | { optionId?: undefined; text: string };
+
+/**
  * Build the parts of the resume message the gatekeeper sends back onto the task.
  * `humanText` (the chosen option's label, or the freeform text) is the text
  * part a non-HITL client sees; the data part carries the structured answer.
  */
-export function buildHitlResponseParts(input: {
-  requestId: string;
-  optionId?: string;
-  text?: string;
-  answeredBy: string;
-  humanText: string;
-}): Part[] {
-  return [
-    textPart(input.humanText),
-    dataPart({
-      type: HITL_RESPONSE_TYPE,
-      requestId: input.requestId,
-      ...(input.optionId ? { optionId: input.optionId } : {}),
-      ...(input.text ? { text: input.text } : {}),
-      answeredBy: input.answeredBy
-    })
-  ];
+export function buildHitlResponseParts(
+  input: HitlAnswerChoice & {
+    requestId: string;
+    answeredBy: string;
+    humanText: string;
+  }
+): Part[] {
+  // Annotated as the protocol's own type, so the compiler checks the outbound
+  // direction: the union below refuses an answer carrying neither an `optionId`
+  // nor a `text`, which is a part no conformant agent could act on.
+  const data: HitlResponseData =
+    input.optionId !== undefined
+      ? {
+          type: HITL_RESPONSE_TYPE,
+          requestId: input.requestId,
+          optionId: input.optionId,
+          ...(input.text ? { text: input.text } : {}),
+          answeredBy: input.answeredBy
+        }
+      : {
+          type: HITL_RESPONSE_TYPE,
+          requestId: input.requestId,
+          text: input.text,
+          answeredBy: input.answeredBy
+        };
+  return [textPart(input.humanText), dataPart(data)];
 }
 
 /** Build the parts of the timeout message sent when a HITL prompt expires. */
 export function buildHitlTimeoutParts(requestId: string): Part[] {
+  const data: HitlTimeoutData = { type: HITL_TIMEOUT_TYPE, requestId };
   return [
     textPart("(No response was received within the allotted time.)"),
-    dataPart({ type: HITL_TIMEOUT_TYPE, requestId })
+    dataPart(data)
   ];
 }
 

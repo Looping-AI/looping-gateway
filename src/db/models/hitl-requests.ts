@@ -1,4 +1,5 @@
 import { and, eq, lt, sql } from "drizzle-orm";
+import type { HitlRequestKind } from "@dynamicagents/g2a-protocol";
 import { getDb } from "../client";
 import * as schema from "../schema";
 
@@ -15,7 +16,7 @@ export interface CreateHitlRequestInput {
   agentName: string;
   channelId: string;
   threadTs: string | null;
-  requestKind: "approval" | "choice";
+  requestKind: HitlRequestKind;
   promptText: string;
   /** JSON-encoded SlackInputOption[] as rendered. */
   optionsJson: string | null;

@@ -14,7 +14,11 @@ import { getWorkspaceByAdminChannel } from "@/db/models/workspaces";
 import { resumeFromInput } from "@/db/models/agent-tasks";
 import { signalReactionSync } from "@/workflows/reaction-helpers";
 import type { HitlRequestRow } from "@/db/models/hitl-requests";
-import { buildHitlResponseParts, buildHitlTimeoutParts } from "@/a2a/hitl";
+import {
+  buildHitlResponseParts,
+  buildHitlTimeoutParts,
+  type HitlAnswerChoice
+} from "@/a2a/hitl";
 import { buildAgentCard } from "@/a2a/card";
 import { buildMessage, textPart } from "@/a2a/parts";
 import { localPushNotificationConfig } from "@/a2a/notifications/local";
@@ -477,17 +481,19 @@ export async function dispatchToAgent(
   return dispatchResultFor(accept, agent, dispatchId);
 }
 
-/** A human's answer to a HITL prompt, as captured from Slack. */
-export interface HitlAnswer {
-  /** The chosen option id (absent for a pure freeform answer). */
-  optionId?: string;
-  /** Freeform text the human typed, if any. */
-  text?: string;
+/**
+ * A human's answer to a HITL prompt, as captured from Slack.
+ *
+ * The picked option and the typed text come from {@link HitlAnswerChoice}, which
+ * requires at least one of them — an answer with neither is a resume the agent
+ * cannot act on, and the type is the cheapest place to refuse it.
+ */
+export type HitlAnswer = HitlAnswerChoice & {
   /** Slack user id of whoever answered. */
   answeredBy: string;
   /** Human-readable answer for the resume TextPart (option label or freeform). */
   humanText: string;
-}
+};
 
 /**
  * The caller a system-initiated continuation (a HITL timeout) authorizes as when
@@ -718,13 +724,10 @@ export async function resumeAgentTask(
 ): Promise<void> {
   const caller = await buildUserAuthContext(answer.answeredBy);
   const outcome = await sendTaskContinuation(row, {
-    parts: buildHitlResponseParts({
-      requestId: row.requestId,
-      optionId: answer.optionId,
-      text: answer.text,
-      answeredBy: answer.answeredBy,
-      humanText: answer.humanText
-    }),
+    // Spread, not a field-by-field rebuild: listing `optionId` and `text`
+    // separately widens both back to `string | undefined` and loses the
+    // guarantee that one of them is present.
+    parts: buildHitlResponseParts({ ...answer, requestId: row.requestId }),
     messageId: `${row.token}:r:${row.requestId}`,
     caller
   });

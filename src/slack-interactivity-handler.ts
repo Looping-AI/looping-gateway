@@ -23,7 +23,7 @@ import {
   claimHitlAnswer,
   type HitlRequestRow
 } from "@/db/models/hitl-requests";
-import { optionLabel } from "@/a2a/hitl";
+import { optionLabel, type HitlAnswerChoice } from "@/a2a/hitl";
 import { resumeAgentTask } from "@/agents/dispatch";
 import { postEphemeral, updateBlocks, openView } from "@/wrappers/slack";
 
@@ -69,7 +69,7 @@ function promptSectionBlock(row: HitlRequestRow): unknown {
  */
 async function answerHitl(
   requestId: string,
-  input: { optionId?: string; text?: string; answeredBy: string }
+  input: HitlAnswerChoice & { answeredBy: string }
 ): Promise<void> {
   const claimed = await claimHitlAnswer(requestId, {
     answeredBy: input.answeredBy,
@@ -118,12 +118,9 @@ async function answerHitl(
     }
   }
 
-  await resumeAgentTask(claimed, {
-    optionId: input.optionId,
-    text: input.text,
-    answeredBy: input.answeredBy,
-    humanText: label
-  });
+  // Spread rather than re-listing the two fields: rebuilding them by hand loses
+  // the union's narrowing and lets an answer with neither back through.
+  await resumeAgentTask(claimed, { ...input, humanText: label });
 }
 
 /** Handle a button/select/radio click, or a "Something else…" freeform button. */
