@@ -10,7 +10,12 @@ import {
 } from "@a2a-js/sdk";
 import type { AgentExecutionEvent } from "@a2a-js/sdk/server";
 import { buildMessage, dataOf, partsText } from "@/a2a/parts";
-import { buildHitlResponseParts, buildHitlTimeoutParts } from "@/a2a/hitl";
+import {
+  buildHitlResponseParts,
+  buildHitlTimeoutParts,
+  HITL_APPROVE_OPTION_ID,
+  HITL_REJECT_OPTION_ID
+} from "@/a2a/hitl";
 import type { SessionLike } from "@/agents/shared/session";
 import {
   isTransientAiError,
@@ -678,139 +683,6 @@ describe("executeAgentTurn — cancellation", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Human-in-the-loop park (a tool calls turn.park → end in input-required)
-// ---------------------------------------------------------------------------
-
-describe("executeAgentTurn — HITL park", () => {
-  const request = {
-    type: "io.da.hitl.request",
-    requestId: "req-1",
-    requestKind: "choice",
-    prompt: "Which environment?",
-    options: [{ id: "opt_0", label: "dev" }],
-    allowFreeform: true
-  };
-
-  /** A model that calls `ask` on its first step; a second step would answer. */
-  function askThenAnswerModel(onGeneration: () => void) {
-    let n = 0;
-    return new MockLanguageModelV4({
-      doGenerate: async () => {
-        onGeneration();
-        return (
-          n++ === 0 ? toolCallResult("ask", {}) : okResult("unreachable")
-        ) as never;
-      }
-    });
-  }
-
-  it("ends the turn in input-required with the request DataPart, no terminal reply", async () => {
-    const session = new FakeSession();
-    let generations = 0;
-    const bus = fakeEventBus();
-
-    await executeAgentTurn(
-      fakeRequestContext("set up an agent"),
-      bus.eventBus,
-      makeCfg(
-        session,
-        askThenAnswerModel(() => generations++),
-        {
-          prepare: async (_t, _m, turn) => ({
-            session,
-            systemSuffix: "",
-            tools: {
-              ask: tool({
-                description: "Ask the user.",
-                inputSchema: z.object({}),
-                execute: async () => {
-                  turn.park(request as never);
-                  return { status: "awaiting_user" };
-                }
-              })
-            }
-          })
-        }
-      )
-    );
-
-    // The turn always finishes, but the model's second (answering) step never runs.
-    expect(bus.finished).toHaveBeenCalledTimes(1);
-    expect(generations).toBe(1);
-
-    // Terminal event is input-required (an interrupted, non-terminal task
-    // state) carrying the HITL data part.
-    const last = statusEventAt(bus, -1);
-    expect(last).toMatchObject({
-      taskId: "task-1",
-      status: {
-        state: TaskState.TASK_STATE_INPUT_REQUIRED,
-        message: { messageId: "m1:hitl" }
-      }
-    });
-    const parts = last.status?.message?.parts ?? [];
-    expect(partsText(parts)).toBe("Which environment?");
-    expect(
-      parts.some((p) => {
-        const data = dataOf(p) as
-          { type?: string; requestId?: string } | undefined;
-        return (
-          data?.type === "io.da.hitl.request" && data.requestId === "req-1"
-        );
-      })
-    ).toBe(true);
-
-    // No completed/canceled terminal was published.
-    const states = publishedStates(bus);
-    expect(states).not.toContain(TaskState.TASK_STATE_COMPLETED);
-    expect(states).not.toContain(TaskState.TASK_STATE_CANCELED);
-
-    // The prompt is persisted as the assistant turn so the resumed turn has context.
-    expect(session.messages.map((m) => m.role)).toEqual(["user", "assistant"]);
-    expect(session.messages[1].parts[0]).toMatchObject({
-      type: "text",
-      text: "Which environment?"
-    });
-  });
-
-  it("a recorded 🛑 wins over a park (no prompt is raised)", async () => {
-    const session = new FakeSession();
-    const bus = fakeEventBus();
-
-    await executeAgentTurn(
-      fakeRequestContext("set up an agent"),
-      bus.eventBus,
-      makeCfg(
-        session,
-        askThenAnswerModel(() => {}),
-        {
-          isCanceled: async () => true,
-          prepare: async (_t, _m, turn) => ({
-            session,
-            systemSuffix: "",
-            tools: {
-              ask: tool({
-                description: "Ask the user.",
-                inputSchema: z.object({}),
-                execute: async () => {
-                  turn.park(request as never);
-                  return { status: "awaiting_user" };
-                }
-              })
-            }
-          })
-        }
-      )
-    );
-
-    expect(publishedStates(bus).at(-1)).toBe(TaskState.TASK_STATE_CANCELED);
-    expect(publishedStates(bus)).not.toContain(
-      TaskState.TASK_STATE_INPUT_REQUIRED
-    );
-  });
-});
-
-// ---------------------------------------------------------------------------
 // Forced ending (`requireFinalReply`) — prose is no longer an outcome.
 //
 // The failure these cover really happened: five consecutive admin turns came back
@@ -1190,67 +1062,6 @@ describe("executeAgentTurn — forced final_reply", () => {
     expect(partsText(expectTerminalReply(bus)?.parts)).toBe(
       "Here is what I found."
     );
-  });
-
-  it("lets a park out-rank a final_reply emitted in the same step", async () => {
-    const session = new FakeSession();
-    const request = {
-      type: "io.da.hitl.request",
-      requestId: "req-1",
-      requestKind: "choice",
-      prompt: "Which environment?",
-      options: [{ id: "opt_0", label: "dev" }],
-      allowFreeform: true
-    };
-    const model = new MockLanguageModelV4({
-      doGenerate: async () =>
-        ({
-          ...toolCallResult("ask", {}),
-          content: [
-            {
-              type: "tool-call",
-              toolCallId: "tc-ask",
-              toolName: "ask",
-              input: "{}"
-            },
-            {
-              type: "tool-call",
-              toolCallId: "fr1",
-              toolName: "final_reply",
-              input: JSON.stringify({ text: "Using dev." })
-            }
-          ]
-        }) as never
-    });
-    const bus = fakeEventBus();
-
-    await executeAgentTurn(
-      fakeRequestContext("set up an agent"),
-      bus.eventBus,
-      forcedCfg(session, model, {
-        prepare: async (_t, _m, turn) => ({
-          session,
-          systemSuffix: "",
-          tools: {
-            ask: tool({
-              description: "Ask the user.",
-              inputSchema: z.object({}),
-              execute: async () => {
-                turn.park(request as never);
-                return { status: "awaiting_user" };
-              }
-            })
-          }
-        })
-      })
-    );
-
-    // Asking is the more committal act, so the question is raised and the answer
-    // it would have given is discarded.
-    expect(publishedStates(bus).at(-1)).toBe(
-      TaskState.TASK_STATE_INPUT_REQUIRED
-    );
-    expect(publishedText(bus)).not.toContain("Using dev.");
   });
 
   it("lets a 🛑 out-rank everything, with no fallback or final round after it", async () => {
@@ -1780,6 +1591,484 @@ describe("executeAgentTurn — ask_user", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Approvals — a tool the policy gates. The turn pauses on the call itself, keeps
+// it as an open call, and a human's Approve resumes it as the call the SDK runs.
+// ---------------------------------------------------------------------------
+
+describe("executeAgentTurn — approvals", () => {
+  const input = { name: "arc-player" };
+  const reason = "Delete *arc-player*?";
+
+  /** A gated tool that records what it was actually asked to do. */
+  function gatedTool() {
+    const ran: unknown[] = [];
+    return {
+      ran,
+      danger: tool({
+        description: "Delete something, irreversibly.",
+        inputSchema: z.object({ name: z.string() }),
+        execute: async (args) => {
+          ran.push(args);
+          return { ok: true, deleted: args.name };
+        }
+      })
+    };
+  }
+
+  /** Always stop for a human. */
+  const asksAHuman = {
+    danger: async () => ({ type: "user-approval", reason })
+  };
+
+  function gatedCfg(
+    session: SessionLike,
+    model: LanguageModel,
+    gate: ReturnType<typeof gatedTool>,
+    toolApproval: unknown,
+    overrides: Partial<AgentTurnConfig> = {}
+  ): AgentTurnConfig {
+    return forcedCfg(session, model, {
+      prepare: async () => ({
+        session,
+        systemSuffix: "",
+        tools: { work: workTool, ask_user: askUserTool, danger: gate.danger },
+        toolApproval: toolApproval as never
+      }),
+      ...overrides
+    });
+  }
+
+  /** The gatekeeper handing a decision back onto the parked task. */
+  function resumeContext(parts: Message["parts"]) {
+    return {
+      contextId: "ctx-1",
+      taskId: "task-1",
+      userMessage: buildMessage({
+        messageId: "m2",
+        role: Role.ROLE_USER,
+        parts,
+        contextId: "ctx-1",
+        taskId: "task-1",
+        metadata: { user: { displayName: "Grace" } }
+      })
+    } as never;
+  }
+
+  const decision = (optionId: string, humanText: string) =>
+    buildHitlResponseParts({
+      requestId: "aitxt-1",
+      optionId,
+      answeredBy: "U9",
+      humanText
+    });
+
+  /** The gated call as the pausing turn kept it. */
+  const heldApproval = () => ({
+    requestId: "aitxt-1",
+    toolCallId: "tc-danger",
+    toolName: "danger",
+    input,
+    approval: { reason },
+    createdAt: Date.now()
+  });
+
+  /** The tool parts of the last assistant message the turn persisted. */
+  function lastActions(session: FakeSession) {
+    const assistant = [...session.messages]
+      .reverse()
+      .find((m) => m.role === "assistant");
+    return (assistant?.parts ?? []).filter((p) => p.type.startsWith("tool-"));
+  }
+
+  /** The HITL request data part on the last event published. */
+  function raisedRequest(bus: { published: PublishedEvent[] }) {
+    return (statusEventAt(bus, -1).status?.message?.parts ?? [])
+      .map((p) => dataOf(p) as Record<string, unknown> | undefined)
+      .find((d) => d?.type === "io.da.hitl.request");
+  }
+
+  it("pauses on a gated call and keeps it until someone decides", async () => {
+    const session = new FakeSession();
+    const openCalls = new MemoryOpenCalls();
+    const gate = gatedTool();
+    let calls = 0;
+    const model = new MockLanguageModelV4({
+      doGenerate: async () => {
+        calls++;
+        return toolCallResult("danger", input) as never;
+      }
+    });
+    const bus = fakeEventBus();
+
+    await executeAgentTurn(
+      fakeRequestContext("delete arc-player"),
+      bus.eventBus,
+      gatedCfg(session, model, gate, asksAHuman, { openCalls })
+    );
+
+    // The call is blocked, so it produces no output and the loop stops on it.
+    expect(calls).toBe(1);
+    expect(gate.ran).toHaveLength(0);
+    expect(statusEventAt(bus, -1)).toMatchObject({
+      status: { state: TaskState.TASK_STATE_INPUT_REQUIRED }
+    });
+    const request = raisedRequest(bus);
+    expect(request).toMatchObject({ requestKind: "approval", prompt: reason });
+
+    // Kept under the SDK's own approval id — the replay has to quote it back.
+    const held = [...openCalls.held.values()][0];
+    expect(held).toMatchObject({ toolName: "danger", input });
+    expect(held.requestId).toBe(request?.requestId);
+    expect(publishedStates(bus)).not.toContain(TaskState.TASK_STATE_COMPLETED);
+  });
+
+  it("does not stop for anyone when the policy denies outright", async () => {
+    // Nobody should be asked to approve a call that would be refused whatever
+    // they answered. The model reads the refusal and ends the turn itself.
+    const session = new FakeSession();
+    const openCalls = new MemoryOpenCalls();
+    const gate = gatedTool();
+    let n = 0;
+    const model = new MockLanguageModelV4({
+      doGenerate: async () =>
+        (n++ === 0
+          ? toolCallResult("danger", input)
+          : finalReplyResult("I can't do that.")) as never
+    });
+    const bus = fakeEventBus();
+
+    await executeAgentTurn(
+      fakeRequestContext("delete arc-player"),
+      bus.eventBus,
+      gatedCfg(
+        session,
+        model,
+        gate,
+        { danger: async () => ({ type: "denied", reason: "Not yours." }) },
+        { openCalls }
+      )
+    );
+
+    expect(gate.ran).toHaveLength(0);
+    expect(openCalls.held.size).toBe(0);
+    expect(publishedStates(bus).at(-1)).toBe(TaskState.TASK_STATE_COMPLETED);
+    expect(publishedText(bus)).toContain("I can't do that.");
+  });
+
+  it("lets a question out-rank an approval raised in the same step", async () => {
+    const session = new FakeSession();
+    const openCalls = new MemoryOpenCalls();
+    const gate = gatedTool();
+    const question = {
+      question: "Which one?",
+      options: [{ label: "arc-player" }]
+    };
+    const model = new MockLanguageModelV4({
+      doGenerate: async () =>
+        ({
+          ...toolCallResult("ask_user", question),
+          content: [
+            {
+              type: "tool-call",
+              toolCallId: "tc-ask",
+              toolName: "ask_user",
+              input: JSON.stringify(question)
+            },
+            {
+              type: "tool-call",
+              toolCallId: "tc-danger",
+              toolName: "danger",
+              input: JSON.stringify(input)
+            }
+          ]
+        }) as never
+    });
+    const bus = fakeEventBus();
+
+    await executeAgentTurn(
+      fakeRequestContext("delete one of them"),
+      bus.eventBus,
+      gatedCfg(session, model, gate, asksAHuman, { openCalls })
+    );
+
+    // Asking means the model is unsure what was wanted, and an approval decided
+    // against an unclear request is the one decision a human should not be handed.
+    expect(raisedRequest(bus)).toMatchObject({ requestKind: "choice" });
+    expect([...openCalls.held.values()][0].toolName).toBe("ask_user");
+    expect(gate.ran).toHaveLength(0);
+    expect(lastActions(session)).toEqual([
+      expect.objectContaining({
+        type: "tool-danger",
+        state: "output-error",
+        errorText: NOT_ASKED_NOTE
+      })
+    ]);
+  });
+
+  it("resumes an approval by running the call the model actually made", async () => {
+    const session = new FakeSession();
+    session.messages.push(assistantSessionMessage(reason));
+    const openCalls = new MemoryOpenCalls();
+    await openCalls.put(heldApproval());
+    const gate = gatedTool();
+    const model = new MockLanguageModelV4({
+      doGenerate: async () => finalReplyResult("Deleted it.") as never
+    });
+    const bus = fakeEventBus();
+
+    await executeAgentTurn(
+      resumeContext(decision(HITL_APPROVE_OPTION_ID, "Approve")),
+      bus.eventBus,
+      gatedCfg(session, model, gate, asksAHuman, { openCalls })
+    );
+
+    // Exactly once, with the input that was on screen — not a re-description of it.
+    expect(gate.ran).toEqual([input]);
+    expect(publishedText(bus)).toContain("Deleted it.");
+    expect(openCalls.held.size).toBe(0);
+    // The decision and its outcome land on one part, so neither can be read alone.
+    expect(lastActions(session)[0]).toMatchObject({
+      type: "tool-danger",
+      state: "output-available",
+      output: { ok: true, deleted: "arc-player" },
+      approval: { id: "aitxt-1", approved: true }
+    });
+  });
+
+  it("runs nothing when the human rejects, and records why", async () => {
+    const session = new FakeSession();
+    // The turn that raised the prompt. A resume adds no user turn of its own, so
+    // without this the model would be handed an empty conversation.
+    session.messages.push(assistantSessionMessage(reason));
+    const openCalls = new MemoryOpenCalls();
+    await openCalls.put(heldApproval());
+    const gate = gatedTool();
+    const model = new MockLanguageModelV4({
+      doGenerate: async () => finalReplyResult("Left it alone.") as never
+    });
+    const bus = fakeEventBus();
+
+    await executeAgentTurn(
+      resumeContext(decision(HITL_REJECT_OPTION_ID, "Reject")),
+      bus.eventBus,
+      gatedCfg(session, model, gate, asksAHuman, { openCalls })
+    );
+
+    expect(gate.ran).toHaveLength(0);
+    expect(lastActions(session)[0]).toMatchObject({
+      type: "tool-danger",
+      state: "output-denied",
+      approval: { approved: false, reason: "Rejected in Slack by Grace." }
+    });
+  });
+
+  it("runs nothing when nobody answered in time", async () => {
+    const session = new FakeSession();
+    // The turn that raised the prompt. A resume adds no user turn of its own, so
+    // without this the model would be handed an empty conversation.
+    session.messages.push(assistantSessionMessage(reason));
+    const openCalls = new MemoryOpenCalls();
+    await openCalls.put(heldApproval());
+    const gate = gatedTool();
+    const model = new MockLanguageModelV4({
+      doGenerate: async () => finalReplyResult("Nobody answered.") as never
+    });
+
+    await executeAgentTurn(
+      resumeContext(buildHitlTimeoutParts("aitxt-1")),
+      fakeEventBus().eventBus,
+      gatedCfg(session, model, gate, asksAHuman, { openCalls })
+    );
+
+    expect(gate.ran).toHaveLength(0);
+    expect(lastActions(session)[0]).toMatchObject({
+      state: "output-denied",
+      approval: { reason: "The approval request expired with no response." }
+    });
+  });
+
+  it("withholds both the question and the gated tool after a timeout", async () => {
+    // Either one left on the table is the same unbounded loop: raise a prompt,
+    // wait out the TTL, raise it again. The turn is left one way out — say so
+    // and finish.
+    const session = new FakeSession();
+    // The turn that raised the prompt. A resume adds no user turn of its own, so
+    // without this the model would be handed an empty conversation.
+    session.messages.push(assistantSessionMessage(reason));
+    const openCalls = new MemoryOpenCalls();
+    await openCalls.put(heldApproval());
+    const gate = gatedTool();
+    const offered: string[][] = [];
+    const model = new MockLanguageModelV4({
+      doGenerate: async (options) => {
+        offered.push((options.tools ?? []).map((t) => t.name));
+        return finalReplyResult("Nobody answered, so I left it.") as never;
+      }
+    });
+
+    await executeAgentTurn(
+      resumeContext(buildHitlTimeoutParts("aitxt-1")),
+      fakeEventBus().eventBus,
+      gatedCfg(session, model, gate, asksAHuman, { openCalls })
+    );
+
+    expect(offered[0]).not.toContain("danger");
+    expect(offered[0]).not.toContain("ask_user");
+    // The ending still has the turn's own work to report.
+    expect(offered[0]).toEqual(expect.arrayContaining(["final_reply", "work"]));
+  });
+
+  it("refuses an approver the policy will not have, and runs nothing", async () => {
+    // Anyone in the thread can press Approve. The SDK re-runs the policy against
+    // whoever did, which is the whole reason it is re-run at all.
+    const session = new FakeSession();
+    // The turn that raised the prompt. A resume adds no user turn of its own, so
+    // without this the model would be handed an empty conversation.
+    session.messages.push(assistantSessionMessage(reason));
+    const openCalls = new MemoryOpenCalls();
+    await openCalls.put(heldApproval());
+    const gate = gatedTool();
+    const model = new MockLanguageModelV4({
+      doGenerate: async () =>
+        finalReplyResult("You're not allowed to.") as never
+    });
+
+    await executeAgentTurn(
+      resumeContext(decision(HITL_APPROVE_OPTION_ID, "Approve")),
+      fakeEventBus().eventBus,
+      gatedCfg(
+        session,
+        model,
+        gate,
+        {
+          danger: async () => ({
+            type: "denied",
+            reason: "You don't administer this workspace."
+          })
+        },
+        { openCalls }
+      )
+    );
+
+    expect(gate.ran).toHaveLength(0);
+    expect(lastActions(session)[0]).toMatchObject({
+      state: "output-denied",
+      approval: {
+        approved: false,
+        reason: "You don't administer this workspace."
+      }
+    });
+  });
+
+  it("lets a 🛑 out-rank an approved call: nothing runs, no call is spent", async () => {
+    // The approved call runs before the first model call, so by the first step
+    // boundary the deletion would already have happened. This is the only point
+    // at which stopping still means anything.
+    const session = new FakeSession();
+    // The turn that raised the prompt. A resume adds no user turn of its own, so
+    // without this the model would be handed an empty conversation.
+    session.messages.push(assistantSessionMessage(reason));
+    const openCalls = new MemoryOpenCalls();
+    await openCalls.put(heldApproval());
+    const gate = gatedTool();
+    let calls = 0;
+    const model = new MockLanguageModelV4({
+      doGenerate: async () => {
+        calls++;
+        return finalReplyResult("unreachable") as never;
+      }
+    });
+    const bus = fakeEventBus();
+
+    await executeAgentTurn(
+      resumeContext(decision(HITL_APPROVE_OPTION_ID, "Approve")),
+      bus.eventBus,
+      gatedCfg(session, model, gate, asksAHuman, {
+        openCalls,
+        isCanceled: async () => true
+      })
+    );
+
+    expect(gate.ran).toHaveLength(0);
+    expect(calls).toBe(0);
+    expect(publishedStates(bus).at(-1)).toBe(TaskState.TASK_STATE_CANCELED);
+    expect(lastActions(session)[0]).toMatchObject({
+      state: "output-denied",
+      approval: { approved: false }
+    });
+  });
+
+  it("records a carried-out approval even when the turn then fails", async () => {
+    // The agent is gone. A turn that failed afterwards must not leave history
+    // silent about it — nothing else will ever record it.
+    const session = new FakeSession();
+    // The turn that raised the prompt. A resume adds no user turn of its own, so
+    // without this the model would be handed an empty conversation.
+    session.messages.push(assistantSessionMessage(reason));
+    const openCalls = new MemoryOpenCalls();
+    await openCalls.put(heldApproval());
+    const gate = gatedTool();
+    const model = new MockLanguageModelV4({
+      doGenerate: async () => {
+        throw new Error("model exploded");
+      }
+    });
+    const bus = fakeEventBus();
+
+    await executeAgentTurn(
+      resumeContext(decision(HITL_APPROVE_OPTION_ID, "Approve")),
+      bus.eventBus,
+      gatedCfg(session, model, gate, asksAHuman, { openCalls })
+    );
+
+    expect(gate.ran).toEqual([input]);
+    expect(publishedStates(bus).at(-1)).toBe(TaskState.TASK_STATE_FAILED);
+    expect(lastActions(session)[0]).toMatchObject({
+      type: "tool-danger",
+      state: "output-available",
+      output: { ok: true, deleted: "arc-player" }
+    });
+  });
+
+  it("hands the salvage the approved call's result, not the decision again", async () => {
+    // By the time an ending has to be salvaged, the approved call has already run.
+    // Seeding that from `messages` would hand the SDK the same decision a second
+    // time with no result against it, so the settled record goes in instead.
+    const session = new FakeSession();
+    session.messages.push(assistantSessionMessage(reason));
+    const openCalls = new MemoryOpenCalls();
+    await openCalls.put(heldApproval());
+    const gate = gatedTool();
+    const prompts: string[] = [];
+    let n = 0;
+    const model = new MockLanguageModelV4({
+      doGenerate: async (options) => {
+        prompts.push(JSON.stringify(options.prompt));
+        return (
+          n++ === 0
+            ? okResult("Deleted it! ✅")
+            : finalReplyResult("Deleted arc-player.")
+        ) as never;
+      }
+    });
+    const bus = fakeEventBus();
+
+    await executeAgentTurn(
+      resumeContext(decision(HITL_APPROVE_OPTION_ID, "Approve")),
+      bus.eventBus,
+      gatedCfg(session, model, gate, asksAHuman, { openCalls })
+    );
+
+    // It ran once, ahead of the first call, and the salvage does not run it again.
+    expect(gate.ran).toEqual([input]);
+    expect(prompts).toHaveLength(2);
+    // The salvage is shown what the call produced — which is the evidence that the
+    // decision was settled before it was replayed.
+    expect(prompts[1]).toContain("deleted");
+    expect(publishedText(bus)).toContain("Deleted arc-player.");
+  });
+});
+// ---------------------------------------------------------------------------
 // Tool-call evidence in history (`recordToolCalls`)
 //
 // History used to keep only the assistant's final text, so a fabricated claim
@@ -1872,56 +2161,6 @@ describe("executeAgentTurn — recorded tool calls", () => {
     expect(publishedStates(bus).at(-1)).toBe(TaskState.TASK_STATE_CANCELED);
     expect(persistedActions(session)).toHaveLength(1);
     expect(sessionText(session.messages[1])).toContain("stopped by the user");
-  });
-
-  it("keeps calls that ran before a HITL park", async () => {
-    const session = new FakeSession();
-    const request = {
-      type: "io.da.hitl.request",
-      requestId: "req-1",
-      requestKind: "approval",
-      prompt: "Delete arc-player?"
-    };
-    let n = 0;
-    const model = new MockLanguageModelV4({
-      doGenerate: async () =>
-        (n++ === 0
-          ? toolCallResult("work", {})
-          : toolCallResult("ask", {})) as never
-    });
-    const bus = fakeEventBus();
-
-    await executeAgentTurn(
-      fakeRequestContext("delete it"),
-      bus.eventBus,
-      forcedCfg(session, model, {
-        prepare: async (_t, _m, turn) => ({
-          session,
-          systemSuffix: "",
-          tools: {
-            work: workTool,
-            ask: tool({
-              description: "Ask the user.",
-              inputSchema: z.object({}),
-              execute: async () => {
-                turn.park(request as never);
-                return { status: "awaiting_approval" };
-              }
-            })
-          }
-        })
-      })
-    );
-
-    expect(publishedStates(bus).at(-1)).toBe(
-      TaskState.TASK_STATE_INPUT_REQUIRED
-    );
-    // Both the work that ran and the question that parked the turn.
-    expect(persistedActions(session).map((p) => p.type)).toEqual([
-      "tool-work",
-      "tool-ask"
-    ]);
-    expect(sessionText(session.messages[1])).toBe("Delete arc-player?");
   });
 
   it("records a failed call so a later turn cannot confirm it as a success", async () => {

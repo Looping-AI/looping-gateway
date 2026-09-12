@@ -187,6 +187,13 @@ export interface ToolRecord {
   input: unknown;
   output?: unknown;
   errorText?: string;
+  /**
+   * Present ⇔ a human was asked before this call could run. `approved` is their
+   * decision, and `reason` says who decided (or that nobody did in time). A call
+   * still awaiting nothing — approved but not yet run — is how the resumed turn
+   * hands the decision back to the SDK; see `approvedCall` in `open-call.ts`.
+   */
+  approval?: { id: string; approved: boolean; reason?: string };
 }
 
 /**
@@ -266,6 +273,10 @@ function capInput(value: unknown): Record<string, unknown> {
  *
  * The part carries its own `input` **and** `output`, so a call and its result can
  * never be separated — including by a compaction boundary landing between them.
+ *
+ * A call that went through an approval carries the decision too, in whichever of
+ * the SDK's three approval states it has reached: refused outright, approved but
+ * not yet run (the replay a resumed turn hands back), or approved and finished.
  */
 function toolPart(record: ToolRecord): SessionMessagePart {
   const call = {
@@ -273,13 +284,35 @@ function toolPart(record: ToolRecord): SessionMessagePart {
     toolCallId: record.toolCallId,
     input: capInput(record.input)
   };
+  const { approval } = record;
+  // Refused, or expired: nothing ran, and the reason is what the model reads back
+  // in place of a result.
+  if (approval && !approval.approved) {
+    return { ...call, state: "output-denied", approval } as SessionMessagePart;
+  }
+  // Approved, with no outcome yet. `"output" in record` rather than a check for
+  // `undefined`: a tool that genuinely returned nothing still ran, and must not
+  // read as a decision still waiting to be carried out.
+  if (approval && !("output" in record) && record.errorText === undefined) {
+    return {
+      ...call,
+      state: "approval-responded",
+      approval
+    } as SessionMessagePart;
+  }
   const part =
     record.errorText === undefined
-      ? { ...call, state: "output-available", output: cap(record.output) }
+      ? {
+          ...call,
+          state: "output-available",
+          output: cap(record.output),
+          ...(approval ? { approval } : {})
+        }
       : {
           ...call,
           state: "output-error",
-          errorText: capText(record.errorText)
+          errorText: capText(record.errorText),
+          ...(approval ? { approval } : {})
         };
   return part as SessionMessagePart;
 }

@@ -1,6 +1,8 @@
-import type { AgentExecutor, ExecutionEventBus } from "@a2a-js/sdk/server";
-import { RequestContext } from "@a2a-js/sdk/server";
-import { textPart } from "@/a2a/parts";
+import type {
+  AgentExecutor,
+  ExecutionEventBus,
+  RequestContext
+} from "@a2a-js/sdk/server";
 import { COMPACT_AFTER_TOKENS, COMPACT_TAIL_TOKENS } from "@/config";
 import type { LanguageModel } from "ai";
 import { chatModel, type ModelOverrides } from "@/agents/model";
@@ -20,19 +22,13 @@ import {
   getAllowedRemoteAgentDomains,
   getPublicUrl
 } from "@/db/models/workspace-configs";
-import {
-  HITL_APPROVE_OPTION_ID,
-  parseHitlResponse,
-  parseHitlTimeout
-} from "@/a2a/hitl";
-import type { AgentTurnMetadata } from "@/agents/dispatch";
 import { adminSoul, callerContext } from "./prompt";
-import { buildAdminTools, type EndpointVerifier } from "./tools";
 import {
-  describeGatedAction,
-  runGatedAction,
-  type GatedAction
-} from "./approvals";
+  adminToolApproval,
+  buildAdminTools,
+  type AdminToolDeps,
+  type EndpointVerifier
+} from "./tools";
 import { generateAvatar, type GeneratedImage } from "./avatar";
 
 // Re-exported so existing test imports (`@/agents/admin/executor`) keep working.
@@ -52,20 +48,10 @@ export interface AdminExecutorOptions extends ModelOverrides {
     name: string
   ) => Promise<{ key: string; contentType: string }>;
   /**
-   * Persist / retrieve a destructive action deferred behind a human approval,
-   * keyed by the HITL `requestId`. `take` reads-and-deletes so an action runs at
-   * most once. Bound to the admin DO storage by {@link AdminAgent}; absent in
-   * unit tests that don't exercise approvals.
-   */
-  storePendingAction?: (
-    requestId: string,
-    action: GatedAction
-  ) => Promise<void>;
-  takePendingAction?: (requestId: string) => Promise<GatedAction | null>;
-  /**
-   * Where a turn that asks the human a question keeps the call it paused on, until
-   * the answer resumes it. Bound to the admin DO storage by {@link AdminAgent};
-   * absent in unit tests that never ask.
+   * Where a turn that stops for a human keeps the call it paused on, until the
+   * answer resumes it — a question it asked, or a destructive call awaiting an
+   * Approve. Bound to the admin DO storage by {@link AdminAgent}; absent in unit
+   * tests that never pause.
    */
   openCalls?: OpenCallStore;
 }
@@ -114,12 +100,7 @@ export class AdminAgentExecutor implements AgentExecutor {
     requestContext: RequestContext,
     eventBus: ExecutionEventBus
   ): Promise<void> => {
-    // A resumed turn may carry the answer to a destructive-action approval. If so,
-    // carry the action out (or skip it) here and hand the loop a synthetic message
-    // stating the outcome, so the model just confirms it in-persona. All other
-    // resumes (an `ask_user` answer, or a fresh message) pass through untouched.
-    const turnContext = await this.applyPendingApproval(requestContext);
-    await executeAgentTurn(turnContext, eventBus, {
+    await executeAgentTurn(requestContext, eventBus, {
       model: this.model,
       // The dispatch token is the A2A messageId, and the gatekeeper records a 🛑
       // against that same token — so the running turn can read its own stop flag.
@@ -135,7 +116,7 @@ export class AdminAgentExecutor implements AgentExecutor {
       requireFinalReply: true,
       recordToolCalls: true,
       openCalls: this.options.openCalls,
-      prepare: async (_text, metadata, turn) => {
+      prepare: async (_text, metadata) => {
         // Validate the deserialized wire metadata at this boundary. Both the
         // workspace id and the Slack user are guaranteed preconditions (the
         // classifier drops sender-less events), so treat them as required.
@@ -154,19 +135,23 @@ export class AdminAgentExecutor implements AgentExecutor {
         const session = this.getSession(wsId);
         const namespace = `admin:${wsId}`;
         const hasArchive = (await session.getCompactions()).length > 0;
+        // One `deps` for both the tools and the policy that gates them. On a turn
+        // resuming an approval, `ctx` is the *approver*, so the SDK re-running the
+        // policy re-checks their permissions rather than the requester's — which is
+        // the whole reason an approval by a non-admin cannot carry an action through.
+        const deps: AdminToolDeps = {
+          ctx,
+          wsId,
+          verifyEndpoint: this.verifyEndpoint(wsId),
+          generateImage: (prompt) => generateAvatar(prompt),
+          storeIcon: this.options.storeIcon
+        };
         return {
           session,
           systemSuffix: callerContext(ctx, { workspaceId: wsId }),
+          toolApproval: adminToolApproval(deps),
           tools: {
-            ...buildAdminTools({
-              ctx,
-              wsId,
-              verifyEndpoint: this.verifyEndpoint(wsId),
-              generateImage: (prompt) => generateAvatar(prompt),
-              storeIcon: this.options.storeIcon,
-              park: turn.park,
-              storePendingAction: this.options.storePendingAction
-            }),
+            ...buildAdminTools(deps),
             ...recallTools(namespace, hasArchive)
           }
         };
@@ -177,9 +162,9 @@ export class AdminAgentExecutor implements AgentExecutor {
   /**
    * The card verifier for one workspace, bound to this gatekeeper's signing identity.
    *
-   * Shared by the tools that verify a card during a turn and by the approval resume
-   * below, which re-verifies at the moment a human clicks Approve — one definition,
-   * so the two can never disagree about what "verified" means.
+   * Used by the tools that verify a card during a turn and by the approval policy,
+   * which re-reads the live card at the moment a human clicks Approve — one
+   * definition, so the two can never disagree about what "verified" means.
    */
   private verifyEndpoint(wsId: number): EndpointVerifier {
     return async (url, tenantId) => {
@@ -216,65 +201,6 @@ export class AdminAgentExecutor implements AgentExecutor {
           })
       });
     };
-  }
-
-  /**
-   * If this turn resumes a parked destructive-action approval, take the pending
-   * action and reflect the human's decision: run it on Approve, skip it on Reject
-   * / timeout / an unauthorized approver, then return a new {@link RequestContext}
-   * whose text states the outcome for the model to confirm. Returns the original
-   * context unchanged for every other message (including `ask_user` answers, which
-   * the turn resumes from its open-call store).
-   */
-  private async applyPendingApproval(
-    rc: RequestContext
-  ): Promise<RequestContext> {
-    const response = parseHitlResponse(rc.userMessage);
-    const timeout = parseHitlTimeout(rc.userMessage);
-    const requestId = response?.requestId ?? timeout?.requestId;
-    if (!requestId || !this.options.takePendingAction) return rc;
-
-    const action = await this.options.takePendingAction(requestId);
-    if (!action) return rc; // an ask_user answer, or an action already handled
-
-    const what = describeGatedAction(action);
-    let outcome: string;
-    if (timeout) {
-      outcome = `The approval request to ${what} expired with no response, so it was NOT performed. Let the user know they can ask again if they still want it.`;
-    } else {
-      const metadata = (rc.userMessage.metadata ??
-        {}) as Partial<AgentTurnMetadata>;
-      const approver = metadata.user;
-      if (response?.optionId === HITL_APPROVE_OPTION_ID && approver) {
-        const result = await runGatedAction(action, approver, {
-          verifyEndpoint: this.verifyEndpoint(action.wsId)
-        });
-        outcome = result.ok
-          ? `The user approved. I have ${result.summary}. Confirm this succinctly to the user.`
-          : `The user approved, but the action could not be completed: ${result.summary}. Explain this plainly to the user.`;
-      } else {
-        outcome = `The user declined the request to ${what}. It was NOT performed. Acknowledge this briefly.`;
-      }
-    }
-
-    // v1.0's RequestContext wraps the whole inbound SendMessageRequest rather
-    // than a loose message, so the rewritten turn is threaded back through
-    // `request.message` — keeping the original configuration and request
-    // metadata intact for anything downstream that reads them.
-    return new RequestContext(
-      {
-        ...rc.request,
-        message: {
-          ...rc.userMessage,
-          parts: [textPart(`[system] ${outcome}`)]
-        }
-      },
-      rc.taskId,
-      rc.contextId,
-      rc.context,
-      rc.task,
-      rc.referenceTasks
-    );
   }
 
   // A2A cancellation isn't supported for this single-shot loop.

@@ -369,6 +369,155 @@ describe("assistantSessionMessage", () => {
   });
 });
 
+describe("assistantSessionMessage — approvals", () => {
+  const gated = {
+    toolCallId: "tc-del",
+    toolName: "agents_delete",
+    input: { name: "arc-player" }
+  };
+
+  it("records an approved call with no result as the decision itself", () => {
+    const m = assistantSessionMessage("Deleting it.", [
+      {
+        ...gated,
+        approval: {
+          id: "aitxt-1",
+          approved: true,
+          reason: "Approved in Slack by Grace."
+        }
+      }
+    ]);
+    expect(m.parts[0]).toMatchObject({
+      type: "tool-agents_delete",
+      state: "approval-responded",
+      approval: { id: "aitxt-1", approved: true }
+    });
+  });
+
+  it("records a refusal as denied, carrying why", () => {
+    const m = assistantSessionMessage("I didn't delete it.", [
+      {
+        ...gated,
+        approval: {
+          id: "aitxt-1",
+          approved: false,
+          reason: "Rejected in Slack by Grace."
+        }
+      }
+    ]);
+    expect(m.parts[0]).toMatchObject({
+      state: "output-denied",
+      approval: { approved: false, reason: "Rejected in Slack by Grace." }
+    });
+  });
+
+  it("keeps the decision on a call that ran", () => {
+    const m = assistantSessionMessage("Deleted.", [
+      {
+        ...gated,
+        output: { ok: true },
+        approval: { id: "aitxt-1", approved: true }
+      }
+    ]);
+    expect(m.parts[0]).toMatchObject({
+      state: "output-available",
+      output: { ok: true },
+      approval: { id: "aitxt-1", approved: true }
+    });
+  });
+
+  it("counts a call that returned nothing as having run", () => {
+    // `undefined` is a result too. Reading it as "no outcome yet" would replay a
+    // finished call as a decision still waiting, and the SDK would run it again.
+    const m = assistantSessionMessage("Done.", [
+      {
+        ...gated,
+        output: undefined,
+        approval: { id: "aitxt-1", approved: true }
+      }
+    ]);
+    expect(m.parts[0]).toMatchObject({ state: "output-available" });
+  });
+});
+
+describe("toModelMessages — approvals", () => {
+  const approved = {
+    toolCallId: "tc-del",
+    toolName: "agents_delete",
+    input: { name: "arc-player" },
+    approval: {
+      id: "aitxt-1",
+      approved: true,
+      reason: "Approved in Slack by Grace."
+    }
+  };
+
+  it("replays an approved call as the pair the SDK collects a decision from", async () => {
+    // The whole approval resume rests on this exact shape:
+    // assistant[tool-call, tool-approval-request] then tool[tool-approval-response],
+    // with the tool message last, because that is the only message the SDK reads
+    // approvals out of. Get it wrong and the approved call silently never runs.
+    const messages = await toModelMessages([toolCallSessionMessage(approved)]);
+
+    expect(messages.map((m) => m.role)).toEqual(["assistant", "tool"]);
+    expect(messages[0].content).toEqual([
+      expect.objectContaining({
+        type: "tool-call",
+        toolCallId: "tc-del",
+        toolName: "agents_delete",
+        input: { name: "arc-player" }
+      }),
+      expect.objectContaining({
+        type: "tool-approval-request",
+        approvalId: "aitxt-1",
+        toolCallId: "tc-del"
+      })
+    ]);
+    expect(messages[1].content).toEqual([
+      expect.objectContaining({
+        type: "tool-approval-response",
+        approvalId: "aitxt-1",
+        approved: true
+      })
+    ]);
+  });
+
+  it("replays a refusal as a result, not as a decision still pending", async () => {
+    const messages = await toModelMessages([
+      toolCallSessionMessage({
+        ...approved,
+        approval: {
+          id: "aitxt-1",
+          approved: false,
+          reason: "Rejected in Slack by Grace."
+        }
+      })
+    ]);
+
+    const last = messages.at(-1);
+    expect(last?.role).toBe("tool");
+    // The reason reaches the model in place of a result, so a later turn can see
+    // the call was refused rather than that it failed.
+    expect(JSON.stringify(last?.content)).toContain(
+      "Rejected in Slack by Grace."
+    );
+  });
+
+  it("replays an approved call that ran as an ordinary result", async () => {
+    const messages = await toModelMessages([
+      toolCallSessionMessage({ ...approved, output: { ok: true } })
+    ]);
+
+    const last = messages.at(-1);
+    expect(last?.role).toBe("tool");
+    expect(last?.content).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ type: "tool-result", toolCallId: "tc-del" })
+      ])
+    );
+  });
+});
+
 describe("toModelMessages — assistant messages in a row", () => {
   it("folds a text-only assistant message into the one after it", async () => {
     // What a resumed turn leaves behind: the question it paused on, then the reply

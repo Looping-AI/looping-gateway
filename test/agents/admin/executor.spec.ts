@@ -7,10 +7,10 @@ import type { AgentExecutionEvent } from "@a2a-js/sdk/server";
 import { buildMessage } from "@/a2a/parts";
 import {
   buildHitlResponseParts,
+  buildHitlTimeoutParts,
   HITL_APPROVE_OPTION_ID,
   HITL_REJECT_OPTION_ID
 } from "@/a2a/hitl";
-import type { GatedAction } from "@/agents/admin/approvals";
 import { getAgent, registerAgent } from "@/db/models/agents";
 import {
   FakeSession,
@@ -143,25 +143,45 @@ describe("AdminAgentExecutor", () => {
   });
 });
 
-describe("AdminAgentExecutor — HITL approval resume", () => {
-  /** A Map-backed pending-action store (mirrors the DO-storage seams). */
-  function fakeStore(seed: Record<string, GatedAction> = {}) {
-    const map = new Map<string, GatedAction>(Object.entries(seed));
+// ---------------------------------------------------------------------------
+// Approvals end to end: the real tools, the real policy, and real D1 rows.
+//
+// The loop specs drive the mechanism with a stub tool; these prove the thing that
+// actually matters — that Approve deletes the agent and nothing else does.
+// ---------------------------------------------------------------------------
+
+describe("AdminAgentExecutor — approval resume", () => {
+  /** A custom agent to act on. */
+  async function registerCustom(name: string, wsId: number): Promise<void> {
+    await registerAgent({
+      name,
+      kind: "remote",
+      displayName: name,
+      a2aEndpoint: `https://example.com/${name}`,
+      tenantId: "main",
+      notifyOn: "mention",
+      workspaceId: wsId
+    });
+  }
+
+  /** The delete this agent paused on, as the store kept it. */
+  function heldDelete(name: string) {
     return {
-      map,
-      storePendingAction: async (id: string, action: GatedAction) => {
-        map.set(id, action);
-      },
-      takePendingAction: async (id: string) => {
-        const action = map.get(id) ?? null;
-        map.delete(id);
-        return action;
-      }
+      requestId: "aitxt-1",
+      toolCallId: "tc-del",
+      toolName: "agents_delete",
+      input: { name },
+      approval: { reason: `Delete agent *${name}*?` },
+      createdAt: Date.now()
     };
   }
 
-  /** A resume request carrying `parts` (a HITL response DataPart) as the user turn. */
-  function resumeRequest(parts: Message["parts"], wsId: number) {
+  /** A resume request carrying `parts` as the user turn, answered by `user`. */
+  function resumeRequest(
+    parts: Message["parts"],
+    user: UserAuthContext,
+    wsId: number
+  ) {
     const published: AgentExecutionEvent[] = [];
     let finished = false;
     const eventBus = {
@@ -176,14 +196,12 @@ describe("AdminAgentExecutor — HITL approval resume", () => {
       parts,
       contextId: "C_ADMIN:thread-1",
       metadata: {
-        user: { ...caller, adminWorkspaces: [wsId] },
+        user,
         agentKind: "local",
         tenant: "admin",
         adminWorkspaceId: wsId
       }
     });
-    // The executor re-wraps this into a fresh RequestContext, so it must carry
-    // the whole SendMessageRequest the v1.0 shape expects, not a loose message.
     const requestContext = {
       contextId: "C_ADMIN:thread-1",
       taskId: "task-test",
@@ -203,83 +221,115 @@ describe("AdminAgentExecutor — HITL approval resume", () => {
     };
   }
 
-  it("runs the destructive action when the user approves", async () => {
-    const wsId = await freshWsId("resume-approve");
-    await registerAgent({
-      name: "resume-del",
-      kind: "remote",
-      displayName: "Resume Del",
-      a2aEndpoint: "https://example.com/resume-del",
-      tenantId: "main",
-      notifyOn: "mention",
-      workspaceId: wsId
-    });
-    const store = fakeStore({
-      "req-1": { kind: "unregister_agent", name: "resume-del", wsId }
-    });
-    const model = new MockLanguageModelV4({
-      doGenerate: async () => finalReplyResult("Done — I deleted it.") as never
-    });
-    const exec = new AdminAgentExecutor(sqlHost, {
-      model,
-      createSession: () => new FakeSession(),
-      ...store
+  const answer = (optionId: string, humanText: string) =>
+    buildHitlResponseParts({
+      requestId: "aitxt-1",
+      optionId,
+      answeredBy: "U1",
+      humanText
     });
 
+  const admin = (wsId: number): UserAuthContext => ({
+    ...caller,
+    isOrgAdmin: false,
+    adminWorkspaces: [wsId]
+  });
+
+  const outsider: UserAuthContext = {
+    ...caller,
+    slackUserId: "U2",
+    displayName: "Passer-by",
+    isOrgAdmin: false,
+    adminWorkspaces: []
+  };
+
+  /** An executor wired to a seeded open-call store. */
+  function executorFor(name: string) {
+    const session = new FakeSession();
+    const openCalls = new MemoryOpenCalls();
+    void openCalls.put(heldDelete(name));
+    const model = new MockLanguageModelV4({
+      doGenerate: async () => finalReplyResult("All done.") as never
+    });
+    return {
+      session,
+      openCalls,
+      exec: new AdminAgentExecutor(sqlHost, {
+        model,
+        createSession: () => session,
+        openCalls
+      })
+    };
+  }
+
+  it("deletes the agent when an admin approves", async () => {
+    const wsId = await freshWsId("resume-approve");
+    await registerCustom("resume-del", wsId);
+    const { exec, openCalls } = executorFor("resume-del");
+
     const t = resumeRequest(
-      buildHitlResponseParts({
-        requestId: "req-1",
-        optionId: HITL_APPROVE_OPTION_ID,
-        answeredBy: "U1",
-        humanText: "Approve"
-      }),
+      answer(HITL_APPROVE_OPTION_ID, "Approve"),
+      admin(wsId),
       wsId
     );
     await exec.execute(t.requestContext, t.eventBus);
 
     expect(t.isFinished()).toBe(true);
     expect(await getAgent("resume-del")).toBeNull();
-    expect(store.map.has("req-1")).toBe(false); // consumed at most once
-    expect(terminalTaskText(t.published)).toBe("Done — I deleted it.");
+    // Settled, so a second delivery of the same click cannot delete anything else.
+    expect(openCalls.held.size).toBe(0);
+    expect(terminalTaskText(t.published)).toBe("All done.");
   });
 
-  it("does not run the action when the user rejects", async () => {
-    const wsId = await freshWsId("resume-reject");
-    await registerAgent({
-      name: "resume-keep",
-      kind: "remote",
-      displayName: "Resume Keep",
-      a2aEndpoint: "https://example.com/resume-keep",
-      tenantId: "main",
-      notifyOn: "mention",
-      workspaceId: wsId
-    });
-    const store = fakeStore({
-      "req-2": { kind: "unregister_agent", name: "resume-keep", wsId }
-    });
-    const model = new MockLanguageModelV4({
-      doGenerate: async () =>
-        finalReplyResult("Okay, I won't delete it.") as never
-    });
-    const exec = new AdminAgentExecutor(sqlHost, {
-      model,
-      createSession: () => new FakeSession(),
-      ...store
-    });
+  it("does not delete when a non-admin approves", async () => {
+    // Anyone in the channel can press the button, so the approver is re-checked
+    // twice over: the policy re-runs against whoever pressed it, and the tool
+    // re-authorizes its caller. Either alone stops this, which is why breaking one
+    // of them does not fail this spec — the loop specs pin the policy half, with a
+    // gated tool that has no check of its own to fall back on.
+    const wsId = await freshWsId("resume-outsider");
+    await registerCustom("resume-outsider", wsId);
+    const { exec } = executorFor("resume-outsider");
 
     const t = resumeRequest(
-      buildHitlResponseParts({
-        requestId: "req-2",
-        optionId: HITL_REJECT_OPTION_ID,
-        answeredBy: "U1",
-        humanText: "Reject"
-      }),
+      answer(HITL_APPROVE_OPTION_ID, "Approve"),
+      outsider,
+      wsId
+    );
+    await exec.execute(t.requestContext, t.eventBus);
+
+    expect(await getAgent("resume-outsider")).not.toBeNull();
+  });
+
+  it("does not delete when the user rejects", async () => {
+    const wsId = await freshWsId("resume-reject");
+    await registerCustom("resume-keep", wsId);
+    const { exec } = executorFor("resume-keep");
+
+    const t = resumeRequest(
+      answer(HITL_REJECT_OPTION_ID, "Reject"),
+      admin(wsId),
       wsId
     );
     await exec.execute(t.requestContext, t.eventBus);
 
     expect(t.isFinished()).toBe(true);
     expect(await getAgent("resume-keep")).not.toBeNull();
+  });
+
+  it("does not delete when nobody answered in time", async () => {
+    const wsId = await freshWsId("resume-timeout");
+    await registerCustom("resume-timeout", wsId);
+    const { exec } = executorFor("resume-timeout");
+
+    const t = resumeRequest(
+      buildHitlTimeoutParts("aitxt-1"),
+      admin(wsId),
+      wsId
+    );
+    await exec.execute(t.requestContext, t.eventBus);
+
+    expect(await getAgent("resume-timeout")).not.toBeNull();
   });
 
   it("resumes an ask_user answer from its open call, as the call's result", async () => {
@@ -301,7 +351,6 @@ describe("AdminAgentExecutor — HITL approval resume", () => {
     const exec = new AdminAgentExecutor(sqlHost, {
       model,
       createSession: () => session,
-      ...fakeStore(),
       openCalls
     });
 
@@ -312,6 +361,7 @@ describe("AdminAgentExecutor — HITL approval resume", () => {
         answeredBy: "U1",
         humanText: "staging"
       }),
+      caller,
       0
     );
     await exec.execute(t.requestContext, t.eventBus);
@@ -330,8 +380,7 @@ describe("AdminAgentExecutor — HITL approval resume", () => {
   });
 
   it("treats an answer with nothing to resume as a normal turn", async () => {
-    // Neither store holds this id: a question asked before open calls existed.
-    const store = fakeStore();
+    // A prompt raised before open calls existed: there is nothing to settle.
     const session = new FakeSession();
     const model = new MockLanguageModelV4({
       doGenerate: async () => finalReplyResult("Great, using staging.") as never
@@ -339,7 +388,7 @@ describe("AdminAgentExecutor — HITL approval resume", () => {
     const exec = new AdminAgentExecutor(sqlHost, {
       model,
       createSession: () => session,
-      ...store
+      openCalls: new MemoryOpenCalls()
     });
 
     const t = resumeRequest(
@@ -349,6 +398,7 @@ describe("AdminAgentExecutor — HITL approval resume", () => {
         answeredBy: "U1",
         humanText: "staging"
       }),
+      caller,
       0
     );
     await exec.execute(t.requestContext, t.eventBus);
