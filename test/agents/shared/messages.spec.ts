@@ -11,6 +11,7 @@ import {
   sessionText,
   toModelMessages,
   toolCallSessionMessage,
+  replayToolCallMessage,
   MAX_TOOL_RECORD_CHARS,
   type TurnContext
 } from "@/agents/shared/messages";
@@ -480,6 +481,32 @@ describe("toModelMessages — approvals", () => {
         approved: true
       })
     ]);
+  });
+
+  it("replays an approved call's input verbatim, however long", async () => {
+    // The premise of an approval is that what runs is what was approved. Capping an
+    // over-long property would hand the SDK a different call — and because the
+    // schema still accepts the truncated value, it would run it.
+    const long = "x".repeat(MAX_TOOL_RECORD_CHARS * 2);
+    const messages = await toModelMessages([
+      replayToolCallMessage({ ...approved, input: { name: long } })
+    ]);
+
+    const parts = messages[0].content as {
+      type: string;
+      input?: { name: string };
+    }[];
+    expect(parts.find((p) => p.type === "tool-call")?.input?.name).toBe(long);
+  });
+
+  it("still caps the same call when it is stored rather than replayed", () => {
+    // History is replayed on every later turn, so the ceiling stays where it is
+    // needed: one broad call must not crowd out the conversation.
+    const long = "x".repeat(MAX_TOOL_RECORD_CHARS * 2);
+    const m = toolCallSessionMessage({ ...approved, input: { name: long } });
+    expect((m.parts[0] as { input: { name: string } }).input.name).toContain(
+      "[truncated,"
+    );
   });
 
   it("replays a refusal as a result, not as a decision still pending", async () => {

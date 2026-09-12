@@ -87,14 +87,26 @@ export class AdminAgent extends A2AAgent {
    * `sweepChecked`, and run on `waitUntil`, so it costs a warm instance nothing.
    */
   private async clearRetiredApprovals(): Promise<void> {
-    const keys = [
-      ...(await this.ctx.storage.list({ prefix: PENDING_ACTION_PREFIX })).keys()
-    ];
-    if (keys.length === 0) return;
-    await this.ctx.storage.delete(keys);
-    console.info("[admin-agent] cleared retired approval entries", {
-      count: keys.length
-    });
+    try {
+      const keys = [
+        ...(
+          await this.ctx.storage.list({ prefix: PENDING_ACTION_PREFIX })
+        ).keys()
+      ];
+      if (keys.length === 0) return;
+      await this.ctx.storage.delete(keys);
+      console.info("[admin-agent] cleared retired approval entries", {
+        count: keys.length
+      });
+    } catch (err) {
+      // The guard exists to stop a warm isolate re-listing on every request, not
+      // to make one failure permanent — so let a later request try again. It also
+      // keeps this off `waitUntil` as an unhandled rejection.
+      this.pendingCleared = false;
+      console.error("[admin-agent] clearing retired approvals failed", {
+        error: err instanceof Error ? err.message : String(err)
+      });
+    }
   }
 
   /**

@@ -254,6 +254,21 @@ function cap(value: unknown): unknown {
  * (`invalid: true`). That still has to be replayed as an object, so it is wrapped
  * rather than dropped: the malformed text stays visible to the next turn.
  */
+/**
+ * A call's input as an object, with nothing truncated.
+ *
+ * {@link capInput}'s ceiling is right for a record being *stored* — history is
+ * replayed every turn and one broad call must not crowd out the conversation. It is
+ * wrong for an approved call being replayed for the SDK to execute: the premise of
+ * an approval is that what runs is what the human approved, and a schema that still
+ * accepts a truncated value would run a different call than the one on screen.
+ */
+function objectInput(value: unknown): Record<string, unknown> {
+  return isRecord(value)
+    ? value
+    : { _raw: typeof value === "string" ? value : jsonOf(value) };
+}
+
 function capInput(value: unknown): Record<string, unknown> {
   if (isRecord(value)) {
     return Object.fromEntries(
@@ -278,11 +293,11 @@ function capInput(value: unknown): Record<string, unknown> {
  * the SDK's three approval states it has reached: refused outright, approved but
  * not yet run (the replay a resumed turn hands back), or approved and finished.
  */
-function toolPart(record: ToolRecord): SessionMessagePart {
+function toolPart(record: ToolRecord, rawInput = false): SessionMessagePart {
   const call = {
     type: `tool-${record.toolName}`,
     toolCallId: record.toolCallId,
-    input: capInput(record.input)
+    input: rawInput ? objectInput(record.input) : capInput(record.input)
   };
   const { approval } = record;
   // Refused, or expired: nothing ran, and the reason is what the model reads back
@@ -334,7 +349,9 @@ export function assistantSessionMessage(
   text: string,
   actions: ToolRecord[] = []
 ): SessionMessage {
-  const parts: SessionMessagePart[] = actions.map(toolPart);
+  // Not `actions.map(toolPart)`: that passes the array index as the second
+  // argument, so every call after the first would render uncapped.
+  const parts: SessionMessagePart[] = actions.map((a) => toolPart(a));
   if (parts.length > 0) parts.push({ type: "step-start" });
   parts.push({ type: "text", text });
   return {
@@ -362,6 +379,22 @@ export function toolCallSessionMessage(
     role: "assistant",
     createdAt: new Date(),
     parts: [toolPart(record)]
+  };
+}
+
+/**
+ * One recorded call as a message that is replayed to the model and never stored.
+ *
+ * The input goes in verbatim — see {@link objectInput}. Used for the approved call
+ * a resumed turn hands back to the SDK, which re-validates that input and executes
+ * it: the call that runs has to be the call that was approved, to the character.
+ */
+export function replayToolCallMessage(record: ToolRecord): SessionMessage {
+  return {
+    id: crypto.randomUUID(),
+    role: "assistant",
+    createdAt: new Date(),
+    parts: [toolPart(record, true)]
   };
 }
 

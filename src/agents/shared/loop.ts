@@ -27,6 +27,7 @@ import type { AgentTurnMetadata } from "@/agents/dispatch";
 import type { SessionLike } from "./session";
 import {
   assistantSessionMessage,
+  replayToolCallMessage,
   toModelMessages,
   toolCallSessionMessage,
   userSessionMessage,
@@ -462,17 +463,23 @@ export async function executeAgentTurn(
     const replaying = approvalAction?.approval?.approved === true;
 
     /**
-     * History, plus the approved call the SDK is being asked to carry out.
+     * History, plus the decision this turn is resuming.
      *
-     * Replayed this way the record becomes `assistant[tool-call,
-     * tool-approval-request]` then `tool[tool-approval-response]` — the shape the
-     * SDK collects a decision from. It is folded in with everything else rather
-     * than appended afterwards, so the assistant run it continues is joined into
-     * one message the way any other turn's would be.
+     * Every settled approval goes in, not only an approved one. An approved call
+     * replays as `assistant[tool-call, tool-approval-request]` then
+     * `tool[tool-approval-response]` — the shape the SDK collects a decision from —
+     * and a refusal replays as that call plus the denied result carrying its
+     * reason. A refusal the model never sees is one it will simply make again,
+     * which is the whole thing a rejection is supposed to prevent.
+     *
+     * It is folded in with the rest rather than appended afterwards, so the
+     * assistant run it continues is joined into one message the way any other
+     * turn's would be. And it goes in uncapped: what the SDK executes has to be
+     * what the human approved, to the character.
      */
     const messages = await toModelMessages(
-      replaying && approvalAction
-        ? [...history, toolCallSessionMessage(approvalAction)]
+      approvalAction
+        ? [...history, replayToolCallMessage(approvalAction)]
         : history
     );
 
@@ -583,10 +590,12 @@ export async function executeAgentTurn(
         toolName: approvalAction.toolName
       });
       approvalAction = withRefusal(approvalAction, STOPPED_BEFORE_RUN);
-      publishTerminal("", TaskState.TASK_STATE_CANCELED);
+      // Recorded before the terminal is published: publishing marks the turn
+      // completed, and the outer catch stands its own recovery down once it is.
       await session.appendMessage(
         assistantSessionMessage(CANCELED_NOTE, persisted())
       );
+      publishTerminal("", TaskState.TASK_STATE_CANCELED);
       return;
     }
 
@@ -801,10 +810,10 @@ export async function executeAgentTurn(
         contextId: requestContext.contextId,
         model: modelId
       });
-      publishTerminal("", TaskState.TASK_STATE_CANCELED);
       await session.appendMessage(
         assistantSessionMessage(CANCELED_NOTE, persisted())
       );
+      publishTerminal("", TaskState.TASK_STATE_CANCELED);
       return;
     }
 
@@ -869,9 +878,19 @@ export async function executeAgentTurn(
     // would put a second part under the same tool call id, which breaks the replay
     // of every later turn. Best-effort: a failure here must not mask the real one.
     if (!completed && approvalAction && openSession) {
+      // A failure before the call could run leaves the decision marked approved
+      // with no outcome, which reads as one still waiting to happen. Nothing is
+      // waiting: this turn is over and the store has already let the call go.
+      const unfinished =
+        approvalAction.approval?.approved === true &&
+        !("output" in approvalAction) &&
+        approvalAction.errorText === undefined;
+      const record = unfinished
+        ? withRefusal(approvalAction, NOT_CARRIED_OUT)
+        : approvalAction;
       try {
         await openSession.appendMessage(
-          assistantSessionMessage(NO_REPLY_NOTE, [approvalAction])
+          assistantSessionMessage(NO_REPLY_NOTE, [record])
         );
       } catch (persistErr) {
         console.error("[agent-loop] could not record a settled approval", {

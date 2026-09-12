@@ -368,8 +368,9 @@ export async function agentsUpdate(
         error:
           `New endpoint for "${args.name}" is signed by a different key than the ` +
           `one pinned at registration. If the agent's signing identity changed ` +
-          `intentionally, use agents_repin — it re-reads the card and replaces the ` +
-          `pin behind a human approval, without unregistering the agent.`
+          `intentionally, call agents_repin to see the key the card now advertises, ` +
+          `then agents_repin_apply to write it behind a human approval — without ` +
+          `unregistering the agent.`
       };
     }
   }
@@ -498,8 +499,9 @@ export async function agentsDelete(
 export type AgentsRepinArgs = { name: string };
 
 /**
- * Re-read a custom agent's AgentCard and replace the pinned signing identity with
- * the one it now advertises.
+ * Re-read a custom agent's AgentCard and report the signing identity it now
+ * advertises, beside the one currently pinned. This call only reads; the write is
+ * {@link agentsRepinApply}.
  *
  * The deliberate hole in Trust-On-First-Use. TOFU is what makes a validly-signed
  * token from *any other* key a rejection rather than a login, so every other path
@@ -510,10 +512,12 @@ export type AgentsRepinArgs = { name: string };
  * it again — which drops its channel mappings and its avatar to fix a single
  * column.
  *
- * So the trust decision is handed to the one party that can actually make it. The
- * new key is verified, named in the prompt beside the old one, and written only
- * once a workspace admin approves it in Slack — the same gate `agents_delete` uses,
- * for the same reason.
+ * So the trust decision is handed to the one party that can actually make it, over
+ * two calls: this one reports the advertised key beside the pinned one, and
+ * {@link agentsRepinApply} writes the key it reported, pausing for a workspace
+ * admin's approval in Slack first — the same gate `agents_delete` uses, for the
+ * same reason. The split is what lets the approval name the exact key being
+ * written, rather than whatever the card says by the time anyone clicks.
  *
  * Nothing but the pin moves: the card is re-read at the endpoint and tenant already
  * on the row, so this cannot be used to re-point an agent somewhere else. A card

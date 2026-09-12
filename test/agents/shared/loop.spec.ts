@@ -1862,6 +1862,34 @@ describe("executeAgentTurn — approvals", () => {
     });
   });
 
+  it("tells the model what was refused, and why", async () => {
+    // A rejection the model never sees is one it will simply make again — which is
+    // the whole thing a rejection is supposed to prevent.
+    const session = new FakeSession();
+    session.messages.push(assistantSessionMessage(reason));
+    const openCalls = new MemoryOpenCalls();
+    await openCalls.put(heldApproval());
+    const gate = gatedTool();
+    const prompts: string[] = [];
+    const model = new MockLanguageModelV4({
+      doGenerate: async (options) => {
+        prompts.push(JSON.stringify(options.prompt));
+        return finalReplyResult("Left it alone.") as never;
+      }
+    });
+
+    await executeAgentTurn(
+      resumeContext(decision(HITL_REJECT_OPTION_ID, "Reject")),
+      fakeEventBus().eventBus,
+      gatedCfg(session, model, gate, asksAHuman, { openCalls })
+    );
+
+    expect(gate.ran).toHaveLength(0);
+    // Both the call it made and the refusal against it are in front of the model.
+    expect(prompts[0]).toContain("tc-danger");
+    expect(prompts[0]).toContain("Rejected in Slack by Grace.");
+  });
+
   it("runs nothing when nobody answered in time", async () => {
     const session = new FakeSession();
     // The turn that raised the prompt. A resume adds no user turn of its own, so
@@ -1998,6 +2026,39 @@ describe("executeAgentTurn — approvals", () => {
     });
   });
 
+  it("records an approval that never ran as not carried out", async () => {
+    // A turn that died before the call could run must not leave the decision in
+    // history still marked approved with no outcome: that reads as a call waiting
+    // to happen, and nothing is waiting — the store has already let it go.
+    class BrokenSession extends FakeSession {
+      async refreshSystemPrompt(): Promise<string> {
+        throw new Error("memory boom");
+      }
+    }
+    const session = new BrokenSession();
+    const openCalls = new MemoryOpenCalls();
+    await openCalls.put(heldApproval());
+    const gate = gatedTool();
+    const model = new MockLanguageModelV4({
+      doGenerate: async () => finalReplyResult("unreachable") as never
+    });
+    const bus = fakeEventBus();
+
+    await executeAgentTurn(
+      resumeContext(decision(HITL_APPROVE_OPTION_ID, "Approve")),
+      bus.eventBus,
+      gatedCfg(session, model, gate, asksAHuman, { openCalls })
+    );
+
+    expect(gate.ran).toHaveLength(0);
+    expect(publishedStates(bus).at(-1)).toBe(TaskState.TASK_STATE_FAILED);
+    expect(lastActions(session)[0]).toMatchObject({
+      type: "tool-danger",
+      state: "output-denied",
+      approval: { approved: false }
+    });
+  });
+
   it("records a carried-out approval even when the turn then fails", async () => {
     // The agent is gone. A turn that failed afterwards must not leave history
     // silent about it — nothing else will ever record it.
@@ -2028,6 +2089,30 @@ describe("executeAgentTurn — approvals", () => {
       state: "output-available",
       output: { ok: true, deleted: "arc-player" }
     });
+  });
+
+  it("replays the approved input in full, however long", async () => {
+    // A stored record is capped, and this one must not be: the SDK re-validates the
+    // replayed input and executes it, so a truncated property would run a call the
+    // human never saw — and a schema that still accepts the shorter value would not
+    // object to it.
+    const long = `arc-${"x".repeat(2000)}`;
+    const session = new FakeSession();
+    session.messages.push(assistantSessionMessage(reason));
+    const openCalls = new MemoryOpenCalls();
+    await openCalls.put({ ...heldApproval(), input: { name: long } });
+    const gate = gatedTool();
+    const model = new MockLanguageModelV4({
+      doGenerate: async () => finalReplyResult("Deleted it.") as never
+    });
+
+    await executeAgentTurn(
+      resumeContext(decision(HITL_APPROVE_OPTION_ID, "Approve")),
+      fakeEventBus().eventBus,
+      gatedCfg(session, model, gate, asksAHuman, { openCalls })
+    );
+
+    expect(gate.ran).toEqual([{ name: long }]);
   });
 
   it("hands the salvage the approved call's result, not the decision again", async () => {
