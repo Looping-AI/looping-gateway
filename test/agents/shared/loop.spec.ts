@@ -1836,6 +1836,40 @@ describe("executeAgentTurn — approvals", () => {
     });
   });
 
+  it("names an approved call the turn carried out, which its model never asked for", async () => {
+    // The gap Copilot found in the first draft. A replayed approval executes
+    // *before* the first model step, so it appears in no model call's content —
+    // and `tools` is built from that content. Logging nothing for it would leave
+    // the single most consequential thing an admin turn does, a destructive call
+    // a human signed off, invisible in the one line that says what the turn did.
+    const session = new FakeSession();
+    session.messages.push(assistantSessionMessage(reason));
+    const openCalls = new MemoryOpenCalls();
+    await openCalls.put(heldApproval());
+    const gate = gatedTool();
+    const model = new MockLanguageModelV4({
+      doGenerate: async () => finalReplyResult("Deleted it.") as never
+    });
+    const info = vi.spyOn(console, "info").mockImplementation(() => {});
+
+    await executeAgentTurn(
+      resumeContext(decision(HITL_APPROVE_OPTION_ID, "Approve")),
+      fakeEventBus().eventBus,
+      gatedCfg(session, model, gate, asksAHuman, { openCalls })
+    );
+
+    const line = info.mock.calls.find((c) => c[0] === "[agent-turn]")?.[1] as
+      Record<string, unknown> | undefined;
+    info.mockRestore();
+
+    expect(gate.ran).toEqual([input]);
+    expect(line).toMatchObject({ ending: "reply", replayed: "danger" });
+    // Named separately rather than folded into `tools`: this turn's model asked
+    // only for `final_reply`, and conflating the two would lose the distinction
+    // between deciding to delete and carrying out someone else's decision.
+    expect(line?.tools).toEqual({ final_reply: 1 });
+  });
+
   it("runs nothing when the human rejects, and records why", async () => {
     const session = new FakeSession();
     // The turn that raised the prompt. A resume adds no user turn of its own, so

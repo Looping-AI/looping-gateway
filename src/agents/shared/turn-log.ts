@@ -62,6 +62,8 @@ export interface TurnLog {
   toolRan(ms: number): void;
   /** Note that the turn had to ask a second time for an ending. */
   salvaged(): void;
+  /** Name the approved call this turn carried out, decided by an earlier one. */
+  replayed(toolName: string): void;
   /** Record how the turn ended. Unset means it threw. */
   ending(ending: TurnEnding): void;
   /** Emit. Safe to call once; later calls are ignored. */
@@ -127,6 +129,7 @@ export function startTurnLog(identity: TurnIdentity): TurnLog {
   let outputTokens: number | undefined;
   let finishReason: string | undefined;
   let salvaged = false;
+  let replayed: string | undefined;
   let ending: TurnEnding | undefined;
   let flushed = false;
 
@@ -157,6 +160,10 @@ export function startTurnLog(identity: TurnIdentity): TurnLog {
       salvaged = true;
     },
 
+    replayed(toolName) {
+      replayed = toolName;
+    },
+
     ending(next) {
       ending = next;
     },
@@ -175,6 +182,10 @@ export function startTurnLog(identity: TurnIdentity): TurnLog {
         modelCalls,
         fallbacks,
         salvaged,
+        // Absent on an ordinary turn. `tools` below counts only what this turn's
+        // model asked for, and a replayed call was asked for by an earlier one —
+        // its execution time is in `toolMs` either way.
+        replayed,
         finishReason,
         ms: Date.now() - startedAt,
         modelMs,

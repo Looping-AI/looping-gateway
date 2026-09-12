@@ -511,6 +511,13 @@ export async function executeAgentTurn(
     // Whether the approved call is still waiting to run. Only an approval that was
     // granted replays; a refusal is already its own outcome.
     const replaying = approvalAction?.approval?.approved === true;
+    // A replayed call is the one thing a turn does that its own model never asked
+    // for — it runs before the first step, from a decision a previous turn made
+    // and a human then approved. It is named separately rather than folded into
+    // `tools` precisely because of that: "this turn decided to delete an agent"
+    // and "this turn carried out a delete someone approved" are different facts,
+    // and the second is the one an audit wants.
+    if (replaying && approvalAction) turnLog.replayed(approvalAction.toolName);
 
     /**
      * History, plus the decision this turn is resuming.
