@@ -1,15 +1,15 @@
 import { describe, it, expect, vi } from "vitest";
 import type { LanguageModelUsage } from "ai";
-import { startTurnLog, type GenerationLike } from "@/agents/shared/turn-log";
+import { startTurnLog, type ModelCallLike } from "@/agents/shared/turn-log";
 
 /**
  * The one line a turn leaves behind.
  *
- * What is checked here is the arithmetic — summing two generations, counting
- * fallback-served steps, keeping "the provider said nothing" distinct from "the
- * provider said zero". That the *shape* matches a real `generateText` result is
- * checked by the compiler at the `loop.ts` call site, and that a turn emits
- * exactly one of these is checked in `loop.spec.ts`.
+ * What is checked here is the arithmetic — adding up charged model calls,
+ * counting fallback-served ones, keeping "the provider said nothing" distinct
+ * from "the provider said zero". That the *shape* matches a real
+ * `onLanguageModelCallEnd` event is checked by the compiler at the `loop.ts` call
+ * site, and that every exit reaches this is checked in `loop.spec.ts`.
  */
 
 const identity = {
@@ -42,20 +42,24 @@ function usage(
   };
 }
 
-function step({
+function modelCall({
   tools = [],
   responseTimeMs = 0,
-  toolExecutionMs = {},
-  fallback = false
+  fallback = false,
+  finishReason = "stop",
+  tokens = usage(0, 0)
 }: {
   tools?: string[];
   responseTimeMs?: number;
-  toolExecutionMs?: Record<string, number>;
   fallback?: boolean;
-} = {}): GenerationLike["steps"][number] {
+  finishReason?: string;
+  tokens?: LanguageModelUsage;
+} = {}): ModelCallLike {
   return {
-    performance: { responseTimeMs, toolExecutionMs },
-    providerMetadata: fallback ? FALLBACK_SERVED : undefined,
+    usage: tokens,
+    finishReason,
+    performance: { responseTimeMs },
+    ...(fallback ? { providerMetadata: FALLBACK_SERVED } : {}),
     content: tools.map((toolName) => ({ type: "tool-call", toolName }))
   };
 }
@@ -79,88 +83,83 @@ describe("the turn log", () => {
   it("carries the turn's identity even when nothing ran", () => {
     const line = emitted(() => {});
 
-    expect(line).toMatchObject({ ...identity, generations: 0, steps: 0 });
+    expect(line).toMatchObject({ ...identity, modelCalls: 0, salvaged: false });
     // No exit claimed the turn, which from here is indistinguishable from a
     // throw — and is exactly what a throw leaves behind.
     expect(line.ending).toBe("failed");
   });
 
-  it("sums tokens, timings and tool calls across every step", () => {
+  it("adds up every charged model call and the tools they asked for", () => {
     const line = emitted((log) => {
-      log.add({
-        steps: [
-          step({
-            tools: ["agents_read"],
-            responseTimeMs: 100,
-            toolExecutionMs: { a: 5 }
-          }),
-          step({
-            tools: ["agents_read", "final_reply"],
-            responseTimeMs: 200,
-            toolExecutionMs: { b: 7, c: 3 }
-          })
-        ],
-        usage: usage(1000, 50, 400),
-        finishReason: "stop"
-      });
+      log.modelCall(
+        modelCall({
+          tools: ["agents_read"],
+          responseTimeMs: 100,
+          finishReason: "tool-calls",
+          tokens: usage(1000, 50, 400)
+        })
+      );
+      log.modelCall(
+        modelCall({
+          tools: ["agents_read", "final_reply"],
+          responseTimeMs: 200,
+          tokens: usage(1200, 20, 900)
+        })
+      );
+      log.toolRan(5);
+      log.toolRan(10);
       log.ending("reply");
     });
 
     expect(line).toMatchObject({
       ending: "reply",
-      generations: 1,
-      steps: 2,
+      modelCalls: 2,
       fallbacks: 0,
+      // The last call's, not the first's: whatever came before was not the end.
       finishReason: "stop",
       modelMs: 300,
       toolMs: 15,
-      inputTokens: 1000,
-      cachedInputTokens: 400,
-      outputTokens: 50,
+      inputTokens: 2200,
+      cachedInputTokens: 1300,
+      outputTokens: 70,
       // Counted, not listed: the same tool twice is the signal that a turn is
       // going in circles, and a flat list of names hides it.
       tools: { agents_read: 2, final_reply: 1 }
     });
   });
 
-  it("folds a salvaged ending into the same line", () => {
+  it("counts a call the turn was billed for but never got to use", () => {
+    // The case this design exists for. A model that narrates under an enforced
+    // tool choice is charged and then discarded, so the turn has to record the
+    // call as it happens rather than reading a result that never arrives.
     const line = emitted((log) => {
-      log.add({
-        steps: [step({ responseTimeMs: 10 })],
-        usage: usage(100, 5),
-        finishReason: "tool-calls"
-      });
-      log.add({
-        steps: [step({ tools: ["final_reply"], responseTimeMs: 20 })],
-        usage: usage(200, 9),
-        finishReason: "stop"
-      });
+      log.modelCall(
+        modelCall({ tokens: usage(900, 40), finishReason: "stop" })
+      );
+      log.salvaged();
+      log.modelCall(
+        modelCall({ tokens: usage(950, 60), tools: ["final_reply"] })
+      );
       log.ending("reply");
     });
 
     expect(line).toMatchObject({
-      generations: 2,
-      steps: 2,
-      modelMs: 30,
-      inputTokens: 300,
-      outputTokens: 14,
-      // The salvage's, not the first attempt's: a salvage runs only because the
-      // first left no answer, so its reason is the one that explains the turn.
-      finishReason: "stop"
+      modelCalls: 2,
+      salvaged: true,
+      inputTokens: 1850,
+      outputTokens: 100
     });
   });
 
-  it("counts the steps the fallback model served", () => {
+  it("counts the calls the fallback model served", () => {
     const line = emitted((log) => {
-      log.add({
-        steps: [step(), step({ fallback: true }), step({ fallback: true })],
-        usage: usage(1, 1),
-        finishReason: "stop"
-      });
+      log.modelCall(modelCall());
+      log.modelCall(modelCall({ fallback: true }));
+      log.modelCall(modelCall({ fallback: true }));
       log.ending("reply");
     });
 
-    expect(line).toMatchObject({ steps: 3, fallbacks: 2 });
+    expect(line).toMatchObject({ modelCalls: 3, fallbacks: 2 });
   });
 
   it("keeps an unreported token count out of the sum", () => {
@@ -168,11 +167,7 @@ describe("the turn log", () => {
     // facts. Folding the first into 0 would understate the turn and, worse, make
     // the understatement invisible.
     const line = emitted((log) => {
-      log.add({
-        steps: [step()],
-        usage: usage(undefined, undefined),
-        finishReason: "stop"
-      });
+      log.modelCall(modelCall({ tokens: usage(undefined, undefined) }));
       log.ending("reply");
     });
 
@@ -183,16 +178,8 @@ describe("the turn log", () => {
 
   it("adds a reported count to an unreported one without losing it", () => {
     const line = emitted((log) => {
-      log.add({
-        steps: [step()],
-        usage: usage(undefined, undefined),
-        finishReason: "stop"
-      });
-      log.add({
-        steps: [step()],
-        usage: usage(42, 7),
-        finishReason: "stop"
-      });
+      log.modelCall(modelCall({ tokens: usage(undefined, undefined) }));
+      log.modelCall(modelCall({ tokens: usage(42, 7) }));
       log.ending("reply");
     });
 

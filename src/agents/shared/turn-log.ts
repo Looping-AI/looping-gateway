@@ -56,8 +56,12 @@ export interface TurnIdentity {
 
 /** Accumulates a turn's observations; {@link TurnLog.flush} emits the one line. */
 export interface TurnLog {
-  /** Fold in a finished generation. A salvaged ending is a second one. */
-  add(result: GenerationLike): void;
+  /** Fold in one finished model call, charged whether or not it was usable. */
+  modelCall(event: ModelCallLike): void;
+  /** Fold in one finished tool execution. */
+  toolRan(ms: number): void;
+  /** Note that the turn had to ask a second time for an ending. */
+  salvaged(): void;
   /** Record how the turn ended. Unset means it threw. */
   ending(ending: TurnEnding): void;
   /** Emit. Safe to call once; later calls are ignored. */
@@ -65,48 +69,36 @@ export interface TurnLog {
 }
 
 /**
- * The part of a `generateText` result this reads.
+ * The part of an `onLanguageModelCallEnd` event this reads.
  *
- * Structural rather than `GenerateTextResult<…>`, which is generic over the tool
- * set, the runtime context and the output type — three parameters this has no
- * opinion about. A real result still has to satisfy it, so a field renamed
- * upstream fails at the call site in `loop.ts` rather than here, and a spec can
- * build one without standing up a whole generation.
+ * **Per model call, not per generation** — and that is the whole point. A model
+ * that narrates under an enforced tool choice is charged for, and then its answer
+ * is thrown away as a `ToolChoiceViolationError`; the `generateText` promise never
+ * resolves, so there is no result to read usage off. That throw happens at
+ * `generate-text.ts:1150`, *after* this callback fires at `:1128` and *before*
+ * `onStepEnd` at `:1471` — so this is the only seam that sees a call the turn was
+ * billed for but never got to use. The same applies to a failed salvage.
+ *
+ * Structural rather than `LanguageModelCallEndEvent<TOOLS>`, which is generic over
+ * a tool set this turn only assembles at runtime. A real event still has to satisfy
+ * it, so a field renamed upstream fails at the call site in `loop.ts`.
  */
-export interface GenerationLike {
-  readonly steps: readonly StepLike[];
+export interface ModelCallLike {
   readonly usage: LanguageModelUsage;
   readonly finishReason: string;
-}
-
-/**
- * Narrowed to the fields that are read, not `Pick`ed from `StepResult`:
- * `StepResultPerformance` carries a dozen streaming-only timings this ignores,
- * and requiring them would make every fixture mostly filler.
- */
-interface StepLike {
-  readonly performance: {
-    readonly responseTimeMs: number;
-    readonly toolExecutionMs: Readonly<Record<string, number>>;
-  };
-  readonly providerMetadata: ProviderMetadata | undefined;
+  readonly providerMetadata?: ProviderMetadata;
+  readonly performance: { readonly responseTimeMs: number };
   readonly content: readonly { readonly type: string }[];
 }
 
-/** Names of the tools a step called, in call order. */
-function toolNamesOf(step: StepLike): string[] {
-  return step.content
+/** Names of the tools one model call asked for, in call order. */
+function toolNamesOf(event: ModelCallLike): string[] {
+  return event.content
     .filter(
       (part): part is { type: "tool-call"; toolName: string } =>
         part.type === "tool-call"
     )
     .map((part) => part.toolName);
-}
-
-function sum(values: Iterable<number>): number {
-  let total = 0;
-  for (const value of values) total += value;
-  return total;
 }
 
 /**
@@ -126,8 +118,7 @@ function addTokens(
 export function startTurnLog(identity: TurnIdentity): TurnLog {
   const startedAt = Date.now();
   const tools: Record<string, number> = {};
-  let generations = 0;
-  let steps = 0;
+  let modelCalls = 0;
   let fallbacks = 0;
   let modelMs = 0;
   let toolMs = 0;
@@ -135,30 +126,35 @@ export function startTurnLog(identity: TurnIdentity): TurnLog {
   let cachedInputTokens: number | undefined;
   let outputTokens: number | undefined;
   let finishReason: string | undefined;
+  let salvaged = false;
   let ending: TurnEnding | undefined;
   let flushed = false;
 
   return {
-    add(result) {
-      generations += 1;
-      steps += result.steps.length;
-      // The last generation's reason is the turn's: a salvage runs only after the
-      // first left no answer, so its ending is the one that counts.
-      finishReason = result.finishReason;
-      inputTokens = addTokens(inputTokens, result.usage.inputTokens);
+    modelCall(event) {
+      modelCalls += 1;
+      // The last call's reason is the turn's: whatever came before it was, by
+      // definition, not the end.
+      finishReason = event.finishReason;
+      if (servedByFallback(event.providerMetadata)) fallbacks += 1;
+      modelMs += event.performance.responseTimeMs;
+      inputTokens = addTokens(inputTokens, event.usage.inputTokens);
       cachedInputTokens = addTokens(
         cachedInputTokens,
-        result.usage.inputTokenDetails.cacheReadTokens
+        event.usage.inputTokenDetails.cacheReadTokens
       );
-      outputTokens = addTokens(outputTokens, result.usage.outputTokens);
-      for (const step of result.steps) {
-        if (servedByFallback(step.providerMetadata)) fallbacks += 1;
-        modelMs += step.performance.responseTimeMs;
-        toolMs += sum(Object.values(step.performance.toolExecutionMs));
-        for (const name of toolNamesOf(step)) {
-          tools[name] = (tools[name] ?? 0) + 1;
-        }
+      outputTokens = addTokens(outputTokens, event.usage.outputTokens);
+      for (const name of toolNamesOf(event)) {
+        tools[name] = (tools[name] ?? 0) + 1;
       }
+    },
+
+    toolRan(ms) {
+      toolMs += ms;
+    },
+
+    salvaged() {
+      salvaged = true;
     },
 
     ending(next) {
@@ -173,9 +169,12 @@ export function startTurnLog(identity: TurnIdentity): TurnLog {
         // Absent means `flush` ran from the `finally` without any exit having
         // claimed the turn, which is what a throw looks like from here.
         ending: ending ?? "failed",
-        generations,
-        steps,
+        // Calls the account was charged for, which is not the same as steps the
+        // turn got to use: a model that narrates under an enforced tool choice
+        // is billed and then discarded.
+        modelCalls,
         fallbacks,
+        salvaged,
         finishReason,
         ms: Date.now() - startedAt,
         modelMs,

@@ -24,7 +24,7 @@ import { CHAT_CALL_OPTIONS, type GatewayCallMetadata } from "@/agents/model";
 import { buildMessage, textOf, textPart } from "@/a2a/parts";
 import { buildHitlRequestParts, type HitlRequest } from "@/a2a/hitl";
 import type { AgentTurnMetadata } from "@/agents/dispatch";
-import { startTurnLog } from "./turn-log";
+import { startTurnLog, type ModelCallLike } from "./turn-log";
 import type { SessionLike } from "./session";
 import {
   assistantSessionMessage,
@@ -595,6 +595,7 @@ export async function executeAgentTurn(
      * does. Everything else the turn calls is recorded there as usual.
      */
     const onToolExecutionEnd: OnToolExecutionEndCallback<ToolSet> = (event) => {
+      turnLog.toolRan(event.toolExecutionMs);
       if (
         !approvalAction ||
         event.toolCall.toolCallId !== approvalAction.toolCallId
@@ -606,6 +607,21 @@ export async function executeAgentTurn(
           ? { output: event.toolOutput.output }
           : { errorText: String(event.toolOutput.error) }
       );
+    };
+
+    /**
+     * Every model call the turn is charged for, counted as it happens.
+     *
+     * Deliberately not read off the resolved result. A model that narrates under
+     * an enforced tool choice is billed and then discarded: `generateText` raises
+     * `ToolChoiceViolationError` at `generate-text.ts:1150`, so the promise never
+     * resolves and there is no result — but the callback has already fired at
+     * `:1128`. Reading usage from the result would report nothing for exactly the
+     * turns that cost the most, which is both models answering in prose and then
+     * a salvage on top.
+     */
+    const onLanguageModelCallEnd = (event: ModelCallLike): void => {
+      turnLog.modelCall(event);
     };
 
     // The gatekeeper's 🛑 workflow runs on its own request and cannot reach into
@@ -734,6 +750,7 @@ export async function executeAgentTurn(
         stopWhen: [isStepCount(MAX_STEPS), stopIfCanceled],
         onStepEnd,
         onToolExecutionEnd,
+        onLanguageModelCallEnd,
         // `reasoning` and the telemetry opt-out travel together, shared with the
         // compaction summarizer so the two call sites cannot drift — see
         // {@link file://../model.ts model.ts}.
@@ -760,6 +777,9 @@ export async function executeAgentTurn(
         tools: { [FINAL_REPLY_TOOL_NAME]: finalReplyTool },
         toolChoice: { type: "tool", toolName: FINAL_REPLY_TOOL_NAME },
         stopWhen: [isStepCount(1)],
+        // The one callback the salvage does want: it is a charged call like any
+        // other, and the case it exists for is the one where it narrates too.
+        onLanguageModelCallEnd,
         ...CHAT_CALL_OPTIONS
       });
 
@@ -768,7 +788,6 @@ export async function executeAgentTurn(
 
     try {
       result = await runTurn();
-      turnLog.add(result);
       reply = required ? readFinalReply(result) : readPlainReply(result);
     } catch (err) {
       // Narration under an enforced tool choice arrives as a throw, not a result —
@@ -809,6 +828,7 @@ export async function executeAgentTurn(
     const interrupted = (await checkCanceled()) || pause !== undefined;
 
     if (required && reply === undefined && !interrupted) {
+      turnLog.salvaged();
       console.warn("[agent-loop] no ending; asking once more with none else", {
         model: modelId,
         finishReason: result?.finishReason,
@@ -830,7 +850,6 @@ export async function executeAgentTurn(
               ])
             : messages;
         const salvaged = await salvageEnding(seed);
-        turnLog.add(salvaged);
         reply = readFinalReply(salvaged);
       } catch (err) {
         if (!ToolChoiceViolationError.isInstance(err)) throw err;

@@ -2393,9 +2393,9 @@ describe("executeAgentTurn — the turn log", () => {
       workspaceId: 7,
       user: "U123",
       ending: "reply",
-      generations: 1,
-      steps: 1,
+      modelCalls: 1,
       fallbacks: 0,
+      salvaged: false,
       tools: { final_reply: 1 }
     });
   });
@@ -2411,7 +2411,7 @@ describe("executeAgentTurn — the turn log", () => {
     const lines = await turnLines(forcedCfg(session, model));
 
     expect(lines).toHaveLength(1);
-    expect(lines[0]).toMatchObject({ ending: "failed", generations: 0 });
+    expect(lines[0]).toMatchObject({ ending: "failed", modelCalls: 0 });
   });
 
   it("distinguishes a turn that parked on a human from one that answered", async () => {
@@ -2463,5 +2463,29 @@ describe("executeAgentTurn — the turn log", () => {
     );
 
     expect(lines[0]).toMatchObject({ tenant: "acme", workspaceId: 42 });
+  });
+
+  it("counts calls the turn was billed for and never got to use", async () => {
+    // Both the turn and its salvage narrate under an enforced tool choice, so
+    // `generateText` rejects with `ToolChoiceViolationError` twice and neither
+    // promise ever resolves to a result. Both calls were still charged, and both
+    // wrote a row to the AI Gateway log. Read from the resolved result, this
+    // whole turn would report zero calls and zero tokens — the most expensive
+    // shape a turn has, logged as if nothing had happened.
+    const session = new FakeSession();
+    const model = new MockLanguageModelV4({
+      doGenerate: async () => okResult("I have updated the endpoint.") as never
+    });
+
+    const lines = await turnLines(forcedCfg(session, model));
+
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toMatchObject({
+      ending: "none",
+      modelCalls: 2,
+      salvaged: true
+    });
+    expect(lines[0]?.inputTokens).toBeGreaterThan(0);
+    expect(lines[0]?.outputTokens).toBeGreaterThan(0);
   });
 });

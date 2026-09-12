@@ -74,6 +74,71 @@ function marked(result: GenerateResult): GenerateResult {
   };
 }
 
+type Usage = GenerateResult["usage"];
+
+/** Add two token counts, keeping "not reported" distinct from "zero". */
+function addTokens(
+  a: number | undefined,
+  b: number | undefined
+): number | undefined {
+  return a === undefined && b === undefined ? undefined : (a ?? 0) + (b ?? 0);
+}
+
+/**
+ * The tokens **both** models spent on one call.
+ *
+ * Only the narration path needs this, and it is the whole reason it exists: a
+ * primary that answered in prose answered — it read the prompt, produced output,
+ * and the account was charged for it — and then its result was thrown away. The
+ * SDK sees one model call and would otherwise record only the second model's
+ * half, so `[agent-turn]` would under-report exactly the turns that went wrong.
+ *
+ * `inputTokens` therefore becomes **tokens billed, not prompt size**: the same
+ * prompt was sent twice and counted twice, which is what the invoice says. The
+ * per-call breakdown is in the AI Gateway log, which has a row for each.
+ */
+function withBothUsages(
+  result: GenerateResult,
+  primary: Usage
+): GenerateResult {
+  const fallback = result.usage;
+  return {
+    ...result,
+    usage: {
+      inputTokens: {
+        total: addTokens(primary.inputTokens.total, fallback.inputTokens.total),
+        noCache: addTokens(
+          primary.inputTokens.noCache,
+          fallback.inputTokens.noCache
+        ),
+        cacheRead: addTokens(
+          primary.inputTokens.cacheRead,
+          fallback.inputTokens.cacheRead
+        ),
+        cacheWrite: addTokens(
+          primary.inputTokens.cacheWrite,
+          fallback.inputTokens.cacheWrite
+        )
+      },
+      outputTokens: {
+        total: addTokens(
+          primary.outputTokens.total,
+          fallback.outputTokens.total
+        ),
+        text: addTokens(primary.outputTokens.text, fallback.outputTokens.text),
+        reasoning: addTokens(
+          primary.outputTokens.reasoning,
+          fallback.outputTokens.reasoning
+        )
+      },
+      // The provider's own shape, left as the fallback reported it: it is
+      // per-provider and undocumented, so summing across two calls would be
+      // inventing a meaning for it.
+      ...(fallback.raw !== undefined ? { raw: fallback.raw } : {})
+    }
+  };
+}
+
 /**
  * A cancelled turn is not a model failure, and must not spend the fallback on it.
  *
@@ -155,7 +220,11 @@ export function fallbackMiddleware(fallback: Model): LanguageModelMiddleware {
           finishReason: result.finishReason.unified
         }
       );
-      return marked(await fallback.doGenerate(params));
+      // The primary's tokens ride along: unlike the throw above, this call
+      // succeeded and was billed before its answer was rejected.
+      return marked(
+        withBothUsages(await fallback.doGenerate(params), result.usage)
+      );
     }
   };
 }

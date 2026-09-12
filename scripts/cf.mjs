@@ -480,7 +480,9 @@ async function cmdAi(args) {
   out(
     `${logs.length} calls${flags.since ? ` in last ${flags.since}` : ""} · $${cost.toFixed(5)} · ${modelStr}`
   );
-  const filtered = Boolean(flags.since || flags.model);
+  // Every narrowing option, because `total` is the count the API returns *after*
+  // applying them — so one missing here labels a filtered total as "stored".
+  const filtered = Boolean(flags.since || flags.model || flags.meta);
   out(
     `${hhmmss(Math.min(...times))} → ${hhmmss(Math.max(...times))}${total != null ? `  ·  ${total} ${filtered ? "matching" : "stored"}` : ""}`
   );
