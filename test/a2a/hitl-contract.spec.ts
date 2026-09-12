@@ -29,10 +29,13 @@ import {
  * carries, and the gatekeeper's zod schemas are a hand-written restatement of a
  * contract nothing compares them against. This file is that comparison.
  *
- * It is the one place outside `src/a2a/hitl.ts` that imports the protocol's HITL
- * names directly. Everywhere else goes through that module's re-exports, so a
- * name changing upstream is felt in one file; here the point is precisely to
- * hold the validator up against the contract rather than beside it.
+ * It is the only place that imports the protocol's HITL *shapes* — the types the
+ * schemas below are checked against — anywhere but `src/a2a/hitl.ts`, which
+ * re-exports them for everyone else. Two modules do import a protocol HITL name
+ * directly, and both are enforcement rather than reading: `src/db/schema.ts` and
+ * `src/db/models/hitl-requests.ts` take `HITL_REQUEST_KINDS` and
+ * `HitlRequestKind` to type the `request_kind` column, since going through
+ * `@/a2a` would point the db layer at the A2A layer.
  *
  * **What this catches and what it does not.** A field renamed, removed, or
  * retyped upstream fails these — assignability breaks in one direction or the
@@ -165,11 +168,22 @@ describe("the validator, against the contract it restates", () => {
   });
 });
 
+/**
+ * Both fixtures below are the two branches of core's `questionFor`
+ * ([`src/round/agent.ts`](https://github.com/dynamicagents/core/pull/35), on
+ * `r4/ask-user`), not shapes invented here: always `requestKind: "choice"`,
+ * never a `display`, and either `option_1…N` ids *or* `allowFreeform: true` —
+ * core sets the two in an either/or, so neither fixture carries both.
+ *
+ * Core's `askUserInputSchema` bounds the list at `.min(2).max(MAX_ASK_OPTIONS)`
+ * with `MAX_ASK_OPTIONS = 6`, so the six-option case is its ceiling. Note this
+ * is *core's* limit and not the gatekeeper's own `ask_user`
+ * ([`src/agents/shared/ask-user.ts`](../../src/agents/shared/ask-user.ts)),
+ * which allows 1–5 — two different producers, and this file is about the remote.
+ */
 describe("what core actually sends", () => {
   it("renders a six-option choice in order, with no display named", () => {
-    // The shape `@dynamicagents/core` emits for a decision it wants a person to
-    // make: a `choice`, ids it will read the answer back by, and no `display` —
-    // leaving the presentation to whichever gatekeeper renders it.
+    // Core's ceiling: the most options it can put in front of a person at once.
     const request: HitlRequestData = {
       type: HITL_REQUEST_TYPE,
       requestId: "core-1",

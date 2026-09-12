@@ -365,8 +365,9 @@ describe("handleSlackInteractivity", () => {
  * The agent runtime refuses message text over `MAX_MESSAGE_TEXT_BYTES`. If the
  * gatekeeper finds that out during the resume — which runs in `ctx.waitUntil`,
  * after the response has gone — the prompt has already been claimed, so the
- * answer is lost and the question can never be answered again. These two cases
- * pin the boundary that keeps it correctable instead.
+ * answer is lost and the question can never be answered again. These three cases
+ * pin the boundary that keeps it correctable instead: one byte over, exactly at
+ * the limit, and the same limit measured in bytes rather than characters.
  */
 describe("an over-long freeform answer", () => {
   const emptyCapture = (): Captured => ({
