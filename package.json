@@ -33,7 +33,7 @@
   "dependencies": {
     "@a2a-js/sdk": "^1.1.0",
     "@chat-adapter/slack": "^4.40.0",
-    "@dynamicagents/g2a-protocol": "^0.3.0",
+    "@dynamicagents/g2a-protocol": "^0.4.1",
     "agents": "^0.22.0",
     "ai": "^7.0.97",
     "chat": "^4.40.0",

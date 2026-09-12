@@ -14,7 +14,8 @@ import {
   buildHitlResponseParts,
   buildHitlTimeoutParts,
   HITL_APPROVE_OPTION_ID,
-  HITL_REJECT_OPTION_ID
+  HITL_REJECT_OPTION_ID,
+  HITL_REQUEST_TYPE
 } from "@/a2a/hitl";
 import type { SessionLike } from "@/agents/shared/session";
 import {
@@ -1153,7 +1154,7 @@ describe("executeAgentTurn — ask_user", () => {
   function raisedRequest(bus: { published: PublishedEvent[] }) {
     return (statusEventAt(bus, -1).status?.message?.parts ?? [])
       .map((p) => dataOf(p) as Record<string, unknown> | undefined)
-      .find((d) => d?.type === "io.da.hitl.request");
+      .find((d) => d?.type === HITL_REQUEST_TYPE);
   }
 
   it("pauses on the question and keeps the call until someone answers", async () => {
@@ -1684,7 +1685,7 @@ describe("executeAgentTurn — approvals", () => {
   function raisedRequest(bus: { published: PublishedEvent[] }) {
     return (statusEventAt(bus, -1).status?.message?.parts ?? [])
       .map((p) => dataOf(p) as Record<string, unknown> | undefined)
-      .find((d) => d?.type === "io.da.hitl.request");
+      .find((d) => d?.type === HITL_REQUEST_TYPE);
   }
 
   it("pauses on a gated call and keeps it until someone decides", async () => {

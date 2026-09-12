@@ -7,6 +7,7 @@ import {
   index,
   check
 } from "drizzle-orm/sqlite-core";
+import { HITL_REQUEST_KINDS } from "@dynamicagents/g2a-protocol";
 
 // Unix-seconds timestamp column with a SQLite-side default. Reused across tables.
 const timestamp = (name: string) =>
@@ -285,8 +286,16 @@ export const hitlRequests = sqliteTable(
     // expired / canceled state (a Slack response_url expires after ~30 min, and a
     // 7-day TTL far outlives that, so we always update by ts, never response_url).
     slackMessageTs: text("slack_message_ts"),
+    // The contract's own tuple, spread because drizzle wants a mutable one.
+    //
+    // This aligns the column's type with the wire rather than guarding it. A kind
+    // added upstream widens the column on the next install and still compiles,
+    // which is what you want: D1 should accept anything the wire permits. What
+    // it rules out is the column drifting *narrower* than the contract — spell
+    // these members by hand and miss one, and `createHitlRequest` stops
+    // accepting a `HitlRequestKind` the far side can legitimately send.
     requestKind: text("request_kind", {
-      enum: ["approval", "choice"]
+      enum: [...HITL_REQUEST_KINDS]
     }).notNull(),
     promptText: text("prompt_text").notNull(),
     // JSON-encoded SlackInputOption[] as rendered — the source of truth for the
