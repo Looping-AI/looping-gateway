@@ -1,7 +1,10 @@
 import { describe, it, expect } from "vitest";
 import { MockLanguageModelV4 } from "ai/test";
 import { APICallError, generateText, wrapLanguageModel } from "ai";
-import { fallbackMiddleware } from "@/agents/model-fallback-middleware";
+import {
+  fallbackMiddleware,
+  servedByFallback
+} from "@/agents/model-fallback-middleware";
 import { normalizeToolInputMiddleware } from "@/agents/model-middleware";
 
 // ---------------------------------------------------------------------------
@@ -121,6 +124,40 @@ describe("fallbackMiddleware", () => {
     expect(fallback.doGenerateCalls[0].prompt).toEqual(
       primary.doGenerateCalls[0].prompt
     );
+  });
+
+  // The step result cannot report which model produced it: `generateText` fills
+  // `response.modelId` from the model it was handed, which is this middleware's
+  // wrapper. So the fallback marks its own work, and `[agent-turn]` counts the
+  // marks. These two check the writer against the reader — the only place the
+  // spelling of that mark is pinned.
+  it("marks a result the fallback produced, and leaves the primary's unmarked", async () => {
+    const primary = model("primary", async () => textResult("primary answer"));
+    const fallback = model("fallback", async () => textResult("fallback"));
+
+    expect(
+      servedByFallback((await run(primary, fallback)).providerMetadata)
+    ).toBe(false);
+
+    const failing = throwingModel("primary", bindingError());
+    expect(
+      servedByFallback((await run(failing, fallback)).providerMetadata)
+    ).toBe(true);
+  });
+
+  it("keeps provider metadata the fallback's own provider set", async () => {
+    const primary = throwingModel("primary", bindingError());
+    const fallback = model("fallback", async () => ({
+      ...textResult("fallback answer"),
+      providerMetadata: { workersai: { cacheStatus: "miss" } }
+    }));
+
+    const result = await run(primary, fallback);
+
+    expect(servedByFallback(result.providerMetadata)).toBe(true);
+    // A wrapper that overwrote the provider's own namespace would be throwing
+    // away the only thing that knows what the provider actually did.
+    expect(result.providerMetadata?.workersai).toEqual({ cacheStatus: "miss" });
   });
 
   it("lets an abort through untouched rather than spending the fallback on it", async () => {

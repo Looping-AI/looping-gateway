@@ -33,6 +33,48 @@ type GenerateResult = Awaited<ReturnType<WrapGenerateOptions["doGenerate"]>>;
 type Model = WrapGenerateOptions["model"];
 
 /**
+ * The `providerMetadata` namespace this repo writes into.
+ *
+ * `providerMetadata` is keyed by provider so two providers can both annotate a
+ * result without colliding; a wrapper is not a provider, so it takes a key of its
+ * own rather than editing `workersai`'s.
+ */
+export const GATEKEEPER_METADATA = "slack-gatekeeper";
+
+/**
+ * Marks a step the fallback model produced.
+ *
+ * The step result cannot say this by itself: `generateText` fills
+ * `response.modelId` from the model it was *handed*
+ * (`ai/src/generate-text/generate-text.ts:997`), which is this middleware's
+ * wrapper, so a fallback-served step reports the primary's id. The warning below
+ * is the only other record, and reading a fallback rate out of log lines means
+ * joining them back to the turn that spent them.
+ */
+const SERVED_BY_FALLBACK = "servedByFallback";
+
+/** Whether the fallback model produced the step carrying this metadata. */
+export function servedByFallback(
+  metadata: GenerateResult["providerMetadata"]
+): boolean {
+  return metadata?.[GATEKEEPER_METADATA]?.[SERVED_BY_FALLBACK] === true;
+}
+
+/** Tag a fallback result, preserving whatever the provider already put there. */
+function marked(result: GenerateResult): GenerateResult {
+  return {
+    ...result,
+    providerMetadata: {
+      ...result.providerMetadata,
+      [GATEKEEPER_METADATA]: {
+        ...result.providerMetadata?.[GATEKEEPER_METADATA],
+        [SERVED_BY_FALLBACK]: true
+      }
+    }
+  };
+}
+
+/**
  * A cancelled turn is not a model failure, and must not spend the fallback on it.
  *
  * Deliberately the same predicate as the SDK's own `isAbortError`, which `ai` does
@@ -100,7 +142,7 @@ export function fallbackMiddleware(fallback: Model): LanguageModelMiddleware {
         });
         // A failure here is the end of the line: it propagates to the SDK, which
         // decides whether it is worth retrying the pair.
-        return await fallback.doGenerate(params);
+        return marked(await fallback.doGenerate(params));
       }
 
       if (!violatesToolChoice(params.toolChoice, result.content)) return result;
@@ -113,7 +155,7 @@ export function fallbackMiddleware(fallback: Model): LanguageModelMiddleware {
           finishReason: result.finishReason.unified
         }
       );
-      return await fallback.doGenerate(params);
+      return marked(await fallback.doGenerate(params));
     }
   };
 }

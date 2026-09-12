@@ -24,6 +24,7 @@ import { CHAT_CALL_OPTIONS } from "@/agents/model";
 import { buildMessage, textOf, textPart } from "@/a2a/parts";
 import { buildHitlRequestParts, type HitlRequest } from "@/a2a/hitl";
 import type { AgentTurnMetadata } from "@/agents/dispatch";
+import { startTurnLog } from "./turn-log";
 import type { SessionLike } from "./session";
 import {
   assistantSessionMessage,
@@ -177,6 +178,23 @@ export function isTransientAiError(err: unknown): boolean {
 /** What to log as the model. A `LanguageModel` may be a bare model-id string. */
 function modelIdOf(model: LanguageModel): string {
   return typeof model === "string" ? model : model.modelId;
+}
+
+/**
+ * The workspace a turn belongs to, whichever half of the union carries it.
+ *
+ * A local admin turn spells it `adminWorkspaceId` and a remote one `workspaceId`
+ * ({@link AgentTurnMetadata}); the onboarding concierge has no workspace at all,
+ * because it runs per user. Read here rather than in each executor's `prepare`,
+ * which narrows the union but keeps the result in its own closure — and this is
+ * needed before `prepare` runs, so a turn that fails inside it still says where.
+ */
+function workspaceIdOf(
+  metadata: Partial<AgentTurnMetadata>
+): number | undefined {
+  if ("adminWorkspaceId" in metadata) return metadata.adminWorkspaceId;
+  if ("workspaceId" in metadata) return metadata.workspaceId;
+  return undefined;
 }
 
 /** What an agent assembles for a single turn (inside the protected body). */
@@ -358,6 +376,16 @@ export async function executeAgentTurn(
   const text = textOf(userMessage);
   const metadata = (userMessage.metadata ?? {}) as Partial<AgentTurnMetadata>;
   const modelId = modelIdOf(cfg.model);
+  // Opened before anything can fail, and flushed in the `finally`, so a turn that
+  // throws on its first await still reports what it was and how long it took.
+  const turnLog = startTurnLog({
+    contextId: requestContext.contextId,
+    taskId: requestContext.taskId,
+    tenant: metadata.tenant,
+    workspaceId: workspaceIdOf(metadata),
+    user: metadata.user?.slackUserId,
+    model: modelId
+  });
   let completed = false;
   // Set by the stop condition below once a 🛑 is seen for this turn.
   let canceled = false;
@@ -595,6 +623,7 @@ export async function executeAgentTurn(
       await session.appendMessage(
         assistantSessionMessage(CANCELED_NOTE, persisted())
       );
+      turnLog.ending("stopped");
       publishTerminal("", TaskState.TASK_STATE_CANCELED);
       return;
     }
@@ -717,6 +746,7 @@ export async function executeAgentTurn(
 
     try {
       result = await runTurn();
+      turnLog.add(result);
       reply = required ? readFinalReply(result) : readPlainReply(result);
     } catch (err) {
       // Narration under an enforced tool choice arrives as a throw, not a result —
@@ -778,6 +808,7 @@ export async function executeAgentTurn(
               ])
             : messages;
         const salvaged = await salvageEnding(seed);
+        turnLog.add(salvaged);
         reply = readFinalReply(salvaged);
       } catch (err) {
         if (!ToolChoiceViolationError.isInstance(err)) throw err;
@@ -813,6 +844,7 @@ export async function executeAgentTurn(
       await session.appendMessage(
         assistantSessionMessage(CANCELED_NOTE, persisted())
       );
+      turnLog.ending("stopped");
       publishTerminal("", TaskState.TASK_STATE_CANCELED);
       return;
     }
@@ -835,6 +867,7 @@ export async function executeAgentTurn(
       );
       await cfg.openCalls.put(pause.call);
       completed = true;
+      turnLog.ending("parked");
       publishInputRequired(
         eventBus,
         requestContext,
@@ -860,13 +893,16 @@ export async function executeAgentTurn(
           assistantSessionMessage(NO_REPLY_NOTE, records)
         );
       }
+      turnLog.ending("none");
       publishTerminal(TRANSIENT_REPLY);
       return;
     }
 
     await session.appendMessage(assistantSessionMessage(reply, persisted()));
+    turnLog.ending("reply");
     publishTerminal(reply);
   } catch (err) {
+    turnLog.ending("failed");
     console.error("[agent-loop] turn failed", {
       contextId: requestContext.contextId,
       model: modelId,
@@ -910,6 +946,7 @@ export async function executeAgentTurn(
       publishTerminal(cfg.unexpectedReply, TaskState.TASK_STATE_FAILED);
     }
   } finally {
+    turnLog.flush();
     eventBus.finished();
   }
 }

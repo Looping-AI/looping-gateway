@@ -2346,3 +2346,122 @@ describe("executeAgentTurn — recorded tool calls", () => {
     expect(persistedActions(session)).toHaveLength(0);
   });
 });
+
+// ---------------------------------------------------------------------------
+// The turn log — one `[agent-turn]` line per turn, whatever exit it takes.
+// The arithmetic inside that line is `turn-log.spec.ts`; what is checked here is
+// that every exit reaches it, and that it says which exit was taken.
+// ---------------------------------------------------------------------------
+
+describe("executeAgentTurn — the turn log", () => {
+  const adminMetadata = {
+    agentKind: "local",
+    tenant: "admin",
+    adminWorkspaceId: 7,
+    user: { slackUserId: "U123" }
+  };
+
+  /** Run a turn with `console.info` captured, and return the `[agent-turn]` lines. */
+  async function turnLines(
+    cfg: AgentTurnConfig,
+    context = fakeRequestContext("hi", { metadata: adminMetadata })
+  ) {
+    const info = vi.spyOn(console, "info").mockImplementation(() => {});
+    try {
+      await executeAgentTurn(context, fakeEventBus().eventBus, cfg);
+      return info.mock.calls
+        .filter((call) => call[0] === "[agent-turn]")
+        .map((call) => call[1] as Record<string, unknown>);
+    } finally {
+      info.mockRestore();
+    }
+  }
+
+  it("logs one line for a turn that replied, carrying who it was for", async () => {
+    const session = new FakeSession();
+    const model = new MockLanguageModelV4({
+      doGenerate: async () => finalReplyResult("Done.") as never
+    });
+
+    const lines = await turnLines(forcedCfg(session, model));
+
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toMatchObject({
+      contextId: "ctx-1",
+      taskId: "task-1",
+      tenant: "admin",
+      workspaceId: 7,
+      user: "U123",
+      ending: "reply",
+      generations: 1,
+      steps: 1,
+      fallbacks: 0,
+      tools: { final_reply: 1 }
+    });
+  });
+
+  it("reports a throw as failed, from the `finally` no exit reached", async () => {
+    const session = new FakeSession();
+    const model = new MockLanguageModelV4({
+      doGenerate: async () => {
+        throw new Error("the binding is gone");
+      }
+    });
+
+    const lines = await turnLines(forcedCfg(session, model));
+
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toMatchObject({ ending: "failed", generations: 0 });
+  });
+
+  it("distinguishes a turn that parked on a human from one that answered", async () => {
+    const session = new FakeSession();
+    const model = new MockLanguageModelV4({
+      doGenerate: async () =>
+        toolCallResult("ask_user", {
+          question: "Which environment?",
+          options: [{ label: "dev" }, { label: "prod" }]
+        }) as never
+    });
+
+    const lines = await turnLines(
+      forcedCfg(session, model, {
+        openCalls: new MemoryOpenCalls(),
+        prepare: async () => ({
+          session,
+          systemSuffix: "",
+          tools: { ask_user: askUserTool }
+        })
+      })
+    );
+
+    expect(lines).toHaveLength(1);
+    // Not "none": the turn produced no reply, but it produced a question, and
+    // counting it as a failure to answer is how a healthy agent looks broken.
+    expect(lines[0]).toMatchObject({
+      ending: "parked",
+      tools: { ask_user: 1 }
+    });
+  });
+
+  it("names the workspace of a remote agent's turn, which spells it differently", async () => {
+    const session = new FakeSession();
+    const model = new MockLanguageModelV4({
+      doGenerate: async () => finalReplyResult("Done.") as never
+    });
+
+    const lines = await turnLines(
+      forcedCfg(session, model),
+      fakeRequestContext("hi", {
+        metadata: {
+          agentKind: "remote",
+          tenant: "acme",
+          workspaceId: 42,
+          user: { slackUserId: "U9" }
+        }
+      })
+    );
+
+    expect(lines[0]).toMatchObject({ tenant: "acme", workspaceId: 42 });
+  });
+});
