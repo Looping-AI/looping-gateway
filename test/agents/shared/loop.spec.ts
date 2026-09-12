@@ -1836,6 +1836,40 @@ describe("executeAgentTurn — approvals", () => {
     });
   });
 
+  it("names an approved call the turn carried out, which its model never asked for", async () => {
+    // The gap Copilot found in the first draft. A replayed approval executes
+    // *before* the first model step, so it appears in no model call's content —
+    // and `tools` is built from that content. Logging nothing for it would leave
+    // the single most consequential thing an admin turn does, a destructive call
+    // a human signed off, invisible in the one line that says what the turn did.
+    const session = new FakeSession();
+    session.messages.push(assistantSessionMessage(reason));
+    const openCalls = new MemoryOpenCalls();
+    await openCalls.put(heldApproval());
+    const gate = gatedTool();
+    const model = new MockLanguageModelV4({
+      doGenerate: async () => finalReplyResult("Deleted it.") as never
+    });
+    const info = vi.spyOn(console, "info").mockImplementation(() => {});
+
+    await executeAgentTurn(
+      resumeContext(decision(HITL_APPROVE_OPTION_ID, "Approve")),
+      fakeEventBus().eventBus,
+      gatedCfg(session, model, gate, asksAHuman, { openCalls })
+    );
+
+    const line = info.mock.calls.find((c) => c[0] === "[agent-turn]")?.[1] as
+      Record<string, unknown> | undefined;
+    info.mockRestore();
+
+    expect(gate.ran).toEqual([input]);
+    expect(line).toMatchObject({ ending: "reply", replayed: "danger" });
+    // Named separately rather than folded into `tools`: this turn's model asked
+    // only for `final_reply`, and conflating the two would lose the distinction
+    // between deciding to delete and carrying out someone else's decision.
+    expect(line?.tools).toEqual({ final_reply: 1 });
+  });
+
   it("runs nothing when the human rejects, and records why", async () => {
     const session = new FakeSession();
     // The turn that raised the prompt. A resume adds no user turn of its own, so
@@ -2344,5 +2378,148 @@ describe("executeAgentTurn — recorded tool calls", () => {
       "Here is what I found."
     );
     expect(persistedActions(session)).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The turn log — one `[agent-turn]` line per turn, whatever exit it takes.
+// The arithmetic inside that line is `turn-log.spec.ts`; what is checked here is
+// that every exit reaches it, and that it says which exit was taken.
+// ---------------------------------------------------------------------------
+
+describe("executeAgentTurn — the turn log", () => {
+  const adminMetadata = {
+    agentKind: "local",
+    tenant: "admin",
+    adminWorkspaceId: 7,
+    user: { slackUserId: "U123" }
+  };
+
+  /** Run a turn with `console.info` captured, and return the `[agent-turn]` lines. */
+  async function turnLines(
+    cfg: AgentTurnConfig,
+    context = fakeRequestContext("hi", { metadata: adminMetadata })
+  ) {
+    const info = vi.spyOn(console, "info").mockImplementation(() => {});
+    try {
+      await executeAgentTurn(context, fakeEventBus().eventBus, cfg);
+      return info.mock.calls
+        .filter((call) => call[0] === "[agent-turn]")
+        .map((call) => call[1] as Record<string, unknown>);
+    } finally {
+      info.mockRestore();
+    }
+  }
+
+  it("logs one line for a turn that replied, carrying who it was for", async () => {
+    const session = new FakeSession();
+    const model = new MockLanguageModelV4({
+      doGenerate: async () => finalReplyResult("Done.") as never
+    });
+
+    const lines = await turnLines(forcedCfg(session, model));
+
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toMatchObject({
+      contextId: "ctx-1",
+      taskId: "task-1",
+      tenant: "admin",
+      workspaceId: 7,
+      user: "U123",
+      ending: "reply",
+      modelCalls: 1,
+      fallbacks: 0,
+      salvaged: false,
+      tools: { final_reply: 1 }
+    });
+  });
+
+  it("reports a throw as failed, from the `finally` no exit reached", async () => {
+    const session = new FakeSession();
+    const model = new MockLanguageModelV4({
+      doGenerate: async () => {
+        throw new Error("the binding is gone");
+      }
+    });
+
+    const lines = await turnLines(forcedCfg(session, model));
+
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toMatchObject({ ending: "failed", modelCalls: 0 });
+  });
+
+  it("distinguishes a turn that parked on a human from one that answered", async () => {
+    const session = new FakeSession();
+    const model = new MockLanguageModelV4({
+      doGenerate: async () =>
+        toolCallResult("ask_user", {
+          question: "Which environment?",
+          options: [{ label: "dev" }, { label: "prod" }]
+        }) as never
+    });
+
+    const lines = await turnLines(
+      forcedCfg(session, model, {
+        openCalls: new MemoryOpenCalls(),
+        prepare: async () => ({
+          session,
+          systemSuffix: "",
+          tools: { ask_user: askUserTool }
+        })
+      })
+    );
+
+    expect(lines).toHaveLength(1);
+    // Not "none": the turn produced no reply, but it produced a question, and
+    // counting it as a failure to answer is how a healthy agent looks broken.
+    expect(lines[0]).toMatchObject({
+      ending: "parked",
+      tools: { ask_user: 1 }
+    });
+  });
+
+  it("names the workspace of a remote agent's turn, which spells it differently", async () => {
+    const session = new FakeSession();
+    const model = new MockLanguageModelV4({
+      doGenerate: async () => finalReplyResult("Done.") as never
+    });
+
+    const lines = await turnLines(
+      forcedCfg(session, model),
+      fakeRequestContext("hi", {
+        metadata: {
+          agentKind: "remote",
+          tenant: "acme",
+          workspaceId: 42,
+          user: { slackUserId: "U9" }
+        }
+      })
+    );
+
+    expect(lines[0]).toMatchObject({ tenant: "acme", workspaceId: 42 });
+  });
+
+  it("counts calls the turn was billed for and never got to use", async () => {
+    // Both the turn and its salvage narrate under an enforced tool choice, so
+    // `generateText` rejects with `ToolChoiceViolationError` twice and neither
+    // promise ever resolves to a result. Both calls were still charged, and both
+    // wrote a row to the AI Gateway log. Read from the resolved result, this
+    // whole turn would report zero calls and zero tokens — the most expensive
+    // shape a turn has, logged as if nothing had happened.
+    const session = new FakeSession();
+    const model = new MockLanguageModelV4({
+      doGenerate: async () => okResult("I have updated the endpoint.") as never
+    });
+
+    const lines = await turnLines(forcedCfg(session, model));
+
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toMatchObject({
+      ending: "none",
+      modelCalls: 2,
+      salvaged: true
+    });
+    expect(lines[0]?.inputTokens).toBeGreaterThan(0);
+    expect(lines[0]?.outputTokens).toBeGreaterThan(0);
   });
 });

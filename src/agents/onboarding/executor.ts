@@ -4,14 +4,13 @@ import type {
   RequestContext
 } from "@a2a-js/sdk/server";
 import { COMPACT_AFTER_TOKENS, COMPACT_TAIL_TOKENS } from "@/config";
-import type { LanguageModel } from "ai";
 import { chatModel, type ModelOverrides } from "@/agents/model";
 import {
   buildAgentSession,
   type SessionHost,
   type SessionLike
 } from "@/agents/shared/session";
-import { executeAgentTurn } from "@/agents/shared/loop";
+import { executeAgentTurn, turnGatewayMetadata } from "@/agents/shared/loop";
 import { isCancelRequested } from "@/db/models/agent-tasks";
 import { callerContext } from "@/agents/shared/prompt";
 import { archiveMessages } from "@/agents/shared/recall";
@@ -34,21 +33,25 @@ export interface OnboardingExecutorOptions extends ModelOverrides {
  */
 export class OnboardingAgentExecutor implements AgentExecutor {
   private session?: SessionLike;
-  private readonly model: LanguageModel;
 
   constructor(
     private readonly agent: SessionHost,
     private readonly options: OnboardingExecutorOptions = {}
-  ) {
-    this.model = chatModel(this.options);
-  }
+  ) {}
 
   /** Lazily build the one Session for this DO (one per user). */
   private getSession(namespace: string): SessionLike {
     if (!this.session) {
+      // Labelled so a compaction summary is distinguishable from a turn in the
+      // AI Gateway log. No workspace: this agent runs per user, not per
+      // workspace, which is the whole reason its namespace is the user id.
+      const summarizer = chatModel(
+        { call: "summarize", tenant: "onboarding" },
+        this.options
+      );
       this.session = this.options.createSession
         ? this.options.createSession()
-        : buildAgentSession(this.agent, this.model, {
+        : buildAgentSession(this.agent, summarizer, {
             soul: onboardingSoul,
             memoryDescription:
               "Durable facts about this user — their name, role, and what they're trying to set up. Keep it concise.",
@@ -66,7 +69,9 @@ export class OnboardingAgentExecutor implements AgentExecutor {
     eventBus: ExecutionEventBus
   ): Promise<void> => {
     await executeAgentTurn(requestContext, eventBus, {
-      model: this.model,
+      // Per turn, not per instance: the model carries this turn's identity into
+      // the AI Gateway log, and that is the only channel the gateway has for it.
+      model: chatModel(turnGatewayMetadata(requestContext), this.options),
       // The dispatch token is the A2A messageId, and the gatekeeper records a 🛑
       // against that same token — so the running turn can read its own stop flag.
       isCanceled: isCancelRequested,

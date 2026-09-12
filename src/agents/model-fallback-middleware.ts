@@ -33,6 +33,113 @@ type GenerateResult = Awaited<ReturnType<WrapGenerateOptions["doGenerate"]>>;
 type Model = WrapGenerateOptions["model"];
 
 /**
+ * The `providerMetadata` namespace this repo writes into.
+ *
+ * `providerMetadata` is keyed by provider so two providers can both annotate a
+ * result without colliding; a wrapper is not a provider, so it takes a key of its
+ * own rather than editing `workersai`'s.
+ */
+export const GATEKEEPER_METADATA = "slack-gatekeeper";
+
+/**
+ * Marks a step the fallback model produced.
+ *
+ * The step result cannot say this by itself: `generateText` fills
+ * `response.modelId` from the model it was *handed*
+ * (`ai/src/generate-text/generate-text.ts:997`), which is this middleware's
+ * wrapper, so a fallback-served step reports the primary's id. The warning below
+ * is the only other record, and reading a fallback rate out of log lines means
+ * joining them back to the turn that spent them.
+ */
+const SERVED_BY_FALLBACK = "servedByFallback";
+
+/** Whether the fallback model produced the step carrying this metadata. */
+export function servedByFallback(
+  metadata: GenerateResult["providerMetadata"]
+): boolean {
+  return metadata?.[GATEKEEPER_METADATA]?.[SERVED_BY_FALLBACK] === true;
+}
+
+/** Tag a fallback result, preserving whatever the provider already put there. */
+function marked(result: GenerateResult): GenerateResult {
+  return {
+    ...result,
+    providerMetadata: {
+      ...result.providerMetadata,
+      [GATEKEEPER_METADATA]: {
+        ...result.providerMetadata?.[GATEKEEPER_METADATA],
+        [SERVED_BY_FALLBACK]: true
+      }
+    }
+  };
+}
+
+type Usage = GenerateResult["usage"];
+
+/** Add two token counts, keeping "not reported" distinct from "zero". */
+function addTokens(
+  a: number | undefined,
+  b: number | undefined
+): number | undefined {
+  return a === undefined && b === undefined ? undefined : (a ?? 0) + (b ?? 0);
+}
+
+/**
+ * The tokens **both** models spent on one call.
+ *
+ * Only the narration path needs this, and it is the whole reason it exists: a
+ * primary that answered in prose answered — it read the prompt, produced output,
+ * and the account was charged for it — and then its result was thrown away. The
+ * SDK sees one model call and would otherwise record only the second model's
+ * half, so `[agent-turn]` would under-report exactly the turns that went wrong.
+ *
+ * `inputTokens` therefore becomes **tokens billed, not prompt size**: the same
+ * prompt was sent twice and counted twice, which is what the invoice says. The
+ * per-call breakdown is in the AI Gateway log, which has a row for each.
+ */
+function withBothUsages(
+  result: GenerateResult,
+  primary: Usage
+): GenerateResult {
+  const fallback = result.usage;
+  return {
+    ...result,
+    usage: {
+      inputTokens: {
+        total: addTokens(primary.inputTokens.total, fallback.inputTokens.total),
+        noCache: addTokens(
+          primary.inputTokens.noCache,
+          fallback.inputTokens.noCache
+        ),
+        cacheRead: addTokens(
+          primary.inputTokens.cacheRead,
+          fallback.inputTokens.cacheRead
+        ),
+        cacheWrite: addTokens(
+          primary.inputTokens.cacheWrite,
+          fallback.inputTokens.cacheWrite
+        )
+      },
+      outputTokens: {
+        total: addTokens(
+          primary.outputTokens.total,
+          fallback.outputTokens.total
+        ),
+        text: addTokens(primary.outputTokens.text, fallback.outputTokens.text),
+        reasoning: addTokens(
+          primary.outputTokens.reasoning,
+          fallback.outputTokens.reasoning
+        )
+      },
+      // The provider's own shape, left as the fallback reported it: it is
+      // per-provider and undocumented, so summing across two calls would be
+      // inventing a meaning for it.
+      ...(fallback.raw !== undefined ? { raw: fallback.raw } : {})
+    }
+  };
+}
+
+/**
  * A cancelled turn is not a model failure, and must not spend the fallback on it.
  *
  * Deliberately the same predicate as the SDK's own `isAbortError`, which `ai` does
@@ -100,7 +207,7 @@ export function fallbackMiddleware(fallback: Model): LanguageModelMiddleware {
         });
         // A failure here is the end of the line: it propagates to the SDK, which
         // decides whether it is worth retrying the pair.
-        return await fallback.doGenerate(params);
+        return marked(await fallback.doGenerate(params));
       }
 
       if (!violatesToolChoice(params.toolChoice, result.content)) return result;
@@ -113,7 +220,11 @@ export function fallbackMiddleware(fallback: Model): LanguageModelMiddleware {
           finishReason: result.finishReason.unified
         }
       );
-      return await fallback.doGenerate(params);
+      // The primary's tokens ride along: unlike the throw above, this call
+      // succeeded and was billed before its answer was rejected.
+      return marked(
+        withBothUsages(await fallback.doGenerate(params), result.usage)
+      );
     }
   };
 }

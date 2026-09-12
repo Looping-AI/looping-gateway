@@ -20,10 +20,11 @@ import {
   RetryError,
   ToolChoiceViolationError
 } from "ai";
-import { CHAT_CALL_OPTIONS } from "@/agents/model";
+import { CHAT_CALL_OPTIONS, type GatewayCallMetadata } from "@/agents/model";
 import { buildMessage, textOf, textPart } from "@/a2a/parts";
 import { buildHitlRequestParts, type HitlRequest } from "@/a2a/hitl";
 import type { AgentTurnMetadata } from "@/agents/dispatch";
+import { startTurnLog, type ModelCallLike } from "./turn-log";
 import type { SessionLike } from "./session";
 import {
   assistantSessionMessage,
@@ -177,6 +178,45 @@ export function isTransientAiError(err: unknown): boolean {
 /** What to log as the model. A `LanguageModel` may be a bare model-id string. */
 function modelIdOf(model: LanguageModel): string {
   return typeof model === "string" ? model : model.modelId;
+}
+
+/**
+ * The workspace a turn belongs to, whichever half of the union carries it.
+ *
+ * A local admin turn spells it `adminWorkspaceId` and a remote one `workspaceId`
+ * ({@link AgentTurnMetadata}); the onboarding concierge has no workspace at all,
+ * because it runs per user. Read here rather than in each executor's `prepare`,
+ * which narrows the union but keeps the result in its own closure — and this is
+ * needed before `prepare` runs, so a turn that fails inside it still says where.
+ */
+function workspaceIdOf(
+  metadata: Partial<AgentTurnMetadata>
+): number | undefined {
+  if ("adminWorkspaceId" in metadata) return metadata.adminWorkspaceId;
+  if ("workspaceId" in metadata) return metadata.workspaceId;
+  return undefined;
+}
+
+/**
+ * What an executor labels a turn's model calls with, for the AI Gateway log.
+ *
+ * Here rather than in each executor because it reads the same wire metadata this
+ * module already reads, off the same request — and because an executor has to
+ * build its model *before* `executeAgentTurn` runs, which is before its own
+ * `prepare` has narrowed anything.
+ */
+export function turnGatewayMetadata(
+  requestContext: RequestContext
+): GatewayCallMetadata {
+  const metadata = (requestContext.userMessage.metadata ??
+    {}) as Partial<AgentTurnMetadata>;
+  return {
+    call: "turn",
+    tenant: metadata.tenant,
+    workspaceId: workspaceIdOf(metadata),
+    contextId: requestContext.contextId,
+    user: metadata.user?.slackUserId
+  };
 }
 
 /** What an agent assembles for a single turn (inside the protected body). */
@@ -358,6 +398,16 @@ export async function executeAgentTurn(
   const text = textOf(userMessage);
   const metadata = (userMessage.metadata ?? {}) as Partial<AgentTurnMetadata>;
   const modelId = modelIdOf(cfg.model);
+  // Opened before anything can fail, and flushed in the `finally`, so a turn that
+  // throws on its first await still reports what it was and how long it took.
+  const turnLog = startTurnLog({
+    contextId: requestContext.contextId,
+    taskId: requestContext.taskId,
+    tenant: metadata.tenant,
+    workspaceId: workspaceIdOf(metadata),
+    user: metadata.user?.slackUserId,
+    model: modelId
+  });
   let completed = false;
   // Set by the stop condition below once a 🛑 is seen for this turn.
   let canceled = false;
@@ -461,6 +511,13 @@ export async function executeAgentTurn(
     // Whether the approved call is still waiting to run. Only an approval that was
     // granted replays; a refusal is already its own outcome.
     const replaying = approvalAction?.approval?.approved === true;
+    // A replayed call is the one thing a turn does that its own model never asked
+    // for — it runs before the first step, from a decision a previous turn made
+    // and a human then approved. It is named separately rather than folded into
+    // `tools` precisely because of that: "this turn decided to delete an agent"
+    // and "this turn carried out a delete someone approved" are different facts,
+    // and the second is the one an audit wants.
+    if (replaying && approvalAction) turnLog.replayed(approvalAction.toolName);
 
     /**
      * History, plus the decision this turn is resuming.
@@ -545,6 +602,7 @@ export async function executeAgentTurn(
      * does. Everything else the turn calls is recorded there as usual.
      */
     const onToolExecutionEnd: OnToolExecutionEndCallback<ToolSet> = (event) => {
+      turnLog.toolRan(event.toolExecutionMs);
       if (
         !approvalAction ||
         event.toolCall.toolCallId !== approvalAction.toolCallId
@@ -556,6 +614,21 @@ export async function executeAgentTurn(
           ? { output: event.toolOutput.output }
           : { errorText: String(event.toolOutput.error) }
       );
+    };
+
+    /**
+     * Every model call the turn is charged for, counted as it happens.
+     *
+     * Deliberately not read off the resolved result. A model that narrates under
+     * an enforced tool choice is billed and then discarded: `generateText` raises
+     * `ToolChoiceViolationError` at `generate-text.ts:1150`, so the promise never
+     * resolves and there is no result — but the callback has already fired at
+     * `:1128`. Reading usage from the result would report nothing for exactly the
+     * turns that cost the most, which is both models answering in prose and then
+     * a salvage on top.
+     */
+    const onLanguageModelCallEnd = (event: ModelCallLike): void => {
+      turnLog.modelCall(event);
     };
 
     // The gatekeeper's 🛑 workflow runs on its own request and cannot reach into
@@ -595,6 +668,7 @@ export async function executeAgentTurn(
       await session.appendMessage(
         assistantSessionMessage(CANCELED_NOTE, persisted())
       );
+      turnLog.ending("stopped");
       publishTerminal("", TaskState.TASK_STATE_CANCELED);
       return;
     }
@@ -683,6 +757,7 @@ export async function executeAgentTurn(
         stopWhen: [isStepCount(MAX_STEPS), stopIfCanceled],
         onStepEnd,
         onToolExecutionEnd,
+        onLanguageModelCallEnd,
         // `reasoning` and the telemetry opt-out travel together, shared with the
         // compaction summarizer so the two call sites cannot drift — see
         // {@link file://../model.ts model.ts}.
@@ -709,6 +784,9 @@ export async function executeAgentTurn(
         tools: { [FINAL_REPLY_TOOL_NAME]: finalReplyTool },
         toolChoice: { type: "tool", toolName: FINAL_REPLY_TOOL_NAME },
         stopWhen: [isStepCount(1)],
+        // The one callback the salvage does want: it is a charged call like any
+        // other, and the case it exists for is the one where it narrates too.
+        onLanguageModelCallEnd,
         ...CHAT_CALL_OPTIONS
       });
 
@@ -757,6 +835,7 @@ export async function executeAgentTurn(
     const interrupted = (await checkCanceled()) || pause !== undefined;
 
     if (required && reply === undefined && !interrupted) {
+      turnLog.salvaged();
       console.warn("[agent-loop] no ending; asking once more with none else", {
         model: modelId,
         finishReason: result?.finishReason,
@@ -813,6 +892,7 @@ export async function executeAgentTurn(
       await session.appendMessage(
         assistantSessionMessage(CANCELED_NOTE, persisted())
       );
+      turnLog.ending("stopped");
       publishTerminal("", TaskState.TASK_STATE_CANCELED);
       return;
     }
@@ -835,6 +915,7 @@ export async function executeAgentTurn(
       );
       await cfg.openCalls.put(pause.call);
       completed = true;
+      turnLog.ending("parked");
       publishInputRequired(
         eventBus,
         requestContext,
@@ -860,13 +941,16 @@ export async function executeAgentTurn(
           assistantSessionMessage(NO_REPLY_NOTE, records)
         );
       }
+      turnLog.ending("none");
       publishTerminal(TRANSIENT_REPLY);
       return;
     }
 
     await session.appendMessage(assistantSessionMessage(reply, persisted()));
+    turnLog.ending("reply");
     publishTerminal(reply);
   } catch (err) {
+    turnLog.ending("failed");
     console.error("[agent-loop] turn failed", {
       contextId: requestContext.contextId,
       model: modelId,
@@ -910,6 +994,7 @@ export async function executeAgentTurn(
       publishTerminal(cfg.unexpectedReply, TaskState.TASK_STATE_FAILED);
     }
   } finally {
+    turnLog.flush();
     eventBus.finished();
   }
 }

@@ -1,7 +1,10 @@
 import { describe, it, expect } from "vitest";
 import { MockLanguageModelV4 } from "ai/test";
 import { APICallError, generateText, wrapLanguageModel } from "ai";
-import { fallbackMiddleware } from "@/agents/model-fallback-middleware";
+import {
+  fallbackMiddleware,
+  servedByFallback
+} from "@/agents/model-fallback-middleware";
 import { normalizeToolInputMiddleware } from "@/agents/model-middleware";
 
 // ---------------------------------------------------------------------------
@@ -9,7 +12,21 @@ import { normalizeToolInputMiddleware } from "@/agents/model-middleware";
 // works at. `finishReason` is an object here, not the string the SDK surfaces.
 // ---------------------------------------------------------------------------
 
-const usage = {
+// Widened rather than inferred: a literal `undefined` narrows the field to
+// `undefined`, and the merged-usage case below reports real cache numbers.
+const usage: {
+  inputTokens: {
+    total: number | undefined;
+    noCache: number | undefined;
+    cacheRead: number | undefined;
+    cacheWrite: number | undefined;
+  };
+  outputTokens: {
+    total: number | undefined;
+    text: number | undefined;
+    reasoning: number | undefined;
+  };
+} = {
   inputTokens: {
     total: 1,
     noCache: 1,
@@ -121,6 +138,82 @@ describe("fallbackMiddleware", () => {
     expect(fallback.doGenerateCalls[0].prompt).toEqual(
       primary.doGenerateCalls[0].prompt
     );
+  });
+
+  // The step result cannot report which model produced it: `generateText` fills
+  // `response.modelId` from the model it was handed, which is this middleware's
+  // wrapper. So the fallback marks its own work, and `[agent-turn]` counts the
+  // marks. These two check the writer against the reader — the only place the
+  // spelling of that mark is pinned.
+  it("marks a result the fallback produced, and leaves the primary's unmarked", async () => {
+    const primary = model("primary", async () => textResult("primary answer"));
+    const fallback = model("fallback", async () => textResult("fallback"));
+
+    expect(
+      servedByFallback((await run(primary, fallback)).providerMetadata)
+    ).toBe(false);
+
+    const failing = throwingModel("primary", bindingError());
+    expect(
+      servedByFallback((await run(failing, fallback)).providerMetadata)
+    ).toBe(true);
+  });
+
+  it("keeps provider metadata the fallback's own provider set", async () => {
+    const primary = throwingModel("primary", bindingError());
+    const fallback = model("fallback", async () => ({
+      ...textResult("fallback answer"),
+      providerMetadata: { workersai: { cacheStatus: "miss" } }
+    }));
+
+    const result = await run(primary, fallback);
+
+    expect(servedByFallback(result.providerMetadata)).toBe(true);
+    // A wrapper that overwrote the provider's own namespace would be throwing
+    // away the only thing that knows what the provider actually did.
+    expect(result.providerMetadata?.workersai).toEqual({ cacheStatus: "miss" });
+  });
+
+  it("reports the tokens both models spent when the primary narrated", async () => {
+    // The primary succeeded and was billed; only its *answer* was rejected. If
+    // the returned result carried the fallback's usage alone, `[agent-turn]`
+    // would under-report exactly the turns that went wrong.
+    const primary = model("primary", async () =>
+      textResult("I did the thing.")
+    );
+    const fallback = model("fallback", async () => ({
+      ...toolCallResult("final_reply"),
+      usage: {
+        inputTokens: {
+          total: 10,
+          noCache: 8,
+          cacheRead: 2,
+          cacheWrite: undefined
+        },
+        outputTokens: { total: 4, text: 4, reasoning: undefined }
+      }
+    }));
+
+    const result = await run(primary, fallback, { type: "required" });
+
+    // The shared `usage` fixture reports 1 in / 1 out for the primary.
+    expect(result.usage.inputTokens.total).toBe(11);
+    expect(result.usage.inputTokens.noCache).toBe(9);
+    expect(result.usage.inputTokens.cacheRead).toBe(2);
+    expect(result.usage.outputTokens.total).toBe(5);
+  });
+
+  it("does not invent usage for a primary that threw before reporting any", async () => {
+    // Nothing was billed for a call that never returned, so the fallback's own
+    // numbers stand unchanged.
+    const primary = throwingModel("primary", bindingError());
+    const fallback = model("fallback", async () =>
+      textResult("fallback answer")
+    );
+
+    const result = await run(primary, fallback);
+
+    expect(result.usage).toEqual(usage);
   });
 
   it("lets an abort through untouched rather than spending the fallback on it", async () => {

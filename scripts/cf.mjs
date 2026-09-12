@@ -62,6 +62,7 @@ const USAGE = `cf.mjs — Cloudflare API proxy (credentials from ${ENV_FILE})
   wf <name>                              list recent instances of a workflow
   wf <name> <instanceId> [--json]        one instance, per-step pass/fail
   ai [--since 2h] [--model <m>]          AI Gateway calls, as a digest
+     [--meta call=turn]                  filter by one custom-metadata entry
      [--limit 20] [--json|--raw]
   ai <logId> [--full] [--max N]          one call: prompt + reply (bodies)
   fields [--worker <name>]               list available log fields
@@ -408,7 +409,7 @@ function messageText(msg) {
 async function cmdAi(args) {
   const { flags, pos } = parseFlags(args, {
     bool: ["--json", "--raw", "--full"],
-    value: ["--since", "--model", "--limit", "--gateway", "--max"]
+    value: ["--since", "--model", "--limit", "--gateway", "--max", "--meta"]
   });
   const gw = flags.gateway ?? AI_GW_DEFAULT;
   if (pos[0]) return cmdAiDetail(gw, pos[0], flags);
@@ -433,6 +434,22 @@ async function cmdAi(args) {
       new Date(Date.now() - parseSince(flags.since)).toISOString()
     ]);
   if (flags.model) query.push(["model", String(flags.model)]);
+  // Custom metadata is filterable, but only through the two generic keys the API
+  // exposes — `metadata.key` and `metadata.value`, never `metadata.<name>`. So
+  // `--meta call=turn` is two filters ANDed, and `--meta call` on its own asks
+  // only "was this key set at all", which is the useful question while a
+  // deploy is still rolling out.
+  if (flags.meta) {
+    const [key, ...rest] = String(flags.meta).split("=");
+    const filters = [{ key: "metadata.key", operator: "eq", value: [key] }];
+    if (rest.length > 0)
+      filters.push({
+        key: "metadata.value",
+        operator: "eq",
+        value: [rest.join("=")]
+      });
+    query.push(["filters", JSON.stringify(filters)]);
+  }
 
   const { res, text } = await request(
     "GET",
@@ -463,7 +480,9 @@ async function cmdAi(args) {
   out(
     `${logs.length} calls${flags.since ? ` in last ${flags.since}` : ""} · $${cost.toFixed(5)} · ${modelStr}`
   );
-  const filtered = Boolean(flags.since || flags.model);
+  // Every narrowing option, because `total` is the count the API returns *after*
+  // applying them — so one missing here labels a filtered total as "stored".
+  const filtered = Boolean(flags.since || flags.model || flags.meta);
   out(
     `${hhmmss(Math.min(...times))} → ${hhmmss(Math.max(...times))}${total != null ? `  ·  ${total} ${filtered ? "matching" : "stored"}` : ""}`
   );
@@ -472,8 +491,12 @@ async function cmdAi(args) {
     const io = `${l.tokens_in ?? 0}→${l.tokens_out ?? 0}`.padEnd(11);
     const c = `$${(l.cost ?? 0).toFixed(5)}`.padEnd(9);
     const st = l.success ? (l.cached ? "cached" : "ok") : "FAIL";
+    // What kind of call this was, which is the one thing no other column says:
+    // a turn, a compaction summary and a recall embedding all look alike here.
+    // Blank for rows written before the worker started labelling them.
+    const call = `${l.metadata?.call ?? ""}`.padEnd(9);
     out(
-      `${hhmmss(Date.parse(l.created_at))}  ${l.id}  ${(l.model ?? "?").padEnd(24)} ${io} ${c} ${`${l.duration ?? "?"}ms`.padEnd(8)} ${st}`
+      `${hhmmss(Date.parse(l.created_at))}  ${l.id}  ${(l.model ?? "?").padEnd(24)} ${call} ${io} ${c} ${`${l.duration ?? "?"}ms`.padEnd(8)} ${st}`
     );
   }
   // `total` is authoritative now, so this can say what is actually missing
@@ -523,6 +546,12 @@ async function cmdAiDetail(gw, id, flags) {
   out(
     `${m.created_at ?? "?"} · ${m.model ?? "?"} (${m.provider ?? "?"}) · ${m.tokens_in ?? 0}→${m.tokens_out ?? 0} tok · $${(m.cost ?? 0).toFixed(5)} · ${m.duration ?? "?"}ms · ${st}`
   );
+
+  // The whole bag, not a chosen few: five entries is the cap, so printing them
+  // all costs one line and there is nothing to leave out.
+  const metaEntries = Object.entries(m.metadata ?? {});
+  if (metaEntries.length > 0)
+    out(metaEntries.map(([k, v]) => `${k}=${v}`).join(" · "));
 
   out(rule);
   const msgs = reqBody.messages;

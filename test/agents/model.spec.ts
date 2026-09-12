@@ -1,0 +1,161 @@
+import { describe, it, expect, vi, afterEach } from "vitest";
+import { env } from "cloudflare:workers";
+import { embedMany, generateText } from "ai";
+import {
+  chatModel,
+  embeddingModel,
+  CHAT_CALL_OPTIONS,
+  type GatewayCallMetadata
+} from "@/agents/model";
+import {
+  AI_GATEWAY_ID,
+  CHAT_FALLBACK_MODEL_ID,
+  CHAT_MODEL_ID,
+  EMBED_MODEL_ID
+} from "@/config";
+
+/**
+ * What reaches `env.AI.run`, which is the only thing AI Gateway ever sees.
+ *
+ * Asserted at the binding rather than on the model object because the provider
+ * resolves the gateway as `this.config.gateway ?? gateway` — construction-time
+ * wins over per-model settings. A `gateway` set on `createWorkersAI` would make
+ * every metadata object below dead code while every one of these models still
+ * looked correctly configured, which is precisely how `AiGatewayLog.metadata`
+ * stayed empty. Only the third argument of `run` tells the truth.
+ */
+
+type RunOptions = { gateway?: GatewayOptions };
+
+function stubRun(impl?: (model: string) => unknown) {
+  return vi
+    .spyOn(env.AI, "run")
+    .mockImplementation((async (model: string) =>
+      impl ? impl(model) : { response: "ok" }) as never);
+}
+
+/** The gateway options the `n`th binding call ran under. */
+function gatewayOf(
+  run: ReturnType<typeof stubRun>,
+  n = 0
+): GatewayOptions | undefined {
+  return (run.mock.calls[n]?.[2] as RunOptions | undefined)?.gateway;
+}
+
+const fullTurn: GatewayCallMetadata = {
+  call: "turn",
+  tenant: "admin",
+  workspaceId: 7,
+  contextId: "C123:1700000000.0001",
+  user: "U123"
+};
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
+
+describe("the gateway identity a model call carries", () => {
+  it("labels a turn with the thread, the tenant and the workspace", async () => {
+    const run = stubRun();
+
+    await generateText({
+      model: chatModel(fullTurn),
+      prompt: "hi",
+      ...CHAT_CALL_OPTIONS
+    });
+
+    expect(run.mock.calls[0]?.[0]).toBe(CHAT_MODEL_ID);
+    expect(gatewayOf(run)).toEqual({
+      id: AI_GATEWAY_ID,
+      metadata: fullTurn
+    });
+  });
+
+  it("spends no more than the five entries AI Gateway accepts", async () => {
+    // The cap is the gateway's, not ours, and it rejects rather than truncates.
+    // A sixth field added to `GatewayCallMetadata` types fine and compiles fine
+    // and breaks every model call in production; this is the only thing in the
+    // way of that.
+    const run = stubRun();
+
+    await generateText({
+      model: chatModel(fullTurn),
+      prompt: "hi",
+      ...CHAT_CALL_OPTIONS
+    });
+
+    expect(
+      Object.keys(gatewayOf(run)?.metadata ?? {}).length
+    ).toBeLessThanOrEqual(5);
+  });
+
+  it("omits what a call has no answer for rather than sending it empty", async () => {
+    // The onboarding concierge runs per user, so it has no workspace — and a
+    // `workspaceId: undefined` entry would spend one of five saying nothing.
+    const run = stubRun();
+
+    await generateText({
+      model: chatModel({ call: "summarize", tenant: "onboarding" }),
+      prompt: "summarize this",
+      ...CHAT_CALL_OPTIONS
+    });
+
+    expect(gatewayOf(run)?.metadata).toEqual({
+      call: "summarize",
+      tenant: "onboarding"
+    });
+  });
+
+  it("carries the same identity when the fallback model serves the call", async () => {
+    // A call that failed over is still the same turn's cost. If only the primary
+    // were labelled, every fallback would land in the gateway log unattributed —
+    // and those are the rows most worth finding.
+    const run = stubRun((model) => {
+      if (model === CHAT_MODEL_ID)
+        throw new Error("primary is out of capacity");
+      return { response: "from the fallback" };
+    });
+
+    await generateText({
+      model: chatModel(fullTurn),
+      prompt: "hi",
+      ...CHAT_CALL_OPTIONS,
+      maxRetries: 0
+    });
+
+    expect(run.mock.calls[1]?.[0]).toBe(CHAT_FALLBACK_MODEL_ID);
+    expect(gatewayOf(run, 1)).toEqual({
+      id: AI_GATEWAY_ID,
+      metadata: fullTurn
+    });
+  });
+
+  it("still routes recall's embeddings through the gateway", async () => {
+    // The regression this exists for. Dropping the top-level `gateway` from
+    // `createWorkersAI` is what made per-call metadata reachable, and it also
+    // silently unhooks any model that does not carry one of its own. Embeddings
+    // would simply stop appearing in the gateway log, with nothing failing.
+    const run = stubRun(() => ({ data: [Array<number>(1024).fill(0.1)] }));
+
+    await embedMany({
+      model: embeddingModel(),
+      values: ["a message worth remembering"],
+      telemetry: { isEnabled: false }
+    });
+
+    expect(run.mock.calls[0]?.[0]).toBe(EMBED_MODEL_ID);
+    expect(gatewayOf(run)).toEqual({
+      id: AI_GATEWAY_ID,
+      metadata: { call: "embed" }
+    });
+  });
+
+  it("lets a test seam replace the model without reaching the binding at all", async () => {
+    const run = stubRun();
+
+    const model = chatModel(fullTurn, { model: "some-other-model" });
+
+    expect(model).toBe("some-other-model");
+    expect(run).not.toHaveBeenCalled();
+  });
+});
