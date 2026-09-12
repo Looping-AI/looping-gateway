@@ -20,7 +20,7 @@ import {
   RetryError,
   ToolChoiceViolationError
 } from "ai";
-import { CHAT_CALL_OPTIONS } from "@/agents/model";
+import { CHAT_CALL_OPTIONS, type GatewayCallMetadata } from "@/agents/model";
 import { buildMessage, textOf, textPart } from "@/a2a/parts";
 import { buildHitlRequestParts, type HitlRequest } from "@/a2a/hitl";
 import type { AgentTurnMetadata } from "@/agents/dispatch";
@@ -195,6 +195,28 @@ function workspaceIdOf(
   if ("adminWorkspaceId" in metadata) return metadata.adminWorkspaceId;
   if ("workspaceId" in metadata) return metadata.workspaceId;
   return undefined;
+}
+
+/**
+ * What an executor labels a turn's model calls with, for the AI Gateway log.
+ *
+ * Here rather than in each executor because it reads the same wire metadata this
+ * module already reads, off the same request — and because an executor has to
+ * build its model *before* `executeAgentTurn` runs, which is before its own
+ * `prepare` has narrowed anything.
+ */
+export function turnGatewayMetadata(
+  requestContext: RequestContext
+): GatewayCallMetadata {
+  const metadata = (requestContext.userMessage.metadata ??
+    {}) as Partial<AgentTurnMetadata>;
+  return {
+    call: "turn",
+    tenant: metadata.tenant,
+    workspaceId: workspaceIdOf(metadata),
+    contextId: requestContext.contextId,
+    user: metadata.user?.slackUserId
+  };
 }
 
 /** What an agent assembles for a single turn (inside the protected body). */

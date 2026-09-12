@@ -4,14 +4,13 @@ import type {
   RequestContext
 } from "@a2a-js/sdk/server";
 import { COMPACT_AFTER_TOKENS, COMPACT_TAIL_TOKENS } from "@/config";
-import type { LanguageModel } from "ai";
 import { chatModel, type ModelOverrides } from "@/agents/model";
 import {
   buildAgentSession,
   type SessionHost,
   type SessionLike
 } from "@/agents/shared/session";
-import { executeAgentTurn } from "@/agents/shared/loop";
+import { executeAgentTurn, turnGatewayMetadata } from "@/agents/shared/loop";
 import type { OpenCallStore } from "@/agents/shared/open-call";
 import { isCancelRequested } from "@/db/models/agent-tasks";
 import { archiveMessages } from "@/agents/shared/recall";
@@ -67,23 +66,29 @@ export interface AdminExecutorOptions extends ModelOverrides {
  */
 export class AdminAgentExecutor implements AgentExecutor {
   private session?: SessionLike;
-  private readonly model: LanguageModel;
 
   constructor(
     private readonly agent: SessionHost,
     private readonly options: AdminExecutorOptions = {}
-  ) {
-    this.model = chatModel(this.options);
-  }
+  ) {}
 
   /** Lazily build the one Session for this DO; `wsId` is fixed per instance. */
   private getSession(wsId: number): SessionLike {
     if (!this.session) {
       // Must match `instanceNameFor` in dispatch.ts (the DO instance key).
       const namespace = `admin:${wsId}`;
+      // The summarizer's own gateway identity. It is a real cost against the same
+      // gateway as the turn, and one that no Slack thread asked for — so it is
+      // labelled `summarize` rather than left indistinguishable from a turn. Its
+      // metadata is fixed per instance, which is why it can be built with the
+      // session and the turn's cannot.
+      const summarizer = chatModel(
+        { call: "summarize", tenant: "admin", workspaceId: wsId },
+        this.options
+      );
       this.session = this.options.createSession
         ? this.options.createSession(wsId)
-        : buildAgentSession(this.agent, this.model, {
+        : buildAgentSession(this.agent, summarizer, {
             soul: () => adminSoul(wsId),
             memoryDescription:
               "Durable facts about this workspace — who the admins are, conventions, and decisions. Keep it concise.",
@@ -101,7 +106,9 @@ export class AdminAgentExecutor implements AgentExecutor {
     eventBus: ExecutionEventBus
   ): Promise<void> => {
     await executeAgentTurn(requestContext, eventBus, {
-      model: this.model,
+      // Per turn, not per instance: the model carries this turn's identity into
+      // the AI Gateway log, and that is the only channel the gateway has for it.
+      model: chatModel(turnGatewayMetadata(requestContext), this.options),
       // The dispatch token is the A2A messageId, and the gatekeeper records a 🛑
       // against that same token — so the running turn can read its own stop flag.
       isCanceled: isCancelRequested,
